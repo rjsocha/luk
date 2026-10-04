@@ -4,6 +4,7 @@ package cliflags
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -12,7 +13,12 @@ import (
 
 // Guard wraps every non-repeatable flag of root and its subcommands, and sets
 // the flag error func of root so the guard messages are reported verbatim.
+// A shell completion request is left unguarded: cobra parses the flags of
+// the completed command line twice, and a completion runs nothing.
 func Guard(root *cobra.Command, wrap func(error) error) {
+	if len(os.Args) > 1 && strings.HasPrefix(os.Args[1], cobra.ShellCompRequestCmd) {
+		return
+	}
 	g := &state{}
 	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {

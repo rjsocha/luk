@@ -110,6 +110,7 @@ func acmeCmd(cfgPath *string) *cobra.Command {
 		},
 	}
 	renew.Flags().StringVar(&renewHost, "host", "", "certificate name")
+	completeFlags(renew, map[string]cobra.CompletionFunc{"host": completeACMEHost})
 	renew.Flags().DurationVar(&renewTimeout, "timeout", 2*time.Minute, "how long to wait for the result")
 	renew.MarkFlagRequired("host")
 
@@ -155,6 +156,7 @@ func acmeCmd(cfgPath *string) *cobra.Command {
 	}
 	revoke.Flags().StringVar(&revokeHost, "host", "", "certificate name")
 	revoke.Flags().StringVar(&reason, "reason", "unspecified", "revocation reason")
+	completeFlags(revoke, map[string]cobra.CompletionFunc{"host": completeACMEHost, "reason": completeReason})
 	revoke.Flags().BoolVar(&yes, "yes", false, "do not ask for confirmation")
 	revoke.Flags().DurationVar(&revokeTimeout, "timeout", 2*time.Minute, "how long to wait for the new certificate")
 	revoke.MarkFlagRequired("host")

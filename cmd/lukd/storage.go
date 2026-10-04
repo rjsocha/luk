@@ -83,6 +83,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	ls.Flags().StringVar(&older, "older", "", "only the files received longer ago than this (e.g. 7d)")
 	ls.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	ls.MarkFlagRequired("storage")
+	completeFlags(ls, map[string]cobra.CompletionFunc{"storage": completeStorage, "owner": completeOwner, "older": completeNone})
 
 	var rmStorage string
 	var names []string
@@ -108,6 +109,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	rm.Flags().BoolVar(&yes, "yes", false, "do not ask for confirmation")
 	rm.MarkFlagRequired("storage")
 	rm.MarkFlagRequired("name")
+	completeFlags(rm, map[string]cobra.CompletionFunc{"storage": completeStorage, "name": completeStored})
 
 	cmd.AddCommand(ls, rm)
 	return cmd

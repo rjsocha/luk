@@ -68,6 +68,7 @@ func quotaCmd(cfgPath *string) *cobra.Command {
 	}
 	ls.Flags().StringVar(&lsEndpoint, "endpoint", "", "only this endpoint")
 	ls.Flags().StringVar(&margin, "margin", "50%", "margin of SUGGEST over the largest day and upload")
+	completeFlags(ls, map[string]cobra.CompletionFunc{"endpoint": completeEndpoint, "margin": completeNone})
 
 	var exEndpoint string
 	explain := &cobra.Command{
@@ -104,6 +105,7 @@ func quotaCmd(cfgPath *string) *cobra.Command {
 		},
 	}
 	explain.Flags().StringVar(&exEndpoint, "endpoint", "", "only this endpoint")
+	completeFlags(explain, map[string]cobra.CompletionFunc{"endpoint": completeEndpoint})
 
 	cmd.AddCommand(ls, explain)
 	return cmd

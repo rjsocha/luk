@@ -84,6 +84,7 @@ func queueCmd(cfgPath *string) *cobra.Command {
 	}
 	rm.Flags().StringVar(&rmID, "id", "", "entry id")
 	rm.MarkFlagRequired("id")
+	completeFlags(rm, map[string]cobra.CompletionFunc{"id": completeFailedID})
 
 	var retryID string
 	var retryPipes []string
@@ -110,6 +111,7 @@ func queueCmd(cfgPath *string) *cobra.Command {
 	retry.Flags().StringVar(&retryID, "id", "", "entry id")
 	retry.Flags().StringArrayVar(&retryPipes, "pipeline", nil, "failed pipeline to run again (repeatable; default: all)")
 	retry.MarkFlagRequired("id")
+	completeFlags(retry, map[string]cobra.CompletionFunc{"id": completeFailedID, "pipeline": completeFailedPipeline})
 
 	cmd.AddCommand(ls, rm, retry)
 	return cmd

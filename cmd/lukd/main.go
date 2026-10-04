@@ -145,6 +145,7 @@ func rootCmd() *cobra.Command {
 	}
 	checkCmd.Flags().BoolVar(&noRunning, "no-running", false, "do not compare with the settings of the running lukd")
 	checkCmd.Flags().StringVar(&serviceUser, "user", "luk", "service user that must read the configuration (checked when run as root)")
+	completeFlags(checkCmd, map[string]cobra.CompletionFunc{"user": completeNone})
 	root.AddCommand(checkCmd)
 
 	tlsCmd := &cobra.Command{Use: "tls", Short: "TLS certificates and their pins"}

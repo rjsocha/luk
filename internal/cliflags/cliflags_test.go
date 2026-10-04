@@ -1,6 +1,7 @@
 package cliflags
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -55,5 +56,17 @@ func TestAllowDash(t *testing.T) {
 		if err := cmd.Execute(); (err == nil) != c.ok {
 			t.Errorf("%v: %v", c.args, err)
 		}
+	}
+}
+
+// A completion request is not guarded: cobra parses its flags twice.
+func TestGuardOffForCompletion(t *testing.T) {
+	saved := os.Args
+	os.Args = []string{"x", "__complete"}
+	defer func() { os.Args = saved }()
+	root, _ := cmdFor()
+	root.SetArgs(strings.Fields("s --file a --file a"))
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
 	}
 }
