@@ -39,7 +39,7 @@ func newSecretFixture(t *testing.T, mod func(string) string) *secretFixture {
 	f := newFixtureWith(t, func(s string) string {
 		s = strings.NewReplacer(
 			`respond: url, storage: drop}`,
-			`respond: url, storage: drop, secret: {path: `+vol+`/queue, storage: volatile}, link: {remove: true, ttl: true, list: true}}`,
+			`respond: url, storage: drop, secret: {allow: ['*'], path: `+vol+`/queue, storage: volatile}, link: {remove: ['*'], ttl: ['*'], list: ['*']}}`,
 			"  drop: {endpoint: [drop], steps: [{store: drop}]}\n",
 			"  drop: {endpoint: [drop], steps: [{store: drop}]}\n  mark: {endpoint: [drop], steps: [{run: "+prog+"}]}\n",
 			"storage:\n",
@@ -247,7 +247,7 @@ func TestSecretDedup(t *testing.T) {
 func TestSecretLinks(t *testing.T) {
 	// A replace needs pipelines of store steps only: no mark pipeline.
 	f := newSecretFixture(t, func(s string) string {
-		s = strings.Replace(s, "link: {remove: true, ttl: true, list: true}", "link: {remove: true, ttl: true, replace: true, list: true}", 1)
+		s = strings.Replace(s, "link: {remove: ['*'], ttl: ['*'], list: ['*']}", "link: {remove: ['*'], ttl: ['*'], replace: ['*'], list: ['*']}", 1)
 		start := strings.Index(s, "  mark: ")
 		end := start + strings.Index(s[start:], "\n") + 1
 		return s[:start] + s[end:]

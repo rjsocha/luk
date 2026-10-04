@@ -59,7 +59,8 @@ func (s *Server) serveEndpoints(w http.ResponseWriter, r *http.Request, sn *snap
 }
 
 // endpointList is the listing of the endpoints of l that admit id, by
-// name, their URLs on host, with the quota of id on each from book.
+// name, their URLs on host, the capabilities granted to id and the quota
+// of id on each from book.
 func endpointList(cfg *config.Config, l *listener, host string, id *wire.Identity, book *quota.Book) *wire.EndpointList {
 	scheme := "http"
 	if l.cfg.TLS != nil {
@@ -75,13 +76,16 @@ func endpointList(cfg *config.Config, l *listener, host string, id *wire.Identit
 		}
 		info := wire.EndpointInfo{
 			Name: ep.Name, Path: ep.Endpoint, URL: scheme + "://" + host + ep.Endpoint,
-			Respond: ep.Respond, Secret: ep.Secret != nil, Pretty: ep.Pretty != nil,
-			Private: wire.PrivateModes{Owner: ep.Private.Owner, Any: ep.Private.Any},
-			Link:    wire.LinkActions{Remove: ep.Link.Remove, TTL: ep.Link.TTL, Replace: ep.Link.Replace, List: ep.Link.List},
+			Respond: ep.Respond,
+			Secret:  ep.Secret != nil && auth.Allowed(id, ep.Secret.Allow),
+			Pretty:  ep.Pretty != nil && auth.Allowed(id, ep.Pretty.Allow),
+			Private: wire.PrivateModes{Owner: auth.Allowed(id, ep.Private.Owner), Any: auth.Allowed(id, ep.Private.Any)},
+			Link: wire.LinkActions{Remove: auth.Allowed(id, ep.Link.Remove), TTL: auth.Allowed(id, ep.Link.TTL),
+				Replace: auth.Allowed(id, ep.Link.Replace), List: auth.Allowed(id, ep.Link.List)},
 		}
 		if ep.Respond == "url" {
 			info.TTL = ttlPolicy(cfg.Storage[ep.Storage])
-			if ep.Secret != nil {
+			if info.Secret {
 				if st := ttlPolicy(cfg.Storage[ep.Secret.Storage]); st != nil && (info.TTL == nil || *st != *info.TTL) {
 					info.SecretTTL = st
 				}

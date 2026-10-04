@@ -66,7 +66,7 @@ listen:
 auth:
   keys: [{name: robert.socha, key: "%s"}, {name: other, key: "%s"}]
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha, other], respond: url, storage: drop, private: {owner: true, any: true}, link: {remove: true, list: true}}
+  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha, other], respond: url, storage: drop, private: {owner: ['*'], any: ['*']}, link: {remove: ['*'], list: ['*']}}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:

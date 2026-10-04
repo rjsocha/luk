@@ -972,13 +972,13 @@ func TestPretty(t *testing.T) {
 		return strings.Replace(good, drop, drop+"    pretty: "+pretty+"\n", 1)
 	}
 	for pretty, want := range map[string]int{
-		"{}":          64,
-		"{bits: 0}":   64,
-		"{bits: 64}":  64,
-		"{bits: 65}":  80,
-		"{bits: 100}": 112,
-		"{bits: 113}": 128,
-		"{bits: 128}": 128,
+		"{allow: ['*']}":            64,
+		"{bits: 0, allow: ['*']}":   64,
+		"{bits: 64, allow: ['*']}":  64,
+		"{bits: 65, allow: ['*']}":  80,
+		"{bits: 100, allow: ['*']}": 112,
+		"{bits: 113, allow: ['*']}": 128,
+		"{bits: 128, allow: ['*']}": 128,
 	} {
 		c, err := Parse([]byte(with(pretty)))
 		if err != nil || c.Endpoint["drop"].Pretty == nil || c.Endpoint["drop"].Pretty.Bits != want {
@@ -986,27 +986,27 @@ func TestPretty(t *testing.T) {
 		}
 	}
 	for pretty, msg := range map[string]string{
-		"{bits: 63}":  "endpoint drop: pretty.bits must be 64 to 128",
-		"{bits: 16}":  "endpoint drop: pretty.bits must be 64 to 128",
-		"{bits: -1}":  "endpoint drop: pretty.bits must be 64 to 128",
-		"{bits: 129}": "endpoint drop: pretty.bits must be 64 to 128",
-		"{size: 64}":  "field size not found",
+		"{bits: 63, allow: ['*']}":  "endpoint drop: pretty.bits must be 64 to 128",
+		"{bits: 16, allow: ['*']}":  "endpoint drop: pretty.bits must be 64 to 128",
+		"{bits: -1, allow: ['*']}":  "endpoint drop: pretty.bits must be 64 to 128",
+		"{bits: 129, allow: ['*']}": "endpoint drop: pretty.bits must be 64 to 128",
+		"{size: 64}":                "field size not found",
 	} {
 		if _, err := Parse([]byte(with(pretty))); err == nil || !strings.Contains(err.Error(), msg) {
 			t.Errorf("%s: %v", pretty, err)
 		}
 	}
-	src := strings.Replace(good, "    limits: {body: {size: 50G}}\n", "    limits: {body: {size: 50G}}\n    pretty: {}\n", 1)
+	src := strings.Replace(good, "    limits: {body: {size: 50G}}\n", "    limits: {body: {size: 50G}}\n    pretty: {allow: ['*']}\n", 1)
 	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "endpoint backup: pretty needs respond url") {
 		t.Errorf("accept: %v", err)
 	}
 	for _, path := range []string{`{{ .Id }}`, `{{ if false }}{{ .Random }}{{ end }}{{ .Id }}`} {
-		src := strings.Replace(with("{}"), `path: "{{ .Random }}", expose: drop`, `path: "`+path+`", expose: drop`, 1)
+		src := strings.Replace(with("{allow: ['*']}"), `path: "{{ .Random }}", expose: drop`, `path: "`+path+`", expose: drop`, 1)
 		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "endpoint drop: pretty needs a path of storage drop that uses .Random") {
 			t.Errorf("%s: %v", path, err)
 		}
 	}
-	src = strings.Replace(with("{}"), `path: "{{ .Random }}", expose: drop`, `path: "{{ .Year }}{{ .Month }}{{ .Day }}/{{ .Random }}.bin", expose: drop`, 1)
+	src = strings.Replace(with("{allow: ['*']}"), `path: "{{ .Random }}", expose: drop`, `path: "{{ .Year }}{{ .Month }}{{ .Day }}/{{ .Random }}.bin", expose: drop`, 1)
 	if _, err := Parse([]byte(src)); err != nil {
 		t.Errorf("nested .Random: %v", err)
 	}
@@ -1611,37 +1611,77 @@ func TestACMEEAB(t *testing.T) {
 }
 
 func TestEndpointLink(t *testing.T) {
-	src := strings.Replace(good, "    respond: url\n    storage: drop", "    respond: url\n    storage: drop\n    link: {remove: true, ttl: true}", 1)
+	src := strings.Replace(good, "    respond: url\n    storage: drop", "    respond: url\n    storage: drop\n    link: {remove: ['*'], ttl: ['*']}", 1)
 	c, err := Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
 	l := c.Endpoint["drop"].Link
-	if !l.Allows(wire.LinkRemove) || !l.Allows(wire.LinkTTL) || l.Allows(wire.LinkReplace) || l.Allows(wire.LinkList) || l.Allows("rename") {
+	if len(l.Of(wire.LinkRemove)) != 1 || len(l.Of(wire.LinkTTL)) != 1 || l.Of(wire.LinkReplace) != nil || l.Of(wire.LinkList) != nil || l.Of("rename") != nil {
 		t.Fatalf("%+v", l)
 	}
-	if c, err := Parse([]byte(strings.Replace(src, "ttl: true}", "ttl: true, list: true}", 1))); err != nil || !c.Endpoint["drop"].Link.Allows(wire.LinkList) {
+	if c, err := Parse([]byte(strings.Replace(src, "ttl: ['*']}", "ttl: ['*'], list: [robert.socha, 'hosts:*.vm']}", 1))); err != nil || !slices.Equal(c.Endpoint["drop"].Link.Of(wire.LinkList), []string{"robert.socha", "hosts:*.vm"}) {
 		t.Fatalf("list: %v", err)
 	}
-	if _, err := Parse([]byte(strings.Replace(good, "    limits: {body: {size: 50G}}\n", "    limits: {body: {size: 50G}}\n    link: {list: true}\n", 1))); err == nil {
+	if _, err := Parse([]byte(strings.Replace(good, "    limits: {body: {size: 50G}}\n", "    limits: {body: {size: 50G}}\n    link: {list: ['*']}\n", 1))); err == nil {
 		t.Fatal("list on accept accepted")
 	}
-	src = strings.Replace(good, "    limits: {body: {size: 50G}}\n", "    limits: {body: {size: 50G}}\n    link: {replace: true}\n", 1)
+	src = strings.Replace(good, "    limits: {body: {size: 50G}}\n", "    limits: {body: {size: 50G}}\n    link: {replace: ['*']}\n", 1)
 	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "endpoint backup: link needs respond url") {
 		t.Fatalf("accept: %v", err)
 	}
-	if _, err := Parse([]byte(strings.Replace(src, "link: {replace: true}", "link: {}", 1))); err != nil {
+	if _, err := Parse([]byte(strings.Replace(src, "link: {replace: ['*']}", "link: {}", 1))); err != nil {
 		t.Fatalf("empty link: %v", err)
 	}
-	if _, err := Parse([]byte(strings.Replace(src, "link: {replace: true}", "link: {rename: true}", 1))); err == nil {
+	if _, err := Parse([]byte(strings.Replace(src, "link: {replace: ['*']}", "link: {rename: ['*']}", 1))); err == nil {
 		t.Fatal("unknown link key accepted")
+	}
+	if c, err := Parse([]byte(strings.Replace(src, "link: {replace: ['*']}", "link: {replace: []}", 1))); err != nil || c.Endpoint["backup"].Link.Offered() {
+		t.Fatalf("empty list: %v", err)
+	}
+}
+
+// TestCapabilityLists checks the lists of identities of the endpoint
+// capabilities: a boolean is refused naming the key, the entries are
+// checked like allow entries, secret.allow and pretty.allow are required.
+func TestCapabilityLists(t *testing.T) {
+	at := "    respond: url\n    storage: drop\n"
+	cases := map[string][2]string{
+		"link bool":                   {"    link: {replace: true}\n", `link.replace: a list of identities, e.g. ["*"]`},
+		"link scalar":                 {"    link: {list: robert.socha}\n", `link.list: a list of identities, e.g. ["*"]`},
+		"private bool":                {"    private: {owner: true}\n", `private.owner: a list of identities, e.g. ["*"]`},
+		"secret allow bool":           {"    secret: {path: /run/luk/volatile/queue, storage: volatile, allow: true}\n", `secret.allow: a list of identities, e.g. ["*"]`},
+		"secret unknown key":          {"    secret: {path: /run/luk/volatile/queue, storage: volatile, allow: [], extra: 1}\n", "field extra not found in secret"},
+		"pretty allow bool":           {"    pretty: {allow: true}\n", `pretty.allow: a list of identities, e.g. ["*"]`},
+		"link unknown key":            {"    link: {list: [nobody]}\n", `endpoint drop: link.list: allow "nobody" is not a known key`},
+		"link unknown ca":             {"    link: {remove: ['nope:*']}\n", `endpoint drop: link.remove: allow "nope:*" names an unknown CA`},
+		"pretty bad pattern":          {"    pretty: {allow: ['hosts:[']}\n", `endpoint drop: pretty.allow: allow "hosts:[" has a bad pattern`},
+		"pretty without allow":        {"    pretty: {bits: 64}\n", `endpoint drop: pretty.allow is required: a list of identities, e.g. ["*"]`},
+		"secret without allow":        {"    secret: {path: /run/luk/volatile/queue, storage: volatile}\n", `endpoint drop: secret.allow is required`},
+		"secret unknown key in allow": {"    secret: {path: /run/luk/volatile/queue, storage: volatile, allow: [nobody]}\n", `endpoint drop: secret.allow: allow "nobody" is not a known key`},
+	}
+	for name, tc := range cases {
+		src := strings.Replace(secretGood, "    secret: {allow: ['*'], path: /run/luk/volatile/queue, storage: volatile}\n", "", 1)
+		src = strings.Replace(src, at, at+tc[0], 1)
+		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), tc[1]) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	src := strings.Replace(secretGood, "secret: {allow: ['*'],", "secret: {allow: [],", 1)
+	src = strings.Replace(src, at, at+"    pretty: {allow: [robert.socha]}\n    private: {}\n", 1)
+	c, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := c.Endpoint["drop"]; e.Secret.Allow == nil || len(e.Secret.Allow) != 0 || !slices.Equal(e.Pretty.Allow, []string{"robert.socha"}) || e.Private.Offered() {
+		t.Fatalf("%+v %+v %+v", e.Secret, e.Pretty, e.Private)
 	}
 }
 
 // privateGood is good with the protect expose secure of the drop storage
 // and an endpoint drop accepting both private modes.
 var privateGood = strings.NewReplacer(
-	"    respond: url\n    storage: drop\n", "    respond: url\n    storage: drop\n    private: {owner: true, any: true}\n",
+	"    respond: url\n    storage: drop\n", "    respond: url\n    storage: drop\n    private: {owner: ['*'], any: ['*']}\n",
 	"path: \"{{ .Random }}\", expose: drop}", "path: \"{{ .Random }}\", expose: drop, protect: secure}",
 	"    path: /d/\n", "    path: /d/\n  secure:\n    listen: main\n    path: /s/\n    auth: {ssh: {allow: [\"*\", robert.socha, \"hosts:*.vm\"]}}\n",
 ).Replace(good)
@@ -1651,10 +1691,16 @@ func TestPrivateConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e := c.Endpoint["drop"]; !e.Private.Owner || !e.Private.Any || !e.Private.Accepts(wire.AccessAny) || !e.Private.Accepts("") {
+	if e := c.Endpoint["drop"]; !e.Private.Offered() {
 		t.Fatalf("private %+v", e.Private)
+	} else if w, ok := e.Private.Of(wire.AccessAny); !ok || len(w) != 1 {
+		t.Fatalf("private any %v %v", w, ok)
+	} else if w, ok := e.Private.Of(""); !ok || w != nil {
+		t.Fatalf("public %v %v", w, ok)
+	} else if _, ok := e.Private.Of("other"); ok {
+		t.Fatal("unknown access mode")
 	}
-	if c.Endpoint["backup"].Private.Accepts(wire.AccessPrivate) {
+	if c.Endpoint["backup"].Private.Offered() {
 		t.Fatal("backup accepts private uploads")
 	}
 	base, l, ok := c.ProtectURL("drop")
@@ -1668,7 +1714,7 @@ func TestPrivateConfig(t *testing.T) {
 		t.Fatalf("* in an endpoint allow: %v", err)
 	}
 	cases := map[string][3]string{
-		"private without respond url": {"    allow: [robert.socha, \"hosts:*\"]\n", "    allow: [robert.socha, \"hosts:*\"]\n    private: {owner: true}\n", "private needs respond url"},
+		"private without respond url": {"    allow: [robert.socha, \"hosts:*\"]\n", "    allow: [robert.socha, \"hosts:*\"]\n    private: {owner: ['*']}\n", "private needs respond url"},
 		"private without protect":     {", protect: secure}", "}", "private needs storage drop to have protect"},
 		"protect unknown":             {"protect: secure}", "protect: nope}", "unknown protect expose"},
 		"protect without auth.ssh":    {"    auth: {ssh: {allow: [\"*\", robert.socha, \"hosts:*.vm\"]}}\n", "", "protect expose secure needs auth.ssh"},
@@ -1731,7 +1777,7 @@ func TestQueuePathOverlaps(t *testing.T) {
 // secretGood is good with the reveal uploads of endpoint drop going to the
 // storage volatile, exposed nested in the expose of drop.
 var secretGood = strings.NewReplacer(
-	"    respond: url\n    storage: drop\n", "    respond: url\n    storage: drop\n    secret: {path: /run/luk/volatile/queue, storage: volatile}\n",
+	"    respond: url\n    storage: drop\n", "    respond: url\n    storage: drop\n    secret: {allow: ['*'], path: /run/luk/volatile/queue, storage: volatile}\n",
 	"storage:\n", "storage:\n  volatile: {type: local, base: /run/luk/volatile/storage, path: \"{{ .Random }}\", expose: volatile, ttl: {user: true}}\n",
 ).Replace(good) + "  volatile:\n    listen: main\n    path: /d/volatile/\n"
 
@@ -1768,7 +1814,7 @@ func TestEndpointSecret(t *testing.T) {
 		"is a queue":     {"path: /run/luk/volatile/queue", "path: /queue/backup", "secret.path /queue/backup overlaps the queue /queue/backup of endpoint backup"},
 		"own queue":      {"path: /run/luk/volatile/queue", "path: /queue/drop/s", "overlaps the queue /queue/drop of endpoint drop"},
 		"work dir":       {"path: /run/luk/volatile/queue", "path: /var/lib/luk/work/s", "overlaps the work directory"},
-		"pretty":         {"    secret:", "    pretty: {}\n    secret:", "pretty needs a path of secret storage volatile that uses .Random"},
+		"pretty":         {"    secret:", "    pretty: {allow: ['*']}\n    secret:", "pretty needs a path of secret storage volatile that uses .Random"},
 	}
 	for name, r := range cases {
 		src := secretGood
@@ -1786,7 +1832,7 @@ func TestEndpointSecret(t *testing.T) {
 			t.Errorf("%s: %v, want an error with %q", name, err, r[2])
 		}
 	}
-	two := strings.Replace(secretGood, "    limits: {body: {size: 50G}}\n", "    limits: {body: {size: 50G}}\n    respond: url\n    storage: archive2\n    secret: {path: /run/luk/volatile/queue/x, storage: volatile}\n", 1)
+	two := strings.Replace(secretGood, "    limits: {body: {size: 50G}}\n", "    limits: {body: {size: 50G}}\n    respond: url\n    storage: archive2\n    secret: {allow: ['*'], path: /run/luk/volatile/queue/x, storage: volatile}\n", 1)
 	two = strings.Replace(two, "storage:\n", "storage:\n  archive2: {type: local, base: /storage/archive2, path: x, expose: a2}\n", 1) + "  a2:\n    listen: plain\n    path: /a2/\n"
 	two = strings.Replace(two, "    steps:\n      - store: drop\n", "    steps:\n      - store: drop\n  a2:\n    endpoint: [backup]\n    steps:\n      - store: archive2\n", 1)
 	if _, err := Parse([]byte(two)); err == nil || !strings.Contains(err.Error(), "overlaps secret.path /run/luk/volatile/queue of endpoint drop") {
@@ -1816,7 +1862,7 @@ func TestSecretReserve(t *testing.T) {
 // link.replace needs every pipeline of the endpoint to consist of store
 // steps only; the error names the pipeline and the step.
 func TestLinkReplaceStoreStepsOnly(t *testing.T) {
-	src := strings.Replace(good, "    respond: url\n    storage: drop", "    respond: url\n    storage: drop\n    link: {replace: true}", 1)
+	src := strings.Replace(good, "    respond: url\n    storage: drop", "    respond: url\n    storage: drop\n    link: {replace: ['*']}", 1)
 	if _, err := Parse([]byte(src)); err != nil {
 		t.Fatalf("store only: %v", err)
 	}

@@ -110,18 +110,23 @@ endpoint:
     limits:
       body:
         size: 2G
-    # pretty:                   # allow luk send --pretty-url (proquint .Random)
+    # Capabilities are lists of identities (allow syntax, "*" = every
+    # identity lukd knows) granted on top of allow; absent or [] = no one.
+    # pretty:                   # luk send --pretty-url (proquint .Random)
+    #   allow: ["*"]            # required: who may ask for it
     #   bits: 64                # 64 to 128, rounded up to a multiple of 16; default 64
     link:                       # what the owner may do with a link (luk link); respond url only
-      remove: true              # luk link --rm
-      ttl: true                 # luk link --ttl (the storage needs ttl.user)
-      replace: false            # luk link --file/--stdin, for uploads sent with --mutable
-      list: true                # luk link ls: the links of the caller on this endpoint
+      remove: ["*"]             # luk link --rm
+      ttl: ["*"]                # luk link --ttl (the storage needs ttl.user)
+      replace: []               # luk link --file/--stdin, and luk send --mutable
+      list: ["*"]               # luk link ls: the links of the caller on this endpoint
     # private:                  # private uploads; the storage needs protect
-    #   owner: true             # luk send --private: only the uploader downloads it
-    #   any: true               # luk send --private --any: every identity the protect expose allows
+    #   owner: ["*"]            # luk send --private: only the uploader downloads it
+    #   any: [robert.socha]     # luk send --private --any: every identity the protect expose allows
     # secret:                   # luk send --secret kept in RAM: its own queue and storage,
     #                           # no pipeline of the endpoint runs for it
+    #   allow: ["*"]            # required: whose --secret goes here; anyone else's is an
+    #                           # upload as to an endpoint without secret
     #   path: /run/luk/volatile/queue
     #   storage: volatile
     #   reserve: 16M            # free space kept on the tmpfs (default 16M), in place of limits.queue.reserve

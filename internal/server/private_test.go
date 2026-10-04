@@ -44,7 +44,7 @@ func newPrivateFixture(t *testing.T, mod func(string) string) *privateFixture {
 			`public: "https://lukd.vm:8443"}, secure: {addr: "127.0.0.1:443", host: [secure.vm], tls: {mode: self, cert: `+crt+`, key: `+key+`, host: secure.vm}}}`, 1)
 		s = strings.Replace(s, `keys: [{name: robert.socha, key: "`, `keys: [{name: other, key: "`+pubLine(other.PublicKey())+`"}, {name: robert.socha, key: "`, 1)
 		s = strings.Replace(s, `allow: [robert.socha], respond: url, storage: drop}`,
-			`allow: [robert.socha, other, "hosts:*"], respond: url, storage: drop, private: {owner: true, any: true}, link: {remove: true, list: true}}`, 1)
+			`allow: [robert.socha, other, "hosts:*"], respond: url, storage: drop, private: {owner: ['*'], any: ['*']}, link: {remove: ['*'], list: ['*']}}`, 1)
 		s = strings.Replace(s, `expose: drop}`, `expose: drop, protect: secure}`, 1)
 		s = strings.Replace(s, `drop: {listen: main, path: /d/}`, `drop: {listen: main, path: /d/}
   secure: {listen: secure, path: /, auth: {ssh: {allow: ["*"]}}}`, 1)
@@ -300,7 +300,7 @@ func TestPrivateGetOnce(t *testing.T) {
 
 func TestPrivateModes(t *testing.T) {
 	f := newPrivateFixture(t, func(s string) string {
-		return strings.Replace(s, `private: {owner: true, any: true}`, `private: {owner: true}`, 1)
+		return strings.Replace(s, `private: {owner: ['*'], any: ['*']}`, `private: {owner: ['*']}`, 1)
 	})
 	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Access: wire.AccessAny}, chunked: true})
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "private.any") {
@@ -309,7 +309,7 @@ func TestPrivateModes(t *testing.T) {
 	f.drop(t, f.user, wire.Meta{Access: wire.AccessPrivate}, "x")
 
 	g := newPrivateFixture(t, func(s string) string {
-		return strings.Replace(s, `, private: {owner: true, any: true}`, ``, 1)
+		return strings.Replace(s, `, private: {owner: ['*'], any: ['*']}`, ``, 1)
 	})
 	rec, _ = g.do(t, req{signer: g.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Access: wire.AccessPrivate}, chunked: true})
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "private.owner") {
@@ -338,7 +338,7 @@ func TestPrivateLinks(t *testing.T) {
 
 func TestPrivateReplaceKeepsAccess(t *testing.T) {
 	f := newPrivateFixture(t, func(s string) string {
-		s = strings.Replace(s, `link: {remove: true, list: true}`, `link: {replace: true}`, 1)
+		s = strings.Replace(s, `link: {remove: ['*'], list: ['*']}`, `link: {replace: ['*']}`, 1)
 		return strings.Replace(s, `drop: {endpoint: [drop], steps: [{store: drop}]}`, `drop: {endpoint: [drop], steps: [{store: [drop, archive]}]}`, 1)
 	})
 	link := f.drop(t, f.user, wire.Meta{File: "a.txt", Access: wire.AccessPrivate, Mutable: true}, "v1")

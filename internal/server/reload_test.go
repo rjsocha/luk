@@ -537,8 +537,8 @@ expose:
 		code   int
 		dashes int
 	}{
-		{", pretty: {}", http.StatusCreated, 3},
-		{", pretty: {bits: 128}", http.StatusCreated, 7},
+		{", pretty: {allow: ['*']}", http.StatusCreated, 3},
+		{", pretty: {bits: 128, allow: ['*']}", http.StatusCreated, 7},
 		{"", http.StatusUnprocessableEntity, 0},
 	} {
 		e.write(t, "config.yaml", fmt.Sprintf(cfg, e.root, c.pretty))

@@ -351,7 +351,7 @@ var proquintRe = regexp.MustCompile(`^[bdfghjklmnprstvz][aiou][bdfghjklmnprstvz]
 
 func TestDropPrettyURL(t *testing.T) {
 	f := newFixtureWith(t, func(s string) string {
-		s = strings.Replace(s, `respond: url, storage: drop}`, `respond: url, storage: drop, pretty: {bits: 128}}`, 1)
+		s = strings.Replace(s, `respond: url, storage: drop}`, `respond: url, storage: drop, pretty: {bits: 128, allow: ['*']}}`, 1)
 		s = strings.Replace(s, `steps: [{store: drop}]`, `steps: [{store: [drop, archive]}]`, 1)
 		s = strings.Replace(s, `path: "{{ .File }}"}`, `path: "{{ .Random }}", random: {alphabet: "01"}}`, 1)
 		return strings.Replace(s, `expose: drop}`, `expose: drop, random: {alphabet: "abc"}}`, 1)

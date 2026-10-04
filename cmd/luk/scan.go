@@ -46,7 +46,8 @@ origin and lists the endpoints of that listener your key may upload to:
 NAME, URL, RESPOND (url: the upload answers its URL; accept), TTL (the
 lifetime without --ttl, never without one, then the range --ttl may ask
 for when the storage takes it), FLAGS (secret, pretty-url, private,
-any, mutable, link-rm, link-ttl, link-ls: the options the endpoint takes)
+any, mutable, link-rm, link-ttl, link-ls: the options the endpoint takes
+from your key)
 and, when an endpoint has one, QUOTA (your upload quota: the rate, the
 largest upload and what you may send now).
 The key is --key, else the key of the config endpoint the URL names, else

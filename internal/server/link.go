@@ -71,7 +71,7 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request, sn *snapshot
 		return 0, nil, err
 	}
 	// The endpoint configuration is no secret to an allowed sender.
-	if !ep.Link.Allows(action) {
+	if !auth.Allowed(id, ep.Link.Of(action)) {
 		return 0, nil, fail(http.StatusForbidden, "endpoint %s does not allow link %s (link.%s)", ep.Name, action, action)
 	}
 	if action == wire.LinkList {

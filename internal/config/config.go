@@ -325,18 +325,17 @@ type Endpoint struct {
 	Respond  string         `yaml:"respond"`
 	Storage  string         `yaml:"storage"`
 	Limits   EndpointLimits `yaml:"limits"`
-	// Pretty, when present, lets an upload ask for a proquint .Random
-	// (pretty_url); absent, such an upload is refused.
+	// Pretty, when present, lets the identities of pretty.allow ask for a
+	// proquint .Random (pretty_url); anyone else is refused.
 	Pretty *Pretty `yaml:"pretty"`
-	// Link lets the owner of a stored upload manage its link; only with
-	// respond url.
+	// Link is who may manage the links they own; only with respond url.
 	Link Link `yaml:"link"`
-	// Private is which private modes the endpoint accepts; only with
-	// respond url, and the respond storage needs protect.
+	// Private is who may send which private modes; only with respond url,
+	// and the respond storage needs protect.
 	Private Private `yaml:"private"`
-	// Secret, when set, takes the reveal uploads of the endpoint (respond
-	// url only): into its own queue directory and only into its storage,
-	// without the pipelines of the endpoint.
+	// Secret, when set, takes the reveal uploads of the identities of
+	// secret.allow (respond url only): into its own queue directory and
+	// only into its storage, without the pipelines of the endpoint.
 	Secret *Secret `yaml:"secret"`
 	// Quota, when set, bounds how fast each identity uploads to the
 	// endpoint (see Quota).
@@ -428,6 +427,14 @@ type Secret struct {
 	// Reserve is the free space kept on the filesystem of Path, in place
 	// of limits.queue.reserve; DefaultSecretReserve when absent.
 	Reserve Size `yaml:"reserve"`
+	// Allow is who may send secret uploads; a reveal upload of anyone
+	// else is an upload as to an endpoint without secret.
+	Allow Identities `yaml:"allow"`
+}
+
+func (sc *Secret) UnmarshalYAML(n *yaml.Node) error {
+	type raw Secret
+	return decodeCapabilities(n, "secret", []string{"path", "storage", "reserve", "allow"}, []string{"allow"}, (*raw)(sc))
 }
 
 // DefaultSecretReserve is secret.reserve when absent: a tmpfs is small.
@@ -445,47 +452,110 @@ func (c *Config) SecretReserves() map[string]int64 {
 	return out
 }
 
-// Secrets reports whether an upload with the portal goes to the secret
-// queue and storage of the endpoint.
+// Secrets reports whether the endpoint keeps uploads with the portal in
+// its secret queue and storage; one goes there when its signer also
+// matches secret.allow.
 func (e *Endpoint) Secrets(portal string) bool {
 	return e.Secret != nil && portal == wire.PortalReveal
 }
 
-// Private is which private uploads an endpoint accepts: Owner for those
-// only the owner downloads (wire.AccessPrivate), Any for those every
+// Identities is a list of identities in the syntax of an endpoint allow
+// (see auth.Allowed): who is granted a capability of an endpoint. Absent
+// or empty grants it to no one.
+type Identities []string
+
+// identitiesHint is how a value that is not a list is refused.
+const identitiesHint = `a list of identities, e.g. ["*"]`
+
+func (l *Identities) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.SequenceNode {
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: %s", n.Line, identitiesHint)}}
+	}
+	v := []string{}
+	if err := n.Decode(&v); err != nil {
+		return err
+	}
+	*l = v
+	return nil
+}
+
+// decodeCapabilities decodes the mapping n into out (a pointer to a struct
+// type of the yaml keys known), refusing unknown keys as a strict decoder
+// does and naming the key (<block>.<key>) of a value of lists that is not
+// a list.
+func decodeCapabilities(n *yaml.Node, block string, known, lists []string, out any) error {
+	if n.Kind == yaml.MappingNode {
+		var errs []string
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i], n.Content[i+1]
+			switch {
+			case !slices.Contains(known, k.Value):
+				errs = append(errs, fmt.Sprintf("line %d: field %s not found in %s", k.Line, k.Value, block))
+			case slices.Contains(lists, k.Value) && v.Kind != yaml.SequenceNode && v.ShortTag() != "!!null":
+				errs = append(errs, fmt.Sprintf("line %d: %s.%s: %s", k.Line, block, k.Value, identitiesHint))
+			}
+		}
+		if len(errs) > 0 {
+			return &yaml.TypeError{Errors: errs}
+		}
+	}
+	return n.Decode(out)
+}
+
+// Private is who may send which private uploads to an endpoint: Owner
+// those only the owner downloads (wire.AccessPrivate), Any those every
 // identity the protect expose allows downloads (wire.AccessAny).
 type Private struct {
-	Owner bool `yaml:"owner"`
-	Any   bool `yaml:"any"`
+	Owner Identities `yaml:"owner"`
+	Any   Identities `yaml:"any"`
 }
 
-// Accepts reports whether the access mode of an upload (empty: public)
-// is accepted.
-func (p Private) Accepts(access string) bool {
+func (p *Private) UnmarshalYAML(n *yaml.Node) error {
+	type raw Private
+	return decodeCapabilities(n, "private", []string{"owner", "any"}, []string{"owner", "any"}, (*raw)(p))
+}
+
+// Offered reports whether any identity may send private uploads.
+func (p Private) Offered() bool { return len(p.Owner) > 0 || len(p.Any) > 0 }
+
+// Of is who may send an upload of the access mode (empty: public, which
+// needs no entry: nil); ok is false for an unknown mode.
+func (p Private) Of(access string) (who Identities, ok bool) {
 	switch access {
 	case "":
-		return true
+		return nil, true
 	case wire.AccessPrivate:
-		return p.Owner
+		return p.Owner, true
 	case wire.AccessAny:
-		return p.Any
+		return p.Any, true
 	}
-	return false
+	return nil, false
 }
 
-// Link is what the owner of a link of an endpoint may do with it: remove
-// it, set a new ttl, replace the content of a mutable upload; list the
-// links of the owner.
+// Link is who may do what with the links they own on an endpoint: remove
+// one, set a new ttl, replace the content of a mutable upload (and send
+// one); list their links.
 type Link struct {
-	Remove  bool `yaml:"remove"`
-	TTL     bool `yaml:"ttl"`
-	Replace bool `yaml:"replace"`
-	List    bool `yaml:"list"`
+	Remove  Identities `yaml:"remove"`
+	TTL     Identities `yaml:"ttl"`
+	Replace Identities `yaml:"replace"`
+	List    Identities `yaml:"list"`
 }
 
-// Allows reports whether the link action (wire.LinkRemove, wire.LinkTTL,
-// wire.LinkReplace, wire.LinkList) is enabled.
-func (l Link) Allows(action string) bool {
+func (l *Link) UnmarshalYAML(n *yaml.Node) error {
+	type raw Link
+	keys := []string{"remove", "ttl", "replace", "list"}
+	return decodeCapabilities(n, "link", keys, keys, (*raw)(l))
+}
+
+// Offered reports whether any identity may do any link action.
+func (l Link) Offered() bool {
+	return len(l.Remove) > 0 || len(l.TTL) > 0 || len(l.Replace) > 0 || len(l.List) > 0
+}
+
+// Of is who may do the link action (wire.LinkRemove, wire.LinkTTL,
+// wire.LinkReplace, wire.LinkList); nil for an unknown one.
+func (l Link) Of(action string) Identities {
 	switch action {
 	case wire.LinkRemove:
 		return l.Remove
@@ -496,13 +566,20 @@ func (l Link) Allows(action string) bool {
 	case wire.LinkList:
 		return l.List
 	}
-	return false
+	return nil
 }
 
-// Pretty is the size of the proquint .Random of an endpoint, a multiple
-// of 16 bits from MinPrettyBits to MaxPrettyBits; 0 takes MinPrettyBits.
+// Pretty is who may ask for a proquint .Random (Allow) and its size, a
+// multiple of 16 bits from MinPrettyBits to MaxPrettyBits; 0 takes
+// MinPrettyBits.
 type Pretty struct {
-	Bits int `yaml:"bits"`
+	Bits  int        `yaml:"bits"`
+	Allow Identities `yaml:"allow"`
+}
+
+func (p *Pretty) UnmarshalYAML(n *yaml.Node) error {
+	type raw Pretty
+	return decodeCapabilities(n, "pretty", []string{"bits", "allow"}, []string{"allow"}, (*raw)(p))
 }
 
 const (
@@ -1000,10 +1077,19 @@ func (c *Config) validate() []error {
 		default:
 			bad("endpoint %s: respond must be accept or url", name)
 		}
-		if e.Link != (Link{}) && e.Respond != "url" {
+		for _, c := range []struct {
+			key string
+			who Identities
+		}{
+			{"link.remove", e.Link.Remove}, {"link.ttl", e.Link.TTL}, {"link.replace", e.Link.Replace}, {"link.list", e.Link.List},
+			{"private.owner", e.Private.Owner}, {"private.any", e.Private.Any},
+		} {
+			checkAllow(bad, "endpoint "+name+": "+c.key, c.who, names, cas)
+		}
+		if e.Link.Offered() && e.Respond != "url" {
 			bad("endpoint %s: link needs respond url", name)
 		}
-		if e.Private != (Private{}) {
+		if e.Private.Offered() {
 			if e.Respond != "url" {
 				bad("endpoint %s: private needs respond url", name)
 			} else if st, ok := c.Storage[e.Storage]; ok && st.Protect == "" {
@@ -1014,6 +1100,10 @@ func (c *Config) validate() []error {
 			if e.Respond != "url" {
 				bad("endpoint %s: secret needs respond url", name)
 			}
+			if sc.Allow == nil {
+				bad("endpoint %s: secret.allow is required: %s", name, identitiesHint)
+			}
+			checkAllow(bad, "endpoint "+name+": secret.allow", sc.Allow, names, cas)
 			if sc.Path == "" {
 				bad("endpoint %s: secret.path is required", name)
 			}
@@ -1053,6 +1143,10 @@ func (c *Config) validate() []error {
 			e.Quota.validate(bad, "endpoint "+name, names, cas, c.Auth.Keys)
 		}
 		if pr := e.Pretty; pr != nil {
+			if pr.Allow == nil {
+				bad("endpoint %s: pretty.allow is required: %s", name, identitiesHint)
+			}
+			checkAllow(bad, "endpoint "+name+": pretty.allow", pr.Allow, names, cas)
 			switch {
 			case pr.Bits == 0:
 				pr.Bits = MinPrettyBits
@@ -1150,7 +1244,7 @@ func (c *Config) validate() []error {
 		// A replace publishes all its stores or none (see the dispatcher):
 		// tractable only for pipelines of store steps.
 		for _, en := range p.Endpoint {
-			if e := c.Endpoint[en]; e == nil || !e.Link.Replace {
+			if e := c.Endpoint[en]; e == nil || len(e.Link.Replace) == 0 {
 				continue
 			}
 			for i, s := range p.Steps {

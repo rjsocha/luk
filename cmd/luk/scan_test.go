@@ -47,7 +47,7 @@ listen:
 auth:
   keys: [{name: robert.socha, key: "%s"}, {name: other, key: "%s"}]
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: drop, pretty: {}, link: {replace: true, list: true}, secret: {path: q/secret, storage: volatile}}
+  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: drop, pretty: {allow: ['*']}, link: {replace: ['*'], list: ['*']}, secret: {allow: ['*'], path: q/secret, storage: volatile}}
   backup: {listen: main, endpoint: /backup, path: q/backup, allow: [other]}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}

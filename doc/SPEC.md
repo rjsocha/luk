@@ -240,7 +240,8 @@ and no `#`, and none is `*`: those mark the forms of an `allow` entry.
 ### `allow`
 
 Entries of `endpoint.<name>.allow` (and of `expose.<name>.auth.ssh.allow`,
-see Private files, and of the `members` of a quota class, see Quota):
+see Private files, of the `members` of a quota class, see Quota, and of
+the capability lists of an endpoint, see Capabilities):
 
 - `*` - every identity lukd knows when the request arrives: every plain
   key (`auth.keys`, `ssh.d/`) and every certificate of every CA, as if
@@ -256,6 +257,55 @@ see Private files, and of the `members` of a quota class, see Quota):
 - `hosts#db*.example.org` - a certificate from that CA whose Key ID
   matches the glob (`path.Match`), principals or not; `hosts#*`
   is every certificate of the CA, as `hosts:*`.
+
+### Capabilities
+
+The optional features of an endpoint are granted per identity: each is a
+list of entries in the `allow` syntax (key names, `<ca>:<glob>`,
+`<ca>#<glob>`, `*`).
+
+| key | grants |
+|---|---|
+| `link.remove`, `link.ttl`, `link.list` | the link action (see Links) |
+| `link.replace` | the link action `replace` and `--mutable` uploads |
+| `private.owner`, `private.any` | `--private` and `--private --any` uploads (see Private files) |
+| `secret.allow` | `--secret` uploads into the volatile storage (see Volatile secrets) |
+| `pretty.allow` | `--pretty-url` (see `endpoint.<n>.pretty`) |
+
+```yaml
+endpoint:
+  drop:
+    allow: [robert.socha, "hosts:*"]
+    respond: url
+    storage: drop
+    link:
+      remove: ["*"]
+      list: ["*"]
+      replace: [robert.socha]
+    private:
+      owner: ["hosts#db*.example.org"]
+    pretty: {allow: ["*"]}
+```
+
+- A capability applies to a request when the signer matches its list and,
+  as for every request, the endpoint `allow`: a list never admits an
+  identity the endpoint `allow` does not. `*` is every identity lukd
+  knows, so `["*"]` is everyone the endpoint admits.
+- An absent key or `[]` grants the capability to no one. `secret.allow`
+  and `pretty.allow` are required in their blocks (`[]` turns the
+  feature off while keeping the block); `secret` and `pretty` without
+  `allow` are a configuration error (`endpoint <n>: secret.allow is
+  required: a list of identities, e.g. ["*"]`).
+- A signer without the capability gets the same answer as a signer of an
+  endpoint without the feature (the status codes of each feature), so the
+  answer tells nothing about who else holds it.
+- The lists are checked as `allow` entries: an unknown key name or CA or a
+  bad glob is a configuration error (`endpoint drop: link.replace: allow
+  "nobody" is not a known key`). A value that is not a list, such as a
+  boolean, is an error naming the key (`line 14: link.replace: a list of
+  identities, e.g. ["*"]`).
+- The lists are evaluated on the configuration current when the request
+  arrives; a reload applies to the next request.
 
 ## Client meta
 
@@ -326,7 +376,8 @@ it is true is not):
   default. Omitted when false.
 - `mutable` - set by `--mutable`; the content of the upload may be
   replaced later through its link (`luk link --file`, see Links). An
-  endpoint without `link.replace` refuses it with 422 before the body.
+  endpoint whose `link.replace` does not grant the signer refuses it with
+  422 before the body.
   Omitted when false.
 - `access` - set by `--private` (`"private"`) or `--private --any`
   (`"any"`); omitted for a public upload. A private upload is served only
@@ -334,8 +385,8 @@ it is true is not):
   `private` to its owner (the `owner_key` of the sidecar), `any` to every
   identity the `allow` of that expose admits (see Private files). It
   takes `portal: "direct"` only (anything else is invalid meta). An
-  endpoint that does not accept the mode (`private.owner`, `private.any`)
-  refuses the upload with 422 before the body. The mode is kept in the
+  endpoint whose `private.owner` or `private.any` (of the mode) does not
+  grant the signer refuses the upload with 422 before the body. The mode is kept in the
   sidecar with the rest of the client meta.
 - `backup` - set by `--backup`; `hostname` is a single path element (no
   `/` or control character, not starting with `.`, at most 255 bytes).
@@ -608,23 +659,24 @@ logs      * -      1G/1d   1G     passive  (catch-all)
 
 The owner of an upload of a `respond: url` endpoint may manage its link:
 remove it, set a new lifetime, or replace the content under the same URL;
-and list the links it owns on the endpoint. Each action is enabled per
-endpoint:
+and list the links it owns on the endpoint. Each action is granted per
+endpoint to a list of identities (see Capabilities):
 
 ```yaml
 endpoint:
   drop:
     respond: url
     link:
-      remove: true                # luk link --rm
-      ttl: true                   # luk link --ttl
-      replace: true               # luk link --file / --stdin (mutable uploads)
-      list: true                  # luk link ls
+      remove: ["*"]               # luk link --rm
+      ttl: ["*"]                  # luk link --ttl
+      replace: [robert.socha]     # luk link --file / --stdin (mutable uploads)
+      list: ["*"]                 # luk link ls
 ```
 
-`link.remove`, `link.ttl`, `link.replace` and `link.list` are booleans, default
-`false`; `link` on an endpoint without `respond: url` is a configuration
-error. `link.replace: true` needs every pipeline of the endpoint to consist
+`link.remove`, `link.ttl`, `link.replace` and `link.list` are lists of
+identities in the `allow` syntax; absent or `[]` grants the action to no
+one. A non-empty list on an endpoint without `respond: url` is a
+configuration error. A non-empty `link.replace` needs every pipeline of the endpoint to consist
 of `store` steps only: a `run`, `relay` or `encrypt` step is a
 configuration error naming the pipeline and the step (`endpoint drop: link.replace needs
 pipelines of store steps only: pipeline drop step 2 is run`). A reload
@@ -692,9 +744,10 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
 
 1. Signature, identity, nonce and `allow` of the endpoint: 401 or 403 as
    for an upload.
-2. The action is enabled on the endpoint, else 403 (`endpoint <n> does
-   not allow link <action> (link.<action>)`): the configuration is no
-   secret to an allowed sender. A `list` continues as described under
+2. The list of the action grants the signer, else 403 (`endpoint <n> does
+   not allow link <action> (link.<action>)`), the same answer whether
+   the list is empty or names others: the answer tells nothing about who
+   else holds the action. A `list` continues as described under
    Actions; steps 3 to 5 are for the other actions.
 3. The link URL is parsed: an URL without a host is 422 (`bad link URL`).
    The scheme (`http`, `https`, `luk`), the port, the query and the
@@ -811,7 +864,7 @@ endpoint:
   drop:
     respond: url
     storage: drop
-    private: {owner: true, any: true}  # the modes the endpoint accepts
+    private: {owner: ["*"], any: ["*"]}  # who may send which mode
 
 storage:
   drop:
@@ -828,12 +881,13 @@ expose:
         allow: ["*"]                   # who downloads the "any" files
 ```
 
-- `endpoint.<n>.private.owner` and `endpoint.<n>.private.any` (booleans,
-  default `false`): which modes the endpoint accepts, `access: private`
-  and `access: any`. `private` needs `respond: url`, and its respond
-  storage needs `protect`. An upload of a mode the endpoint does not
-  accept is refused with 422 before the body (`endpoint <n> does not
-  accept private uploads of access <mode> (private.owner|any)`).
+- `endpoint.<n>.private.owner` and `endpoint.<n>.private.any` (lists of
+  identities, see Capabilities; absent or `[]` is no one): who may send
+  `access: private` and `access: any`. A non-empty list needs `respond:
+  url`, and its respond storage needs `protect`. An upload of a mode not
+  granted to the signer is refused with 422 before the body (`endpoint
+  <n> does not accept private uploads of access <mode>
+  (private.owner|any)`), also when the list names others.
 - `storage.<n>.protect` (local storages only): the expose that serves the
   private files of the storage. That expose must have `auth.ssh`, must
   differ from the storage `expose`, and serves no other storage (an
@@ -1011,20 +1065,25 @@ Answers:
   `http` without), the `Host` of the request as sent (port included) and
   the path.
 - `respond` - `url` or `accept` (see Response).
-- `secret` - the endpoint has `secret`: `--secret` uploads go to its
-  volatile storage (see Volatile secrets).
-- `pretty` - the endpoint has `pretty`: `--pretty-url` is accepted.
+- `secret`, `pretty`, `private` and `link` are the capabilities (see
+  Capabilities) as they apply to the signer: `true` when its list grants
+  the signer, never the lists themselves, so the answer tells nothing
+  about what others may.
+- `secret` - `secret.allow` grants the signer: its `--secret` uploads go
+  to the volatile storage (see Volatile secrets).
+- `pretty` - `pretty.allow` grants the signer: its `--pretty-url` is
+  accepted.
 - `private` - `private.owner` and `private.any`: the modes of `--private`
-  and `--private --any` accepted.
-- `link` - the link actions enabled (`link.*`, see Links); `replace` is
-  also what `--mutable` needs.
+  and `--private --any` accepted from the signer.
+- `link` - the link actions granted to the signer (`link.*`, see Links);
+  `replace` is also what `--mutable` needs.
 - `ttl` - with `respond: url`, the ttl policy of the respond storage:
   `user` (a client ttl counts), `min` and `max` (`ttl.min`, `ttl.max`) and
   `default` (the lifetime of an upload without a client ttl), each
   duration in the short form and omitted when there is none. Without
   `respond: url` there is no `ttl` (the storages depend on the tags).
 - `secret_ttl` - the same for the secret storage when it differs from
-  `ttl`; omitted otherwise.
+  `ttl` and `secret` is `true`; omitted otherwise.
 - `quota` - the quota of the signer on the endpoint (see Quota): `mode`
   (`enforce` or `passive`), `rate` of the class in force (`<size>/<duration>`),
   `burst` and `tokens` (what the bucket holds now) in bytes; omitted when
@@ -1045,8 +1104,9 @@ that is not stored).
 ## Volatile secrets
 
 The content of a `--secret` upload (portal `reveal`) can be kept off the
-disk: an endpoint with `secret` puts every `reveal` upload into a queue
-and a storage of its own, both on a tmpfs (`/run`).
+disk: an endpoint with `secret` puts every `reveal` upload of the
+identities of `secret.allow` into a queue and a storage of its own, both
+on a tmpfs (`/run`).
 
 ```yaml
 endpoint:
@@ -1054,6 +1114,7 @@ endpoint:
     respond: url
     storage: drop
     secret:
+      allow: ["*"]                      # whose reveal uploads go here (required)
       path: /run/luk/volatile/queue     # queue directory of the reveal uploads
       storage: volatile                 # their storage
       reserve: 16M                      # free space kept on the tmpfs (default 16M)
@@ -1075,17 +1136,24 @@ expose:
     path: /volatile/                    # nested in /: the longest path wins
 ```
 
-- `endpoint.<n>.secret` is optional and needs `respond: url`. `path` is
+- `endpoint.<n>.secret` is optional and needs `respond: url`. `allow`
+  (required, see Capabilities) is who may send secret uploads; `path` is
   the queue directory (relative to `root` or absolute, like
   `endpoint.<n>.path`); `storage` a local, exposed storage other than
   the endpoint `storage`. Without `secret` an endpoint works as before.
-- A `reveal` upload of such an endpoint is received into `secret.path`,
+- A `reveal` upload of a signer `secret.allow` does not grant is an
+  upload as to an endpoint without `secret`: it goes through the
+  endpoint queue and pipelines like any other upload (the endpoint
+  listing shows `secret: false` to that signer).
+- A `reveal` upload of a granted signer is received into `secret.path`,
   never into the endpoint `path`, and is stored into `secret.storage`
   only: no pipeline of the endpoint runs for it (no `run`, no `encrypt`,
   no store into other storages) and its tags select nothing; it needs no
   matching pipeline. The answered URL is on the expose of the secret
   storage. Uploads with another portal go through the endpoint queue and
-  pipelines as before.
+  pipelines as before. A `replace` of a link of the secret storage goes
+  through the secret queue again (it needs `link.replace`, not
+  `secret.allow`: the link stays where it is).
 - Everything else of the endpoint applies: `allow`, `limits` (and the
   64 KiB of a reveal), `quota` (a secret is an upload to the endpoint), the `ttl` policy of the secret storage, `pretty`
   (the path of the secret storage must use `.Random` too), `once`,
@@ -1133,7 +1201,8 @@ expose:
   `ReadWritePaths=-/run/luk/volatile` (the `-`: a missing directory does
   not fail the start), so no drop-in is needed for that path. Secrets
   elsewhere need a drop-in like any directory outside `/var/lib/luk`.
-- Validation: `secret` needs `respond: url`; `secret.path` is required
+- Validation: `secret` needs `respond: url`; `secret.allow` is required
+  and checked as `allow` entries; `secret.path` is required
   and lies outside every local storage base, every endpoint queue
   (`path`), every other secret queue (an equal one is shared) and the
   work directory; `secret.storage` is a known local storage with an
@@ -1234,11 +1303,12 @@ endpoint:
     respond: url
     storage: drop
     pretty:                           # optional: allows pretty_url (--pretty-url)
+      allow: ["*"]                    # who may ask for it (see Capabilities)
       bits: 64                        # 64 to 128, rounded up to a multiple of 16; default 64
-    link:                             # optional: what the owner may do with a link (see Links)
-      remove: true
-      ttl: true
-      replace: true
+    link:                             # optional: who may manage their links (see Links)
+      remove: ["*"]
+      ttl: ["*"]
+      replace: [robert.socha]
     limits:
       body:
         size: 2G
@@ -1314,19 +1384,21 @@ expose:
 `limits` bounds resource use against slow-client exhaustion. `limits.conn.max` must be at least 1, each duration positive and `limits.body.size` not negative; an absent or zero value takes the default (`body.size` and `body.timeout`: no limit). A slow but progressing upload is never cut by `limits.body.idle`, which only measures time between body bytes; `limits.body.timeout`, when set, caps the whole body read. A stalled or too slow upload is answered with 408. The other direction is bounded the same way: a download whose client takes nothing of the response for `limits.conn.idle` is cut (the write deadline moves with every write, so a slow but reading client is never cut). `limits.conn.max` counts connections; an HTTP/2 connection runs at most 16 requests at once, so an address runs at most 16 x `limits.conn.max` requests and open files. The limit is per address, not per client.
 
 `endpoint.<n>.pretty` lets an upload with `pretty_url` (`luk send
---pretty-url`) get a pronounceable `.Random`: a proquint of
+--pretty-url`) of an identity of `pretty.allow` (required, see
+Capabilities) get a pronounceable `.Random`: a proquint of
 `pretty.bits` bits from crypto/rand. Each 16 bits are five letters,
 consonant-vowel-consonant-vowel-consonant, consonants `bdfghjklmnprstvz`,
 vowels `aiou` (the standard proquint encoding, big-endian), the groups
 joined with `-`: 64 bits are 4 groups (`lusab-babad-gutih-tugad`), 128
 bits 8. `bits` is 64 to 128 and is rounded up to a multiple of 16 (65
-becomes 80); `pretty: {}` takes 64. The proquint replaces `.Random` in
+becomes 80); without `bits` it is 64. The proquint replaces `.Random` in
 every storage of that upload, a storage `random.alphabet` included, so
 the answered URL and the stored names agree. `pretty` needs `respond:
 url` and a `path` of the respond storage that uses `.Random`; otherwise
 the configuration is invalid. An upload with `pretty_url` on an endpoint
-without `pretty` is refused with 422 before the body ("endpoint
-<n> does not offer pretty URLs"). A reload applies to new uploads.
+without `pretty`, or of a signer `pretty.allow` does not grant, is
+refused with 422 before the body ("endpoint <n> does not offer pretty
+URLs"). A reload applies to new uploads.
 
 `root` is an absolute path (default `/var/lib/luk`). Relative `tls.cert`,
 `tls.key`, `endpoint.<n>.path` and `storage.<n>.base` are resolved against
@@ -1360,7 +1432,13 @@ and `ssh.d/ca/`):
   storage.<storage>.cleanup.age`);
 - `respond: url` requires `storage`, and that storage must be exposed;
 - a storage with `shard` is not the `expose` of an expose with `index`;
-- `link` requires `respond: url`;
+- the capability lists (`link.remove`, `link.ttl`, `link.replace`,
+  `link.list`, `private.owner`, `private.any`, `secret.allow`,
+  `pretty.allow`) are lists whose entries are those of an endpoint
+  `allow` (known key names and CAs, valid globs); a boolean or other
+  scalar is an error naming the key; `secret.allow` and `pretty.allow`
+  are required in their blocks (see Capabilities);
+- a non-empty `link.*` list requires `respond: url`;
 - `secret` requires `respond: url` and a local exposed `secret.storage`
   other than `storage`; `secret.path` overlaps no base, queue or the
   work directory; `secret.reserve` is not negative (see Volatile
@@ -1370,7 +1448,8 @@ and `ssh.d/ca/`):
   `secret.path`) overlaps `<root>/acme`, `<root>/gpg-cache`,
   `auth.nonces` or the work directory, or holds a `tls.cert` or
   `tls.key`;
-- `private` requires `respond: url` and a respond storage with `protect`;
+- a non-empty `private.*` list requires `respond: url` and a respond
+  storage with `protect`;
   `protect` names an expose with `auth.ssh` other than the storage
   `expose`, on a local storage, whose first listener has an `https`
   public URL; an expose with `auth.ssh` is no storage `expose`;
@@ -3082,17 +3161,19 @@ luk send [flags]      (aliases: put, push)
                             extension of the name, else octet-stream)
       --pretty-url          ask for a pronounceable name in the URL (a
                             proquint, lusab-babad-gutih-tugad); the
-                            endpoint must offer it (`pretty`), else 422
+                            endpoint must offer it to the signer
+                            (pretty.allow), else 422
       --no-owner            hide the sender on the portal landing page,
                             shown by default: the key name, or host or
                             user for a certificate (meta no_owner)
       --mutable             the content may be replaced later with luk
                             link --file (meta mutable); the endpoint must
-                            allow it (link.replace), else 422
+                            allow it to the signer (link.replace), else 422
       --private             only the uploading identity downloads it, with
                             luk get, from the luk:// URL answered (meta
                             access private); the endpoint must accept it
-                            (private.owner), else 422; exclusive with
+                            from the signer (private.owner), else 422;
+                            exclusive with
                             --secret and --portal
       --any                 with --private: every identity lukd knows (and
                             the protect expose allows) downloads it (meta
@@ -3359,9 +3440,10 @@ Output: the pin line, then the endpoints as aligned columns under a header
 line, by name: `NAME`, `URL`, `RESPOND` (`url` or `accept`), `TTL` (the
 `default` of the ttl policy, `never` without one, then the range of a
 client ttl when the policy takes one: `(1h..7d)`, `(..7d)`, `(1h..)`,
-`(any)`; `-` without a policy) and `FLAGS` (`secret`, `pretty-url`,
-`private`, `any`, `mutable` for `link.replace`, `link-rm`, `link-ttl`,
-`link-ls`, comma separated; `-` for none), and when an endpoint has a
+`(any)`; `-` without a policy) and `FLAGS` (the capabilities granted to
+the signing key, see Capabilities: `secret`, `pretty-url`, `private`,
+`any`, `mutable` for `link.replace`, `link-rm`, `link-ttl`, `link-ls`,
+comma separated; `-` for none), and when an endpoint has a
 quota for the signer `QUOTA` (`10G/1d 50G (12.5G left)`: the rate, the
 burst and what the bucket holds now, `, passive` added in passive mode;
 `-` for an endpoint without one); no endpoint prints no table.

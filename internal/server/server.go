@@ -377,7 +377,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 	secret := ""
 	pipes := []string{pipeline.SecretPipeline}
 	var skipped []string
-	if ep.Secrets(meta.Portal) {
+	if ep.Secrets(meta.Portal) && auth.Allowed(id, ep.Secret.Allow) {
 		secret = ep.Secret.Storage
 	} else if pipes, skipped, err = Match(sn.cfg, ep.Name, meta.Tags); err != nil {
 		return 0, nil, err
@@ -389,13 +389,15 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 	if err != nil {
 		return 0, nil, err
 	}
-	if meta.PrettyURL && ep.Pretty == nil {
+	// A signer a capability is not granted to gets the answer of an
+	// endpoint without it.
+	if meta.PrettyURL && (ep.Pretty == nil || !auth.Allowed(id, ep.Pretty.Allow)) {
 		return 0, nil, fail(http.StatusUnprocessableEntity, "endpoint %s does not offer pretty URLs", ep.Name)
 	}
-	if meta.Mutable && !ep.Link.Replace {
+	if meta.Mutable && !auth.Allowed(id, ep.Link.Replace) {
 		return 0, nil, fail(http.StatusUnprocessableEntity, "endpoint %s does not allow replacing links (link.replace); mutable refused", ep.Name)
 	}
-	if !ep.Private.Accepts(meta.Access) {
+	if who, ok := ep.Private.Of(meta.Access); !ok || (meta.Access != "" && !auth.Allowed(id, who)) {
 		mode := "owner"
 		if meta.Access == wire.AccessAny {
 			mode = "any"

@@ -79,7 +79,7 @@ listen: {main: {addr: "%s", public: "http://%s"}}
 auth:
   keys: [{name: robert.socha, key: "%s"}, {name: other, key: "%s"}]
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha, other], respond: url, storage: drop, link: {remove: true, ttl: true, replace: true, list: true}}
+  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha, other], respond: url, storage: drop, link: {remove: ['*'], ttl: ['*'], replace: ['*'], list: ['*']}}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:

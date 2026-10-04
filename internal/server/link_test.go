@@ -23,7 +23,7 @@ import (
 	"luk/internal/wire"
 )
 
-const allLinks = `respond: url, storage: drop, link: {remove: true, ttl: true, replace: true}}`
+const allLinks = `respond: url, storage: drop, link: {remove: ['*'], ttl: ['*'], replace: ['*']}}`
 
 // linkFixture is the fixture with every link action on /drop; mod rewrites
 // the config text further.
@@ -436,7 +436,7 @@ func TestMutableNeedsReplace(t *testing.T) {
 
 func TestLinkActionDisabled(t *testing.T) {
 	f := newFixtureWith(t, func(s string) string {
-		return strings.Replace(s, `respond: url, storage: drop}`, `respond: url, storage: drop, link: {remove: true}}`, 1)
+		return strings.Replace(s, `respond: url, storage: drop}`, `respond: url, storage: drop, link: {remove: ['*']}}`, 1)
 	})
 	link := f.drop(t, f.user, wire.Meta{}, "x")
 	rec := f.link(t, linkReq{signer: f.user, action: wire.LinkTTL, ttl: "1d", link: link})
@@ -632,7 +632,7 @@ func TestLinkHostMatch(t *testing.T) {
 	linkAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: "http://lukd.test:8080/d/" + name}), http.StatusOK)
 }
 
-const listLinks = `respond: url, storage: drop, link: {replace: true, list: true}}`
+const listLinks = `respond: url, storage: drop, link: {replace: ['*'], list: ['*']}}`
 
 // listFixture has link list on /drop and on /drop2 (storing into the same
 // storage), and a second identity other allowed on both.
