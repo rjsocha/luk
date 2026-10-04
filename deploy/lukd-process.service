@@ -14,9 +14,11 @@ ExecStart=/usr/bin/lukd process
 # systemctl reload lukd-process: the configuration is checked first, so an
 # invalid one or a change of root, listen, limits.conn/header or
 # auth.nonces (they need a restart) fails the reload visibly; lukd then
-# reloads it on SIGHUP.
+# reloads it on SIGHUP. The kill runs outside the sandbox ("+"): with
+# PrivatePIDs= the unit has its own PID namespace, where $MAINPID of the
+# host does not exist.
 ExecReload=/usr/bin/lukd check
-ExecReload=/bin/kill -HUP $MAINPID
+ExecReload=+/bin/kill -HUP $MAINPID
 Restart=on-failure
 # SIGTERM to lukd only: it kills its run step process groups and leaves
 # their uploads queued; systemd kills what is left after the stop timeout.
