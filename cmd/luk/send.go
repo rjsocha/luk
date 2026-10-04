@@ -206,7 +206,9 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 				answers = append(answers, resp.Body())
 				switch {
 				case quiet:
-					fmt.Fprintln(out, client.Printable(resp.Quiet()))
+					if q := resp.Quiet(); q != "" {
+						fmt.Fprintln(out, client.Printable(q))
+					}
 				case !asJSON && !dryRun && resp.Receipt.URL != "":
 					fmt.Fprintln(out, client.Printable(resp.Receipt.URL))
 				}
@@ -239,7 +241,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 	f.BoolVar(&progress, "progress", false, "show transfer progress on stderr (terminal only)")
 	f.StringVar(&bwlimit, "bwlimit", "", "limit the upload rate, bytes per second with K, M, G, T suffix (0 = unlimited)")
 	f.BoolVar(&asJSON, "json", false, "print the server answer as JSON")
-	f.BoolVarP(&quiet, "quiet", "q", false, "print only the URL or the upload id")
+	f.BoolVarP(&quiet, "quiet", "q", false, "print only the URL, nothing when the endpoint answers without one (the upload id is in --json)")
 	f.IntVar(&links, "links", 1, "upload N times (1 to 25) with the same options, one link each")
 	completeFlags(cmd, map[string]cobra.CompletionFunc{
 		"file": completeFiles, "endpoint": completeEndpoint, "key": completeKey, "tag": completeNone,

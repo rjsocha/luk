@@ -110,18 +110,14 @@ type Answer struct {
 	Debug   *wire.Response
 }
 
-// Quiet is what -q prints: the URL of a 201, else the upload id.
+// Quiet is the line luk send --quiet prints: the URL of the answer (for a
+// dry run the would-be URL), or empty when the endpoint answers without one
+// (respond accept); the upload id is in the JSON answer.
 func (a *Answer) Quiet() string {
 	if a.Debug != nil {
-		if a.Debug.Respond.URL != "" {
-			return a.Debug.Respond.URL
-		}
-		return a.Debug.ID
+		return a.Debug.Respond.URL
 	}
-	if a.Receipt.URL != "" {
-		return a.Receipt.URL
-	}
-	return a.Receipt.ID
+	return a.Receipt.URL
 }
 
 // Body is the decoded answer.

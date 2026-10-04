@@ -3465,8 +3465,9 @@ luk send [flags]      (aliases: put, push)
                             = unlimited
       --json                print the server answer as JSON (exclusive
                             with --quiet)
-  -q, --quiet               print only the result (with --dry-run: the
-                            would-be URL or id)
+  -q, --quiet               print only the URL, nothing for an endpoint
+                            without one (with --dry-run: the would-be
+                            URL); the upload id is in --json
 
 luk get URL (-o|--output FILE [--force] [--inplace] | --head [--json])
         [-k|--key PATH|SHA256:FP] [--progress] [--bwlimit RATE]
@@ -3643,8 +3644,10 @@ Exit codes as for `send`.
 newline (the `luk://` URL of a `--private` upload); for `respond:
 accept` (202) nothing. `--json` prints the server
 answer (the `201`/`202` object) as JSON. `--dry-run` prints the debug JSON
-with or without `--json`. `-q` prints the URL or the upload id (with
-`--dry-run` the would-be URL or id). Errors go to stderr; `--progress` writes
+with or without `--json`. `-q` prints only the URL, and nothing for an
+endpoint answering without one (`respond: accept`), never more than
+without `-q`; with `--dry-run` the would-be URL instead of the debug JSON.
+The upload id is in the `--json` answer. Errors go to stderr; `--progress` writes
 to stderr. When the answer carries a `ttl_note`, `luk send` writes one line
 on stderr, with or without `--json` and `-q`: `luk: ttl 60d capped to 21d
 by the server`, `luk: ttl 1d raised to 3d by the server` or `luk: ttl
@@ -3658,7 +3661,7 @@ carries no note, so nothing is written.
 at most 25`) makes N uploads with the same
 options, each a request of its own (signature, nonce, new name, new URL,
 its own `once` and expiry), and prints the N URLs one per line as they
-come (`-q`: the N URLs or ids; `--json`: one JSON array of the N answers,
+come (`-q`: the N URLs, nothing without URLs; `--json`: one JSON array of the N answers,
 also with `--links 1`; without `--links` the single answer object). The
 first upload goes as usual; the later ones carry in the meta the `size`
 and `sha256` of the first answer (a stream had none, see Client meta), so
@@ -4013,7 +4016,7 @@ disk. Test on lukd.vm / luk.vm.
 - Answers 201/202 per `respond`; `dry_run` keeps the debug JSON but is
   answered before the body, which is never sent (no `size`/`sha256` in
   `server`); the client handles 201/202 (prints the URL or nothing, `--json` the
-  answer, `-q` the URL or the id) and
+  answer, `-q` only the URL) and
   compares the sha256 from the answer (not for a dry run).
 - Expose: `GET`/`HEAD` with the download headers, `Range`, `once`
   (claimed atomically, second download 404), TTL and `ttl.max`, janitor,

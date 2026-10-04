@@ -280,7 +280,8 @@ func TestSendStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errs)
 	}
-	if string(e.body) != "hello stdin" || !strings.Contains(out, "abc") {
+	// -q with respond accept: nothing on stdout.
+	if string(e.body) != "hello stdin" || out != "" {
 		t.Errorf("body %q out %q", e.body, out)
 	}
 	if e.meta.Size != nil || e.meta.SHA256 != "" || e.meta.File != "" || e.meta.Source != "stdin" {
@@ -888,7 +889,7 @@ func TestSendAnswers(t *testing.T) {
 	e := newSendEnv(t)
 	defer stdinFrom(t, "data")()
 	code, out, errs := e.send(t, "--stdin")
-	if code != 0 || out != "abc\n" {
+	if code != 0 || out != "" {
 		t.Fatalf("exit %d: %q %s", code, out, errs)
 	}
 	e.url = true

@@ -76,7 +76,7 @@ func TestAliasExpansion(t *testing.T) {
 	mustRun(t, "alias", "add", "--alias", "drop", "--", "push", "-e", "t", "-k", e.key, "-q")
 	defer stdinFrom(t, "payload")()
 	code, out, errs := runLuk(t, "drop", "--stdin", "--name", "x.txt")
-	if code != 0 || string(e.body) != "payload" || e.meta.File != "x.txt" || out != "abc\n" {
+	if code != 0 || string(e.body) != "payload" || e.meta.File != "x.txt" || out != "" {
 		t.Fatalf("exit %d out %q err %q body %q meta %+v", code, out, errs, e.body, e.meta)
 	}
 	code, _, errs = runLuk(t, "drop", "--stdin", "-q", "-q")
