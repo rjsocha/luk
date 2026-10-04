@@ -524,3 +524,39 @@ web1/db.sql      nightly   1       1M           1M        1M        0         - 
 		t.Errorf("completion %q", got)
 	}
 }
+
+// The public files of a storage behind an auth.ssh expose have luk://
+// URLs.
+func TestStorageFilesSignedExpose(t *testing.T) {
+	cfg, err := config.Parse([]byte(`root: ` + t.TempDir() + `
+listen: {main: {addr: "127.0.0.1:0", public: "https://drop.example.com"}}
+auth:
+  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+endpoint:
+  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: vault}
+pipeline:
+  drop: {endpoint: [drop], steps: [{store: vault}]}
+storage:
+  vault: {type: local, base: s/vault, path: "{{ .File }}", expose: vault}
+expose:
+  vault: {listen: main, path: /v/, auth: {ssh: {allow: [robert.socha]}}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := store.FromConfig(cfg.Storage["vault"])
+	if err := os.MkdirAll(l.Base, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), "x")
+	if err := os.WriteFile(src, []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Put(src, "2026/x", store.Sidecar{ID: "id-x", Received: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	files, err := storageFiles(cfg, "vault", l, "", 0, time.Now())
+	if err != nil || len(files) != 1 || files[0].URL != "luk://drop.example.com/v/2026/x" {
+		t.Fatalf("%+v %v", files, err)
+	}
+}

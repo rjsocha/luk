@@ -351,22 +351,34 @@ func storageLayouts(cfg *config.Config) []error {
 	return errs
 }
 
+// pinOf is the URL fragment pinning the certificate of the listener l
+// when it has tls mode self or files and its certificate file is
+// readable; empty otherwise.
+func pinOf(l *config.Listen) string {
+	if l == nil || l.TLS == nil || (l.TLS.Mode != "self" && l.TLS.Mode != "files") {
+		return ""
+	}
+	p, err := tlsself.PinFile(l.TLS.Cert)
+	if err != nil {
+		return ""
+	}
+	return "#" + p
+}
+
 // storageFiles reads the stored files of l, newest first, keeping those of
 // owner (when set) received more than age (when set) before now.
 func storageFiles(cfg *config.Config, name string, l store.Local, owner string, age time.Duration, now time.Time) ([]storageFile, error) {
-	st := cfg.Storage[name]
-	base, exposed := "", false
-	if st.Expose != "" {
-		base, exposed = cfg.ExposeURL(st.Expose)
-	}
-	// Private files have the luk:// URL of the protect expose, pinned as
-	// lukd answers it when the certificate file is readable.
+	// Private files have the luk:// URL of the protect expose, public
+	// files of an expose with auth.ssh one too, pinned as lukd answers it
+	// when the certificate file is readable.
+	base, bl, exposed := cfg.PublicURL(name)
 	pbase, pl, protected := cfg.ProtectURL(name)
-	pin := ""
-	if protected && pl.TLS != nil && (pl.TLS.Mode == "self" || pl.TLS.Mode == "files") {
-		if p, err := tlsself.PinFile(pl.TLS.Cert); err == nil {
-			pin = "#" + p
-		}
+	ppin, bpin := "", ""
+	if protected {
+		ppin = pinOf(pl)
+	}
+	if exposed {
+		bpin = pinOf(bl)
 	}
 	files := []storageFile{}
 	err := l.Walk(func(rel string, sc store.Sidecar) error {
@@ -385,9 +397,9 @@ func storageFiles(cfg *config.Config, name string, l store.Local, owner string, 
 		f := storageFile{Name: rel, Links: l.Links(rel, sc), Sidecar: sc}
 		switch {
 		case sc.Client.Access != "" && protected:
-			f.URL = expose.NameURL(pbase, rel) + pin
+			f.URL = expose.NameURL(pbase, rel) + ppin
 		case sc.Client.Access == "" && exposed:
-			f.URL = expose.NameURL(base, rel)
+			f.URL = expose.NameURL(base, rel) + bpin
 		}
 		files = append(files, f)
 		return nil

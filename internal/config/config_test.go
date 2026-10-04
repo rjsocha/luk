@@ -1752,7 +1752,6 @@ func TestPrivateConfig(t *testing.T) {
 		"ssh and basic":               {"auth: {ssh: {", "auth: {basic: ['dev:$2y$05$TpFzQdt1oY6UgSKCZGgt8eCbBXDAuiQxNl13XDuDnYKUSuIC9O79W'], ssh: {", "mutually exclusive"},
 		"ssh allow unknown key":       {`allow: ["*", robert.socha`, `allow: [nobody`, `allow "nobody" is not a known key`},
 		"ssh allow unknown ca":        {`"hosts:*.vm"`, `"nope:*"`, "names an unknown CA"},
-		"ssh expose as expose":        {"expose: drop, protect: secure}", "expose: secure}", "name it in protect"},
 		"protect on plain listener":   {"    listen: main\n    path: /s/", "    listen: plain\n    path: /s/", "needs an https public URL"},
 		"key named *":                 {"    - name: robert.socha\n", "    - name: \"*\"\n", `name "*"`},
 		"protect used twice":          {"storage:\n", "storage:\n  two: {type: local, base: /storage/two, path: x, protect: secure}\n", "used by storages drop and two"},
@@ -1764,6 +1763,63 @@ func TestPrivateConfig(t *testing.T) {
 		if _, err := Parse([]byte(strings.Replace(privateGood, r[0], r[1], 1))); err == nil || !strings.Contains(err.Error(), r[2]) {
 			t.Errorf("%s: %v, want an error with %q", name, err, r[2])
 		}
+	}
+}
+
+// signedGood is good with the archive storage exposed by vault, an expose
+// with auth.ssh: its public files go to signed requests of the identities
+// vault allows.
+var signedGood = strings.NewReplacer(
+	`path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", expose: vault}`,
+	"    path: /d/\n", "    path: /d/\n  vault:\n    listen: main\n    path: /v/\n    auth: {ssh: {allow: [robert.socha]}}\n",
+).Replace(good)
+
+func TestSignedExposeConfig(t *testing.T) {
+	c, err := Parse([]byte(signedGood))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _, ok := c.StorageOfExpose("vault"); !ok || n != "archive" {
+		t.Fatalf("storage of vault %q %v", n, ok)
+	}
+	base, l, ok := c.PublicURL("archive")
+	if !ok || base != "luk://lukd.vm:8443/v/" || l == nil || l.Name != "main" {
+		t.Fatalf("public url %q %v %v", base, l, ok)
+	}
+	if base, l, ok := c.PublicURL("drop"); !ok || base != "https://lukd.vm:8443/d/" || l != nil {
+		t.Fatalf("public url of drop %q %v %v", base, l, ok)
+	}
+	if _, _, ok := c.ProtectURL("archive"); ok {
+		t.Fatal("archive has a protect URL")
+	}
+	// The catalog of a storage behind auth.ssh publishes nothing.
+	cat := strings.Replace(signedGood, `expose: vault}`, `expose: vault, catalog: true}`, 1)
+	if c, err := Parse([]byte(cat)); err != nil {
+		t.Fatal(err)
+	} else if w := strings.Join(c.Warnings(), "\n"); strings.Contains(w, "catalog on expose vault") {
+		t.Fatalf("warnings %s", w)
+	}
+	cases := map[string][3]string{
+		"index":              {"    path: /v/\n", "    path: /v/\n    index: true\n", "index excludes auth.ssh"},
+		"plain listener":     {"    listen: main\n    path: /v/", "    listen: plain\n    path: /v/", "expose vault: listen plain (first of the expose) needs an https public URL"},
+		"expose and protect": {`expose: vault}`, `expose: vault, protect: vault}`, "expose and protect must differ"},
+		"used twice":         {"storage:\n", "storage:\n  two: {type: local, base: /storage/two, path: x, expose: vault}\n", "used by storages"},
+	}
+	for name, r := range cases {
+		if !strings.Contains(signedGood, r[0]) {
+			t.Fatalf("%s: fixture does not contain %q", name, r[0])
+		}
+		if _, err := Parse([]byte(strings.Replace(signedGood, r[0], r[1], 1))); err == nil || !strings.Contains(err.Error(), r[2]) {
+			t.Errorf("%s: %v, want an error with %q", name, err, r[2])
+		}
+	}
+	// A storage with an auth.ssh expose and an auth.ssh protect.
+	both := strings.NewReplacer(
+		`expose: vault}`, `expose: vault, protect: secure}`,
+		"    auth: {ssh: {allow: [robert.socha]}}\n", "    auth: {ssh: {allow: [robert.socha]}}\n  secure:\n    listen: main\n    path: /s/\n    auth: {ssh: {allow: [\"*\"]}}\n",
+	).Replace(signedGood)
+	if _, err := Parse([]byte(both)); err != nil {
+		t.Fatalf("auth.ssh expose and protect: %v", err)
 	}
 }
 

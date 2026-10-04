@@ -54,10 +54,13 @@ type route struct {
 	// dummy is compared for unknown users, so they cost as much as a wrong
 	// password.
 	dummy []byte
-	// ssh marks an expose with auth.ssh: signed requests only, private
-	// files only; allow is its allow list.
-	ssh   bool
-	allow []string
+	// ssh marks an expose with auth.ssh: signed requests only; allow is
+	// its allow list. As a protect it serves private files only; as the
+	// expose of its storage (signed) it serves the public files to the
+	// identities of allow and answers the signed listing.
+	ssh    bool
+	signed bool
+	allow  []string
 	// index answers the directory URLs with a listing (expose index).
 	index bool
 }
@@ -103,6 +106,7 @@ func New(cfg *config.Config, log *slog.Logger, now func() time.Time, listen stri
 		rt.public, _ = cfg.ExposeURL(name)
 		if x.Auth.SSH != nil {
 			rt.ssh, rt.allow = true, x.Auth.SSH.Allow
+			rt.signed = st.Expose == name
 		}
 		rt.index = x.Index && !rt.ssh
 		for _, b := range x.Auth.Basic {
@@ -200,7 +204,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rt == nil {
 		p = r.URL.Path
 	}
+	// An expose with auth.ssh has no portal pages, so no actions.
 	_, _, isAction := cutAction(p)
+	isAction = isAction && (rt == nil || !rt.ssh)
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && (r.Method != http.MethodPost || !isAction) {
 		h.log.Debug("method not allowed", "remote", r.RemoteAddr, "host", r.Host, "method", r.Method, "path", r.URL.Path)
 		if isAction {
@@ -245,6 +251,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.index(w, r, rt, rel)
 		return
 	}
+	// A directory URL of a signed expose answers the signed listing.
+	if rt.signed && strings.HasSuffix(r.URL.Path, "/") && (rel == "" || strings.HasSuffix(rel, "/")) {
+		h.signedList(w, r, rt, rel, id)
+		return
+	}
 	// A name under a nested expose is never this storage's, also on a
 	// listener without that expose.
 	if _, nests := rt.st.Nests(rel); rel == "" || nests {
@@ -259,7 +270,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f, sc, err := rt.st.Open(rel)
 	if err != nil {
 		name, act, ok := cutAction(rel)
-		if !ok {
+		if !ok || rt.ssh {
 			h.missing(w, r, rt, rel, err)
 			return
 		}
@@ -300,8 +311,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 	}
 	if rt.ssh {
-		h.log.Info("private download", "remote", r.RemoteAddr, "method", r.Method, "sender", id.Name, "expose", rt.name, "id", sc.ID, "file", rel)
+		msg := "private download"
+		if rt.signed {
+			msg = "signed download"
+		}
+		h.log.Info(msg, "remote", r.RemoteAddr, "method", r.Method, "sender", id.Name, "expose", rt.name, "id", sc.ID, "file", rel)
 		privateHeaders(w.Header(), sc)
+		// No portal page: the content itself, as a direct download.
+		h.serveFile(w, r, rt, rel, f, sc)
+		return
 	}
 	switch {
 	case action == wire.PortalReveal:
@@ -348,12 +366,20 @@ func (h *handler) signed(w http.ResponseWriter, r *http.Request, rt *route) (*wi
 }
 
 // permits reports whether the expose serves the file of sc to id: an
-// expose without auth.ssh only public files, one with auth.ssh only
-// private files: those of wire.AccessPrivate to their owner, those of
-// wire.AccessAny to every identity of its allow list.
+// expose without auth.ssh only public files; one with auth.ssh that is
+// the expose of its storage only public files, to every identity of its
+// allow list; one with auth.ssh that is a protect only private files:
+// those of wire.AccessPrivate to their owner, those of wire.AccessAny to
+// every identity of its allow list.
 func (rt *route) permits(id *wire.Identity, sc store.Sidecar) bool {
 	if !rt.ssh {
 		return sc.Client.Access == ""
+	}
+	if id == nil {
+		return false
+	}
+	if rt.signed {
+		return sc.Client.Access == "" && auth.Allowed(id, rt.allow)
 	}
 	switch sc.Client.Access {
 	case wire.AccessPrivate:

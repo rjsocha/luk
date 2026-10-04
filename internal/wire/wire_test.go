@@ -353,6 +353,12 @@ func TestGetCanonicalText(t *testing.T) {
 	if want := "luk-get@v1\nGET\nsecure.vm:8443\n/a%20b/x7Kq\nT\nN"; got != want {
 		t.Fatalf("%q", got)
 	}
+	if got := GetTarget("/d/", ""); got != "/d/" {
+		t.Fatalf("target without query %q", got)
+	}
+	if got := GetTarget("/d/", "recursive=1"); got != "/d/?recursive=1" {
+		t.Fatalf("target with query %q", got)
+	}
 }
 
 func TestMetaAccess(t *testing.T) {

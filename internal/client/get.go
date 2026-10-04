@@ -206,7 +206,7 @@ func signedGet(ctx context.Context, o GetOptions, method, namespace string) (*ht
 	}
 	ts := time.Now().UTC().Format(time.RFC3339)
 	nonce := wire.NewNonce()
-	text, what := wire.GetCanonicalText(method, u.Host, u.EscapedPath(), ts, nonce), "a get"
+	text, what := wire.GetCanonicalText(method, u.Host, wire.GetTarget(u.EscapedPath(), u.RawQuery), ts, nonce), "a get"
 	if namespace == wire.ListNamespace {
 		text, what = wire.ListCanonicalText(method, u.Host, u.EscapedPath(), ts, nonce), "an endpoint listing"
 	}

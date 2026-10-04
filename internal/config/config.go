@@ -674,6 +674,8 @@ type Storage struct {
 	Path   string `yaml:"path"`
 	Bucket string `yaml:"bucket"`
 	Prefix string `yaml:"prefix"`
+	// Expose serves the public files of the storage (local only); with
+	// auth.ssh only to signed requests of the identities it allows.
 	Expose string `yaml:"expose"`
 	// Protect is the expose with auth.ssh that serves the private files
 	// of the storage (local only).
@@ -951,7 +953,8 @@ type Expose struct {
 	// purpose: no auth, and no warning for a catalog or an index on it.
 	Plain bool `yaml:"plain"`
 	// Index answers the directory URLs of the expose with an HTML listing
-	// of the files it serves; never with auth.ssh.
+	// of the files it serves; never with auth.ssh (the expose of a storage
+	// with auth.ssh answers the signed listing instead).
 	Index bool `yaml:"index"`
 	// MovedTTL and MovedCleanup catch the keys moved to the storage, so
 	// the error names the new place.
@@ -1476,9 +1479,6 @@ func (c *Config) validate() []error {
 		if x, ok := c.Expose[s.Expose]; ok && x.Index && s.Shard > 0 {
 			bad("storage %s: shard on expose %s with index; index needs a storage without shard", name, s.Expose)
 		}
-		if x, ok := c.Expose[s.Expose]; ok && x.Auth.SSH != nil {
-			bad("storage %s: expose %s has auth.ssh, which serves private files only; name it in protect", name, s.Expose)
-		}
 		if s.Protect != "" {
 			x, ok := c.Expose[s.Protect]
 			switch {
@@ -1706,16 +1706,16 @@ func (c *Config) validate() []error {
 			bad("expose %s: plain excludes auth", name)
 		}
 		if x.Index && x.Auth.SSH != nil {
-			bad("expose %s: index excludes auth.ssh: an auth.ssh expose serves only signed GETs of private files", name)
+			bad("expose %s: index excludes auth.ssh: an auth.ssh expose serves only signed GETs (and the signed listing)", name)
 		}
 		if ssh := x.Auth.SSH; ssh != nil {
 			if len(x.Auth.Basic) > 0 {
 				bad("expose %s: auth.ssh and auth.basic are mutually exclusive", name)
 			}
 			checkAllow(bad, "expose "+name+": auth.ssh", ssh.Allow, names, cas)
-			if _, _, ok := c.StorageOfProtect(name); ok && len(x.Listen) > 0 {
+			if _, _, ok := c.StorageServedBy(name); ok && len(x.Listen) > 0 {
 				if l := c.Listen[x.Listen[0]]; l != nil && !strings.HasPrefix(l.Public, "https://") {
-					bad("expose %s: listen %s (first of the expose) needs an https public URL: private files have luk:// URLs, which mean https", name, x.Listen[0])
+					bad("expose %s: listen %s (first of the expose) needs an https public URL: the files of an auth.ssh expose have luk:// URLs, which mean https", name, x.Listen[0])
 				}
 			}
 		}
@@ -2136,7 +2136,7 @@ func (c *Config) Warnings() []string {
 		if urlStorage[n] && s.Type == "local" && s.Conflict == "version" && !uniqueName.MatchString(s.Path) {
 			w = append(w, fmt.Sprintf("storage %s: conflict version with a path using neither .Random nor .Id; the answered URL may not match the stored name", n))
 		}
-		if x, ok := c.Expose[s.Expose]; ok && s.Catalog && len(x.Auth.Basic) == 0 && !x.Plain {
+		if x, ok := c.Expose[s.Expose]; ok && s.Catalog && len(x.Auth.Basic) == 0 && x.Auth.SSH == nil && !x.Plain {
 			w = append(w, fmt.Sprintf("storage %s: catalog on expose %s without auth publishes every stored name", n, s.Expose))
 		}
 	}
@@ -2566,12 +2566,34 @@ func (c *Config) ProtectURL(storage string) (string, *Listen, bool) {
 	if !ok || st.Protect == "" {
 		return "", nil, false
 	}
-	base, ok := c.ExposeURL(st.Protect)
+	return c.signedURL(st.Protect)
+}
+
+// PublicURL is the base of the URLs of the public files of a storage: the
+// URL of its expose (ExposeURL); for an expose with auth.ssh that URL with
+// the scheme luk and the first listener of the expose (as ProtectURL),
+// else no listener.
+func (c *Config) PublicURL(storage string) (string, *Listen, bool) {
+	st, ok := c.Storage[storage]
+	if !ok || st.Expose == "" {
+		return "", nil, false
+	}
+	if x := c.Expose[st.Expose]; x != nil && x.Auth.SSH != nil {
+		return c.signedURL(st.Expose)
+	}
+	base, ok := c.ExposeURL(st.Expose)
+	return base, nil, ok
+}
+
+// signedURL is the luk:// base of an expose with an https public URL and
+// its first listener.
+func (c *Config) signedURL(expose string) (string, *Listen, bool) {
+	base, ok := c.ExposeURL(expose)
 	rest, https := strings.CutPrefix(base, "https://")
 	if !ok || !https {
 		return "", nil, false
 	}
-	return wire.SchemeLuk + "://" + rest, c.Listen[c.Expose[st.Protect].Listen[0]], true
+	return wire.SchemeLuk + "://" + rest, c.Listen[c.Expose[expose].Listen[0]], true
 }
 
 // Restart is the part of a configuration a running lukd cannot change:

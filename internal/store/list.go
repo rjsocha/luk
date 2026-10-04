@@ -39,33 +39,91 @@ func (l Local) HasEntries(dir string, show func(rel string, sc Sidecar) bool) bo
 	return len(ents) > 0
 }
 
-func (l Local) list(dir string, show func(rel string, sc Sidecar) bool, first bool) ([]Entry, error) {
-	if dir != "" {
-		if !strings.HasSuffix(dir, "/") {
-			return nil, fmt.Errorf("%q: %w", dir, ErrInvalid)
-		}
-		if err := ValidName(strings.TrimSuffix(dir, "/")); err != nil {
-			return nil, err
-		}
-	}
-	if _, nests := l.Nests(strings.TrimSuffix(dir, "/")); dir != "" && nests {
-		return nil, nil
-	}
-	r, err := os.OpenRoot(l.Base)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+// ListAll returns every stored file below the directory dir (as for
+// List) that show admits, at any depth, named relative to dir and sorted
+// by that name ignoring case (names equal but for case in byte order).
+// Directories are not entries; what List never lists is skipped the same
+// way (reserved names, nested exposes, symlinks, files without a sidecar,
+// unreadable subdirectories). An unknown directory has no entries.
+func (l Local) ListAll(dir string, show func(rel string, sc Sidecar) bool) ([]Entry, error) {
+	r, d, err := l.openDir(dir)
+	if r == nil {
 		return nil, err
 	}
 	defer r.Close()
+	top := DataDir + "/"
+	var ents []Entry
+	err = fs.WalkDir(r.FS(), d, func(p string, de fs.DirEntry, err error) error {
+		if err != nil {
+			if p == d && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+				return err
+			}
+			return nil
+		}
+		if p == d {
+			if !de.IsDir() {
+				return fs.SkipAll
+			}
+			return nil
+		}
+		rel := p[len(top):]
+		if de.IsDir() {
+			if _, nests := l.Nests(rel); nests {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !de.Type().IsRegular() {
+			return nil
+		}
+		if sc, ok := l.shown(r, rel, show); ok {
+			ents = append(ents, Entry{Name: rel[len(dir):], Sidecar: sc})
+		}
+		return nil
+	})
+	sortEntries(ents)
+	return ents, err
+}
+
+// openDir validates the directory dir of the stored names ("" or ending
+// with a slash) and opens the storage base; d is the path of dir in it.
+// A nil root without an error is a directory with no entries.
+func (l Local) openDir(dir string) (*os.Root, string, error) {
+	if dir != "" {
+		if !strings.HasSuffix(dir, "/") {
+			return nil, "", fmt.Errorf("%q: %w", dir, ErrInvalid)
+		}
+		if err := ValidName(strings.TrimSuffix(dir, "/")); err != nil {
+			return nil, "", err
+		}
+	}
+	if _, nests := l.Nests(strings.TrimSuffix(dir, "/")); dir != "" && nests {
+		return nil, "", nil
+	}
+	r, err := os.OpenRoot(l.Base)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, "", nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
 	d := strings.TrimSuffix(DataDir+"/"+dir, "/")
 	if err := noSymlinks(r, d); err != nil {
+		r.Close()
 		if errors.Is(err, ErrInvalid) {
-			return nil, nil
+			return nil, "", nil
 		}
+		return nil, "", err
+	}
+	return r, d, nil
+}
+
+func (l Local) list(dir string, show func(rel string, sc Sidecar) bool, first bool) ([]Entry, error) {
+	r, d, err := l.openDir(dir)
+	if r == nil {
 		return nil, err
 	}
+	defer r.Close()
 	des, err := fs.ReadDir(r.FS(), d)
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 		return nil, nil
@@ -98,6 +156,13 @@ func (l Local) list(dir string, show func(rel string, sc Sidecar) bool, first bo
 	for name, sc := range files {
 		ents = append(ents, Entry{Name: name, Sidecar: sc})
 	}
+	sortEntries(ents)
+	return ents, nil
+}
+
+// sortEntries puts directories first, each sorted by name ignoring case,
+// names equal but for case in byte order.
+func sortEntries(ents []Entry) {
 	sort.Slice(ents, func(i, j int) bool {
 		if ents[i].Dir != ents[j].Dir {
 			return ents[i].Dir
@@ -107,7 +172,6 @@ func (l Local) list(dir string, show func(rel string, sc Sidecar) bool, first bo
 		}
 		return ents[i].Name < ents[j].Name
 	})
-	return ents, nil
 }
 
 // shown reads the sidecar of the regular file of the stored name rel and

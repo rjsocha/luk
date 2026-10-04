@@ -2,9 +2,11 @@ package server
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,6 +74,8 @@ type getReq struct {
 	// address of the secure listener serves secure.vm, the first address
 	// any other.
 	host string
+	// target is the request target signed (default that of link).
+	target string
 }
 
 func (f *privateFixture) get(t *testing.T, r getReq) *httptest.ResponseRecorder {
@@ -99,11 +103,14 @@ func (f *privateFixture) get(t *testing.T, r getReq) *httptest.ResponseRecorder 
 	if r.host != "secure.vm" {
 		addr = f.srv.config().Addrs()[0].Addr
 	}
-	hr := httptest.NewRequest(r.method, "https://"+r.host+u.EscapedPath(), nil)
+	if r.target == "" {
+		r.target = wire.GetTarget(u.EscapedPath(), u.RawQuery)
+	}
+	hr := httptest.NewRequest(r.method, "https://"+r.host+u.RequestURI(), nil)
 	hr.Host = r.host
 	if !r.unsigned {
 		ts := time.Now().UTC().Format(time.RFC3339)
-		text := wire.GetCanonicalText(r.signAs, r.host, u.EscapedPath(), ts, r.nonce)
+		text := wire.GetCanonicalText(r.signAs, r.host, r.target, ts, r.nonce)
 		if r.upload {
 			text = wire.CanonicalText(r.host, u.EscapedPath(), ts, r.nonce, "e30")
 		}
@@ -383,4 +390,55 @@ func reparse(c *config.Config) (*config.Config, error) {
 		c.Auth.Keys[i].Parsed = nil
 	}
 	return c, c.Validate()
+}
+
+// newSignedFixture is the private fixture with the drop storage exposed by
+// vault (/v/ on the secure listener, auth.ssh allow [robert.socha]) and
+// still protected by secure.
+func newSignedFixture(t *testing.T) *privateFixture {
+	return newPrivateFixture(t, func(s string) string {
+		s = strings.Replace(s, `expose: drop, protect: secure}`, `expose: vault, protect: secure}`, 1)
+		return strings.Replace(s, `  secure: {listen: secure, path: /,`, `  vault: {listen: secure, path: /v/, auth: {ssh: {allow: [robert.socha]}}}
+  secure: {listen: secure, path: /,`, 1)
+	})
+}
+
+func TestSignedExposeGet(t *testing.T) {
+	f := newSignedFixture(t)
+	link := f.drop(t, f.user, wire.Meta{File: "a.txt"}, "open")
+	u := mustURL(t, link)
+	if u.Scheme != "luk" || u.Host != "secure.vm" || !strings.HasPrefix(u.Path, "/v/") || u.Fragment != f.pin {
+		t.Fatalf("url %s, want luk://secure.vm/v/<name>#%s", link, f.pin)
+	}
+	if rec := f.get(t, getReq{signer: f.user, link: link}); rec.Code != http.StatusOK || rec.Body.String() != "open" {
+		t.Fatalf("allowed: %d %q", rec.Code, rec.Body)
+	}
+	wantStatus(t, "not allowed", f.get(t, getReq{signer: f.other, link: link}), http.StatusNotFound)
+	wantStatus(t, "unsigned", f.get(t, getReq{link: link, unsigned: true}), http.StatusNotFound)
+	wantStatus(t, "unknown key", f.get(t, getReq{signer: newSigner(t), link: link}), http.StatusUnauthorized)
+	// Private files stay on the protect expose.
+	priv := f.drop(t, f.user, wire.Meta{Access: wire.AccessPrivate}, "secret")
+	if !strings.HasPrefix(priv, "luk://secure.vm/") || strings.HasPrefix(priv, "luk://secure.vm/v/") {
+		t.Fatalf("private url %s", priv)
+	}
+	wantStatus(t, "private on the protect", f.get(t, getReq{signer: f.user, link: priv}), http.StatusOK)
+	wantStatus(t, "private on the expose", f.get(t, getReq{signer: f.user, link: "luk://secure.vm/v/" + path.Base(mustURL(t, priv).Path)}), http.StatusNotFound)
+}
+
+func TestSignedListingServer(t *testing.T) {
+	f := newSignedFixture(t)
+	link := f.drop(t, f.user, wire.Meta{File: "a.txt"}, "open")
+	f.drop(t, f.user, wire.Meta{Access: wire.AccessPrivate}, "secret")
+	f.drop(t, f.user, wire.Meta{Once: true}, "once")
+	for _, q := range []string{"", "?recursive=1"} {
+		rec := f.get(t, getReq{signer: f.user, link: "luk://secure.vm/v/" + q})
+		var ents []wire.ListEntry
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &ents) != nil || len(ents) != 1 ||
+			ents[0].Name != path.Base(mustURL(t, link).Path) || ents[0].SHA256 != fileMeta([]byte("open")).SHA256 {
+			t.Errorf("listing %q: %d %s", q, rec.Code, rec.Body)
+		}
+	}
+	wantStatus(t, "not allowed", f.get(t, getReq{signer: f.other, link: "luk://secure.vm/v/"}), http.StatusNotFound)
+	// The query is signed: a signature of the path alone does not verify.
+	wantStatus(t, "query not signed", f.get(t, getReq{signer: f.user, link: "luk://secure.vm/v/?recursive=1", target: "/v/"}), http.StatusUnauthorized)
 }

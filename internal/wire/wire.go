@@ -259,9 +259,34 @@ func CanonicalText(host, path, timestamp, nonce, meta string) []byte {
 
 // GetCanonicalText is what the client signs and the server verifies for a
 // download from an expose with auth.ssh: the method (GET or HEAD), the
-// Host, the path as requested (escaped), the timestamp and the nonce.
-func GetCanonicalText(method, host, path, timestamp, nonce string) []byte {
-	return []byte(strings.Join([]string{GetNamespace, method, host, path, timestamp, nonce}, "\n"))
+// Host, the request target (GetTarget), the timestamp and the nonce.
+func GetCanonicalText(method, host, target, timestamp, nonce string) []byte {
+	return []byte(strings.Join([]string{GetNamespace, method, host, target, timestamp, nonce}, "\n"))
+}
+
+// QueryRecursive is the query of a signed listing (luk-get@v1 on a
+// directory URL) of every file below the directory, named relative to it.
+const QueryRecursive = "recursive=1"
+
+// ListEntry is a line of the signed listing of a directory: a directory
+// (Dir, its name ending with a slash) or a file with its size, stored time
+// (RFC 3339 in UTC) and sha256.
+type ListEntry struct {
+	Name     string `json:"name"`
+	Dir      bool   `json:"dir,omitempty"`
+	Size     *int64 `json:"size,omitempty"`
+	Received string `json:"received,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
+}
+
+// GetTarget is the request target a luk-get@v1 signature covers: the path
+// as requested (escaped) and, when the request has a query, "?" and the
+// raw query as sent. A request without a query signs its path alone.
+func GetTarget(escapedPath, rawQuery string) string {
+	if rawQuery == "" {
+		return escapedPath
+	}
+	return escapedPath + "?" + rawQuery
 }
 
 // ListCanonicalText is what the client signs and the server verifies for

@@ -764,22 +764,16 @@ func (s *Server) downloadURL(cfg *config.Config, storage string, v store.Vars, a
 }
 
 // fileURL is the URL of the stored name rel of storage: on its expose,
-// or for a private file (access set) on its protect expose with the
-// scheme luk and, when the first listener of that expose uses a
-// certificate of mode self or files, its pin as the fragment.
+// or for a private file (access set) on its protect expose. The URL of
+// an expose with auth.ssh has the scheme luk and, when the first listener
+// of that expose uses a certificate of mode self or files, its pin as the
+// fragment.
 func (s *Server) fileURL(cfg *config.Config, storage, rel, access string) (string, bool) {
-	if access == "" {
-		st := cfg.Storage[storage]
-		if st == nil {
-			return "", false
-		}
-		base, ok := cfg.ExposeURL(st.Expose)
-		if !ok {
-			return "", false
-		}
-		return expose.NameURL(base, rel), true
+	urlOf := cfg.PublicURL
+	if access != "" {
+		urlOf = cfg.ProtectURL
 	}
-	base, l, ok := cfg.ProtectURL(storage)
+	base, l, ok := urlOf(storage)
 	if !ok {
 		return "", false
 	}
@@ -1130,7 +1124,7 @@ func (s *Server) verifyGet(r *http.Request, sn *snapshot, l *listener) (*wire.Id
 		return nil, errors.New("missing signature headers")
 	}
 	return s.verify(r, sn, l, s.now(), ts, nonce, sigS, wire.GetNamespace,
-		wire.GetCanonicalText(r.Method, r.Host, r.URL.EscapedPath(), ts, nonce))
+		wire.GetCanonicalText(r.Method, r.Host, wire.GetTarget(r.URL.EscapedPath(), r.URL.RawQuery), ts, nonce))
 }
 
 // verify checks the timestamp, the nonce and the signature of a signed
