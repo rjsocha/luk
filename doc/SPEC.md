@@ -1471,9 +1471,13 @@ and `ssh.d/ca/`):
   error naming the new place (`expose <n>: ttl moved to
   storage.<storage>.ttl.max`, `cleanup moved to
   storage.<storage>.cleanup.age`);
-- `storage.<n>.retention` needs a local storage; every `origin` glob is
-  non-empty and valid for path.Match; the `keep` counts are not negative
-  and at least one is above 0; a rule without `origin` (every origin) is
+- `storage.<n>.retention` needs a local storage and `conflict` `version`
+  or `reject` (`storage <n>: retention needs conflict version or reject,
+  not replace`: a replace overwrites a stored path at once and bypasses
+  retention); every `origin` glob is
+  non-empty and valid for path.Match; the `keep` counts and `keep.within`
+  are not negative and at least one count or `within` is above 0; a rule
+  without `origin` (every origin) is
   the last (`storage <n>: retention rule <i> matches every origin and
   must be the last: the rules after it are unreachable`);
 - `respond: url` requires `storage`, and that storage must be exposed;
@@ -2070,7 +2074,8 @@ pipeline:
   an expiry: they are removed once their `received` time is older,
   exposed or not (an archive too). Files with an expiry are left to it.
 - `retention` (local only) - rules that keep a number of files per series
-  (grandfather-father-son) and prune the rest:
+  (grandfather-father-son), and optionally every file of a recent window,
+  and prune the rest:
 
   ```yaml
   storage:
@@ -2082,7 +2087,7 @@ pipeline:
         - origin: ["db1-prod", "*-prod"]          # globs (path.Match) on the origin
           keep: {last: 3, daily: 14, weekly: 8, monthly: 12, yearly: 2}
         - origin: ["*-stage"]
-          keep: {daily: 7}
+          keep: {daily: 7, within: 2d}            # and everything of the last 2 days
         - keep: {daily: 7, weekly: 4}               # no origin: every other origin
   ```
 
@@ -2106,14 +2111,22 @@ pipeline:
     and `yearly` each walk the files from the newest and keep the newest
     file of each distinct bucket until that many buckets are kept (a
     bucket without files counts for nothing, so gaps reach further
-    back). The kept set is the union; every other file of the series is
-    pruned. Each count is 0 or more and a rule has at least one above 0.
-    The selection depends on the files and the rules only, not on the
-    current time.
+    back). `within` (a duration, `2d`, `36h`) keeps every file received
+    at most that long before now, whatever the counts. The kept set is
+    the union; every other file of the series is pruned. Each count is 0
+    or more and a rule has at least one count or `within` above 0.
+    Without `within` the selection depends on the files and the rules
+    only, not on the current time.
+  - A storage with `retention` stores with `conflict: version` (the
+    default) or `reject`; `replace` is refused, since it overwrites a
+    stored path at once and so bypasses retention.
   - Retention works next to `ttl` and `cleanup.age`: a file goes when any
     of them removes it.
   - The maintenance of the process role applies the rules (see Service)
-    whenever the base or the rules changed since its last pass: each
+    whenever the base or the rules changed since its last pass, or a file
+    that pass kept for `within` has left its window since (the pass
+    remembers the earliest moment one does, so a file pruned once its
+    window ends goes within a minute, the maintenance interval): each
     pruned file is removed as `lukd storage rm` removes it (base lock,
     sidecar, the alias moved to the next newest declarer, content
     objects, emptied directories), only while its sidecar still has the
@@ -2352,7 +2365,7 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   (see `retention`), read only. Per series, in order of pipeline, origin
   and file name, a line naming the series and the rule that applies,
   then its files newest first as aligned columns `NAME`, `RECEIVED`,
-  `ACTION` (`KEEP` or `PRUNE`) and `REASONS` (`last`, `daily
+  `ACTION` (`KEEP` or `PRUNE`) and `REASONS` (`last`, `within`, `daily
   2026-10-04`, `weekly 2026-W40`, `monthly 2026-10`, `yearly 2026`;
   `no rule` for every file of a series no rule matches, `received
   unreadable`; `-` for a pruned file). An empty pipeline or origin shows
@@ -2371,7 +2384,8 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   ```
 
   `--json` prints an array of the series: `pipeline`, `origin`, `file`,
-  `rule` (1-based, omitted for none), `keep` (the counts of the rule) and
+  `rule` (1-based, omitted for none), `keep` (the counts of the rule,
+  `within` as in the configuration, `"2d"`) and
   `files`, each with `name`, `id`, `received`, `keep` (true or false) and
   `reasons`. Sidecars that cannot be read are reported after the plan
   (exit 1).

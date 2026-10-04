@@ -118,8 +118,8 @@ func storageCmd(cfgPath *string) *cobra.Command {
 		Short: "Show what the retention rules keep and prune",
 		Long: "Show the retention plan of a local storage without changing anything: per\n" +
 			"series (pipeline, origin, file name) the rule that applies and every file,\n" +
-			"newest first, with KEEP and the reasons (last, daily 2026-10-04, weekly\n" +
-			"2026-W40, monthly 2026-10, yearly 2026) or PRUNE. Files of a series no rule\n" +
+			"newest first, with KEEP and the reasons (last, within, daily 2026-10-04,\n" +
+			"weekly 2026-W40, monthly 2026-10, yearly 2026) or PRUNE. Files of a series no rule\n" +
 			"matches are kept (no rule). The maintenance of the process role removes the\n" +
 			"pruned files.",
 		Args: cobra.NoArgs,
@@ -128,7 +128,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			plans, werr := l.RetentionPlan(st)
+			plans, werr := l.RetentionPlan(st, time.Now())
 			if err := printRetention(cmd.OutOrStdout(), st, plans, retJSON); err != nil {
 				return err
 			}
@@ -187,7 +187,8 @@ func printRetention(w io.Writer, st *config.Storage, plans []store.SeriesPlan, a
 	return nil
 }
 
-// keepText is the counts of k above 0: "last 3, daily 14".
+// keepText is the counts of k above 0 and its window: "last 3, daily 14,
+// within 2d".
 func keepText(k config.Keep) string {
 	var out []string
 	for _, c := range []struct {
@@ -197,6 +198,9 @@ func keepText(k config.Keep) string {
 		if c.n > 0 {
 			out = append(out, c.name+" "+strconv.Itoa(c.n))
 		}
+	}
+	if k.Within > 0 {
+		out = append(out, "within "+wire.FormatDuration(time.Duration(k.Within)))
 	}
 	return strings.Join(out, ", ")
 }

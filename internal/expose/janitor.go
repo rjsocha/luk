@@ -135,7 +135,7 @@ func maintain(cfg *config.Config, log *slog.Logger, now time.Time) {
 		st := store.FromConfig(s)
 		// Retention removals only mark the catalog stale; Reconcile
 		// rebuilds it once.
-		err := st.Batch().Retain(s, func(p store.SeriesPlan, f store.RetainedFile) {
+		err := st.Batch().Retain(s, now, func(p store.SeriesPlan, f store.RetainedFile) {
 			log.Info("retention removed", "storage", name, "name", f.Name, "id", f.ID,
 				"pipeline", p.Pipeline, "origin", p.Origin, "file", p.File, "rule", p.Rule)
 		})

@@ -1998,6 +1998,36 @@ func TestRetention(t *testing.T) {
 	if got := st.RetentionRule("db1-dev"); got != -1 {
 		t.Errorf("without a catch-all: rule %d", got)
 	}
+
+	src = strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", retention: [{keep: {within: 2d}}]}`, 1)
+	if c, err = Parse([]byte(src)); err != nil {
+		t.Fatal(err)
+	}
+	k := c.Storage["archive"].Retention[0].Keep
+	if k != (Keep{Within: Duration(48 * time.Hour)}) {
+		t.Fatalf("within: %+v", k)
+	}
+	b, err := json.Marshal(k)
+	if err != nil || string(b) != `{"within":"2d"}` {
+		t.Fatalf("json: %s %v", b, err)
+	}
+	var back Keep
+	if err := json.Unmarshal([]byte(`{"last":2,"within":"36h"}`), &back); err != nil || back != (Keep{Last: 2, Within: Duration(36 * time.Hour)}) {
+		t.Fatalf("json back: %+v %v", back, err)
+	}
+}
+
+func TestRetentionConflictReplace(t *testing.T) {
+	src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", conflict: replace, retention: [{keep: {daily: 1}}]}`, 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage archive: retention needs conflict version or reject, not replace") {
+		t.Fatalf("replace: %v", err)
+	}
+	for _, conflict := range []string{"version", "reject"} {
+		src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", conflict: `+conflict+`, retention: [{keep: {daily: 1}}]}`, 1)
+		if _, err := Parse([]byte(src)); err != nil {
+			t.Fatalf("%s: %v", conflict, err)
+		}
+	}
 }
 
 func TestRetentionErrors(t *testing.T) {
@@ -2007,6 +2037,9 @@ func TestRetentionErrors(t *testing.T) {
 		`[{origin: [""], keep: {daily: 7}}]`:                  "storage archive: retention rule 1: empty origin glob",
 		`[{origin: x, keep: {daily: -1}}]`:                    "storage archive: retention rule 1: keep counts must not be negative",
 		`[{origin: x, keep: {}}]`:                             "storage archive: retention rule 1: keep needs a count above 0",
+		`[{origin: x, keep: {within: -1h}}]`:                  "storage archive: retention rule 1: keep.within must not be negative",
+		`[{origin: x, keep: {within: 0s}}]`:                   "storage archive: retention rule 1: keep needs a count above 0 (last, daily, weekly, monthly, yearly) or within",
+		`[{origin: x, keep: {within: 2x}}]`:                   `unknown unit "x"`,
 		`[{origin: x}]`:                                       "storage archive: retention rule 1: keep needs a count above 0",
 		`[{origin: x, keep: {hourly: 1}}]`:                    "field hourly not found",
 	} {

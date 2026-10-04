@@ -197,11 +197,12 @@ storage:
       max: 21d                  # fixed lifetime: the client ttl is ignored
     # retention:                # files kept per series (pipeline, origin, file name);
     #                           # the first rule whose origin globs match applies,
-    #                           # the rest of the series is pruned (UTC buckets)
+    #                           # the rest of the series is pruned (UTC buckets);
+    #                           # needs conflict version (default) or reject
     #   - origin: ["db1-prod", "*-prod"]
     #     keep: {last: 3, daily: 14, weekly: 8, monthly: 12, yearly: 2}
     #   - origin: ["*-stage"]
-    #     keep: {daily: 7}
+    #     keep: {daily: 7, within: 2d}   # and every file of the last 2 days
     #   - keep: {daily: 7, weekly: 4}   # no origin: every other origin (last rule)
   publish:
     type: local

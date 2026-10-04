@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -729,15 +730,52 @@ type Retention struct {
 	Keep   Keep       `yaml:"keep"`
 }
 
-// Keep holds the counts of a retention rule: the Last newest files, and
-// the newest file of each of the newest Daily days, Weekly ISO weeks,
-// Monthly months and Yearly years (UTC).
+// Keep holds the counts of a retention rule: the Last newest files, the
+// newest file of each of the newest Daily days, Weekly ISO weeks, Monthly
+// months and Yearly years (UTC), and every file received within Within
+// before now.
 type Keep struct {
-	Last    int `yaml:"last" json:"last,omitempty"`
-	Daily   int `yaml:"daily" json:"daily,omitempty"`
-	Weekly  int `yaml:"weekly" json:"weekly,omitempty"`
-	Monthly int `yaml:"monthly" json:"monthly,omitempty"`
-	Yearly  int `yaml:"yearly" json:"yearly,omitempty"`
+	Last    int      `yaml:"last" json:"last,omitempty"`
+	Daily   int      `yaml:"daily" json:"daily,omitempty"`
+	Weekly  int      `yaml:"weekly" json:"weekly,omitempty"`
+	Monthly int      `yaml:"monthly" json:"monthly,omitempty"`
+	Yearly  int      `yaml:"yearly" json:"yearly,omitempty"`
+	Within  Duration `yaml:"within" json:"-"`
+}
+
+// keepJSON is Keep in JSON: Within in the form of the configuration
+// ("2d").
+type keepJSON struct {
+	Last    int    `json:"last,omitempty"`
+	Daily   int    `json:"daily,omitempty"`
+	Weekly  int    `json:"weekly,omitempty"`
+	Monthly int    `json:"monthly,omitempty"`
+	Yearly  int    `json:"yearly,omitempty"`
+	Within  string `json:"within,omitempty"`
+}
+
+func (k Keep) MarshalJSON() ([]byte, error) {
+	j := keepJSON{k.Last, k.Daily, k.Weekly, k.Monthly, k.Yearly, ""}
+	if k.Within != 0 {
+		j.Within = wire.FormatDuration(time.Duration(k.Within))
+	}
+	return json.Marshal(j)
+}
+
+func (k *Keep) UnmarshalJSON(b []byte) error {
+	var j keepJSON
+	if err := json.Unmarshal(b, &j); err != nil {
+		return err
+	}
+	*k = Keep{Last: j.Last, Daily: j.Daily, Weekly: j.Weekly, Monthly: j.Monthly, Yearly: j.Yearly}
+	if j.Within != "" {
+		d, err := wire.ParseDuration(j.Within)
+		if err != nil {
+			return err
+		}
+		k.Within = Duration(d)
+	}
+	return nil
 }
 
 // Matches reports whether the rule applies to origin: it has no globs, or
@@ -1438,6 +1476,9 @@ func (c *Config) validate() []error {
 		if len(s.Retention) > 0 && s.Type != "local" {
 			bad("storage %s: retention needs a local storage", name)
 		}
+		if len(s.Retention) > 0 && s.Conflict == "replace" {
+			bad("storage %s: retention needs conflict version or reject, not replace", name)
+		}
 		for i, r := range s.Retention {
 			for _, g := range r.Origin {
 				if g == "" {
@@ -1450,8 +1491,10 @@ func (c *Config) validate() []error {
 			switch {
 			case k.Last < 0 || k.Daily < 0 || k.Weekly < 0 || k.Monthly < 0 || k.Yearly < 0:
 				bad("storage %s: retention rule %d: keep counts must not be negative", name, i+1)
+			case k.Within < 0:
+				bad("storage %s: retention rule %d: keep.within must not be negative", name, i+1)
 			case k == Keep{}:
-				bad("storage %s: retention rule %d: keep needs a count above 0 (last, daily, weekly, monthly, yearly)", name, i+1)
+				bad("storage %s: retention rule %d: keep needs a count above 0 (last, daily, weekly, monthly, yearly) or within", name, i+1)
 			}
 			if len(r.Origin) == 0 && i < len(s.Retention)-1 {
 				bad("storage %s: retention rule %d matches every origin and must be the last: the rules after it are unreachable", name, i+1)

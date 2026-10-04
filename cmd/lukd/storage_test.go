@@ -412,3 +412,10 @@ series pipeline=nightly origin=db1-stage file=db.sql: no rule
 		}
 	}
 }
+
+func TestKeepText(t *testing.T) {
+	k := config.Keep{Last: 3, Daily: 14, Within: config.Duration(48 * time.Hour)}
+	if got := keepText(k); got != "last 3, daily 14, within 2d" {
+		t.Fatalf("%q", got)
+	}
+}

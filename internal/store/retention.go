@@ -41,8 +41,8 @@ const (
 )
 
 // RetainedFile is one file of a series in a retention plan: kept with the
-// reasons (last, daily 2026-10-04, weekly 2026-W40, monthly 2026-10,
-// yearly 2026, KeptNoRule, KeptUnreadable), or pruned.
+// reasons (last, within, daily 2026-10-04, weekly 2026-W40, monthly
+// 2026-10, yearly 2026, KeptNoRule, KeptUnreadable), or pruned.
 type RetainedFile struct {
 	Name     string   `json:"name"`
 	ID       string   `json:"id"`
@@ -61,13 +61,21 @@ type SeriesPlan struct {
 }
 
 // SelectRetained returns for each time of at (newest first) the reasons
-// k keeps it, nil when it is pruned: the k.Last newest, and for each of
-// days, ISO weeks, months and years (UTC) the newest time of each distinct
-// bucket until that many buckets are kept.
-func SelectRetained(at []time.Time, k config.Keep) [][]string {
+// k keeps it, nil when it is pruned: the k.Last newest, every time at
+// most k.Within before now, and for each of days, ISO weeks, months and
+// years (UTC) the newest time of each distinct bucket until that many
+// buckets are kept.
+func SelectRetained(at []time.Time, k config.Keep, now time.Time) [][]string {
 	out := make([][]string, len(at))
 	for i := 0; i < len(at) && i < k.Last; i++ {
 		out[i] = append(out[i], "last")
+	}
+	if k.Within > 0 {
+		for i, t := range at {
+			if now.Sub(t) <= time.Duration(k.Within) {
+				out[i] = append(out[i], "within")
+			}
+		}
 	}
 	for _, b := range []struct {
 		n    int
@@ -96,10 +104,10 @@ func SelectRetained(at []time.Time, k config.Keep) [][]string {
 // RetentionPlan groups the stored files of l (aliases left out) by series,
 // in series order, and decides per series by the first rule of st whose
 // origin globs match its origin; a series no rule matches is kept whole.
-// Files whose received time cannot be read are kept and take no place in
-// the counts. Unreadable sidecars are returned as the error, after the
-// plan of the readable ones.
-func (l Local) RetentionPlan(st *config.Storage) ([]SeriesPlan, error) {
+// now is the end of the within windows. Files whose received time cannot
+// be read are kept and take no place in the counts. Unreadable sidecars
+// are returned as the error, after the plan of the readable ones.
+func (l Local) RetentionPlan(st *config.Storage, now time.Time) ([]SeriesPlan, error) {
 	type file struct {
 		RetainedFile
 		at time.Time
@@ -141,7 +149,7 @@ func (l Local) RetentionPlan(st *config.Storage) ([]SeriesPlan, error) {
 					at = append(at, f.at)
 				}
 			}
-			reasons = SelectRetained(at, k)
+			reasons = SelectRetained(at, k, now)
 		}
 		for i, f := range files {
 			p.Files[i] = f.RetainedFile
@@ -164,13 +172,46 @@ func (l Local) RetentionPlan(st *config.Storage) ([]SeriesPlan, error) {
 }
 
 // retentionFresh caches per base the generation and the rules of the last
-// complete retention pass: the plan depends on the stored files and the
-// rules only, so an unchanged base needs no new pass.
+// complete retention pass, and until when its plan holds: the plan
+// depends on the stored files, the rules and, through keep.within, on the
+// time. A file kept for within changes the plan when it leaves its window,
+// so the earliest such moment ends the plan; without one the plan holds
+// until the base or the rules change.
 var retentionFresh sync.Map
 
 type retentionState struct {
 	gen   int64
 	rules string
+	until time.Time
+}
+
+// fresh reports whether a pass with state s is still current at now.
+func (s retentionState) fresh(next retentionState, now time.Time) bool {
+	return s.gen == next.gen && s.rules == next.rules && (s.until.IsZero() || now.Before(s.until))
+}
+
+// planUntil is the earliest moment a file the plans keep for within leaves
+// its window, zero when none does.
+func planUntil(plans []SeriesPlan) time.Time {
+	var until time.Time
+	for _, p := range plans {
+		if p.Keep == nil || p.Keep.Within <= 0 {
+			continue
+		}
+		for _, f := range p.Files {
+			if !slices.Contains(f.Reasons, "within") {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339, f.Received)
+			if err != nil {
+				continue
+			}
+			if end := at.Add(time.Duration(p.Keep.Within)); until.IsZero() || end.Before(until) {
+				until = end
+			}
+		}
+	}
+	return until
 }
 
 // Retain removes the files the retention plan of st prunes, each as
@@ -178,8 +219,9 @@ type retentionState struct {
 // as l rebuilds it), calling removed after each removal. A file replaced
 // or removed meanwhile is skipped. It does nothing while the base and the
 // rules are as at its last pass in this process that removed every file
-// it pruned.
-func (l Local) Retain(st *config.Storage, removed func(SeriesPlan, RetainedFile)) error {
+// it pruned, and no file that pass kept for within has left its window
+// by now.
+func (l Local) Retain(st *config.Storage, now time.Time, removed func(SeriesPlan, RetainedFile)) error {
 	if len(st.Retention) == 0 {
 		return nil
 	}
@@ -191,11 +233,11 @@ func (l Local) Retain(st *config.Storage, removed func(SeriesPlan, RetainedFile)
 		return err
 	}
 	defer r.Close()
-	state := retentionState{generation(r), fmt.Sprint(st.Retention)}
-	if v, ok := retentionFresh.Load(l.key()); ok && v.(retentionState) == state {
+	state := retentionState{gen: generation(r), rules: fmt.Sprint(st.Retention)}
+	if v, ok := retentionFresh.Load(l.key()); ok && v.(retentionState).fresh(state, now) {
 		return nil
 	}
-	plans, err := l.RetentionPlan(st)
+	plans, err := l.RetentionPlan(st, now)
 	errs := []error{err}
 	for _, p := range plans {
 		for _, f := range p.Files {
@@ -216,6 +258,7 @@ func (l Local) Retain(st *config.Storage, removed func(SeriesPlan, RetainedFile)
 	// Unreadable sidecars are reported once: they do not keep the pass due.
 	if len(errs) == 1 {
 		if state.gen = generation(r); state.gen%2 == 0 {
+			state.until = planUntil(plans)
 			retentionFresh.Store(l.key(), state)
 		}
 	}

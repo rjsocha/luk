@@ -59,8 +59,18 @@ func TestSelectRetained(t *testing.T) {
 		{"buckets in UTC", []string{"2026-10-05T01:00:00+02:00", "2026-10-04T12:00:00Z"}, config.Keep{Daily: 2},
 			[]string{"daily 2026-10-04", "-"}},
 		{"zero counts keep nothing", []string{"2026-10-04T10:00:00Z"}, config.Keep{}, []string{"-"}},
+		{"within keeps every file of the window",
+			[]string{"2026-10-04T18:00:00Z", "2026-10-04T06:00:00Z", "2026-10-03T00:00:00Z", "2026-10-02T23:59:59Z", "2026-09-01T00:00:00Z"},
+			config.Keep{Within: config.Duration(48 * time.Hour)},
+			[]string{"within", "within", "within", "-", "-"}},
+		{"within next to counts",
+			[]string{"2026-10-04T18:00:00Z", "2026-10-04T06:00:00Z", "2026-09-30T06:00:00Z", "2026-09-29T06:00:00Z"},
+			config.Keep{Last: 1, Daily: 2, Within: config.Duration(24 * time.Hour)},
+			[]string{"last; within; daily 2026-10-04", "within", "daily 2026-09-30", "-"}},
+		{"within of a file from the future", []string{"2026-10-06T00:00:00Z"}, config.Keep{Within: config.Duration(time.Hour)},
+			[]string{"within"}},
 	} {
-		got := SelectRetained(times(t, c.at...), c.keep)
+		got := SelectRetained(times(t, c.at...), c.keep, time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC))
 		var s []string
 		for _, r := range got {
 			if r == nil {
@@ -129,7 +139,7 @@ func TestRetentionPlanAndRetain(t *testing.T) {
 	checkAlias(t, l, "prod/latest", "prod/4b", "prod/4b")
 
 	st := retentionStorage()
-	plans, err := l.RetentionPlan(st)
+	plans, err := l.RetentionPlan(st, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +167,7 @@ func TestRetentionPlanAndRetain(t *testing.T) {
 
 	var removed []string
 	rec := func(p SeriesPlan, f RetainedFile) { removed = append(removed, fmt.Sprintf("%s@%d", f.Name, p.Rule)) }
-	if err := l.Retain(st, rec); err != nil {
+	if err := l.Retain(st, time.Now(), rec); err != nil {
 		t.Fatal(err)
 	}
 	slices.Sort(removed)
@@ -186,11 +196,11 @@ func TestRetentionPlanAndRetain(t *testing.T) {
 
 	// An unchanged base and unchanged rules need no pass; new rules do.
 	removed = nil
-	if err := l.Retain(st, rec); err != nil || removed != nil {
+	if err := l.Retain(st, time.Now(), rec); err != nil || removed != nil {
 		t.Fatalf("second pass: %v %v", removed, err)
 	}
 	st.Retention[0].Keep = config.Keep{Last: 1}
-	if err := l.Retain(st, rec); err != nil || !slices.Equal(removed, []string{"prod/3@1"}) {
+	if err := l.Retain(st, time.Now(), rec); err != nil || !slices.Equal(removed, []string{"prod/3@1"}) {
 		t.Fatalf("new rules: %v %v", removed, err)
 	}
 	checkAlias(t, l, "prod/latest", "prod/4b", "prod/4b")
@@ -200,8 +210,35 @@ func TestRetainWithoutRules(t *testing.T) {
 	l := Local{Base: t.TempDir()}
 	putSeries(t, l, "a", Series{"p", "o", "f"}, "2026-10-01T06:00:00Z", "")
 	putSeries(t, l, "b", Series{"p", "o", "f"}, "2026-10-02T06:00:00Z", "")
-	if err := l.Retain(&config.Storage{}, func(SeriesPlan, RetainedFile) { t.Error("removed") }); err != nil {
+	if err := l.Retain(&config.Storage{}, time.Now(), func(SeriesPlan, RetainedFile) { t.Error("removed") }); err != nil {
 		t.Fatal(err)
 	}
 	mustExist(t, filepath.Join(l.Base, DataDir, "a"))
+}
+
+func TestRetainWithin(t *testing.T) {
+	l := Local{Base: t.TempDir(), Conflict: "version"}
+	s := Series{"nightly", "db1-prod", "db.sql"}
+	putSeries(t, l, "c", s, "2026-10-04T12:00:00Z", "")
+	putSeries(t, l, "b", s, "2026-10-04T06:00:00Z", "")
+	putSeries(t, l, "a", s, "2026-10-03T06:00:00Z", "")
+	st := &config.Storage{Retention: []config.Retention{{Keep: config.Keep{Last: 1, Within: config.Duration(24 * time.Hour)}}}}
+	var removed []string
+	rec := func(_ SeriesPlan, f RetainedFile) { removed = append(removed, f.Name) }
+	at := func(s string) time.Time { return times(t, s)[0] }
+	// a is out of the window; b leaves it at 2026-10-05T06:00:00Z.
+	if err := l.Retain(st, at("2026-10-04T12:00:00Z"), rec); err != nil || !slices.Equal(removed, []string{"a"}) {
+		t.Fatalf("first pass: %v %v", removed, err)
+	}
+	// The base is unchanged and b is still in its window: no pass.
+	removed = nil
+	if err := l.Retain(st, at("2026-10-05T05:59:59Z"), rec); err != nil || removed != nil {
+		t.Fatalf("within the window: %v %v", removed, err)
+	}
+	// b has left its window: the plan is due again although nothing
+	// changed.
+	if err := l.Retain(st, at("2026-10-05T06:00:01Z"), rec); err != nil || !slices.Equal(removed, []string{"b"}) {
+		t.Fatalf("after the window: %v %v", removed, err)
+	}
+	mustExist(t, filepath.Join(l.Base, DataDir, "c"))
 }
