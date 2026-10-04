@@ -78,11 +78,20 @@ func getDir(cmd *cobra.Command, rawURL string, u *url.URL, pin string, o dirOpti
 		}
 		return printListing(out, ents, time.Local)
 	}
+	d := &dirGet{ctx: ctx, base: u, opts: g, force: o.force, out: out, errOut: cmd.ErrOrStderr(), quiet: o.quiet, now: time.Now}
 	if o.progress && term.IsTerminal(int(os.Stderr.Fd())) {
-		g.Progress = os.Stderr
+		d.live = newDirLive(os.Stderr, stderrWidth, time.Now)
 	}
-	d := &dirGet{ctx: ctx, base: u, opts: g, force: o.force, out: out, errOut: cmd.ErrOrStderr(), quiet: o.quiet}
 	return d.run(o.output, ents)
+}
+
+// stderrWidth is the width of the terminal on stderr, 0 when unknown.
+func stderrWidth() int {
+	w, _, err := term.GetSize(int(os.Stderr.Fd()))
+	if err != nil {
+		return 0
+	}
+	return w
 }
 
 // checkDirTarget refuses a -o of a directory URL that is neither a
@@ -144,6 +153,9 @@ type dirGet struct {
 	quiet       bool
 	out, errOut io.Writer
 	root        *os.Root
+	now         func() time.Time
+	// live is the live line of --progress on a terminal; nil without.
+	live *dirLive
 
 	got, skipped, failed int
 	bytes                int64
@@ -187,11 +199,21 @@ func (d *dirGet) run(dir string, ents []wire.ListEntry) error {
 	}
 	defer root.Close()
 	d.root = root
-	for _, e := range files {
+	defer d.live.clear()
+	sizes := make([]int64, len(files))
+	for i, e := range files {
+		sizes[i] = entrySize(e)
+	}
+	d.live.init(sizes)
+	start := d.now()
+	for i, e := range files {
 		if err := d.ctx.Err(); err != nil {
 			return &client.TransferError{Reason: client.Interrupted, Err: err}
 		}
-		skipped, n, err := d.file(e)
+		d.live.begin(i+1, client.Printable(e.Name), sizes[i])
+		skipped, n, took, err := d.file(e)
+		d.live.end(skipped)
+		d.live.clear()
 		var te *client.TransferError
 		switch {
 		case errors.As(err, &te) && te.Reason == client.Interrupted:
@@ -208,15 +230,28 @@ func (d *dirGet) run(dir string, ents []wire.ListEntry) error {
 		default:
 			d.got++
 			d.bytes += n
-			d.say("get %s\n", client.Printable(e.Name))
+			d.say("get %s  %s  %s\n", client.Printable(e.Name), client.HumanBytes(n), durText(took))
 		}
 	}
+	el := d.now().Sub(start)
+	failed := ""
 	if d.failed > 0 {
-		d.say("%d downloaded, %d skipped, %d failed, %s\n", d.got, d.skipped, d.failed, client.HumanBytes(d.bytes))
+		failed = fmt.Sprintf(", %d failed", d.failed)
+	}
+	d.say("%d downloaded, %d skipped%s, %s in %s, %s/s\n", d.got, d.skipped, failed,
+		client.HumanBytes(d.bytes), durText(el), client.HumanBytes(rateOf(d.bytes, el)))
+	if d.failed > 0 {
 		return &dirFailed{failed: d.failed, total: len(files), first: d.first}
 	}
-	d.say("%d downloaded, %d skipped, %s\n", d.got, d.skipped, client.HumanBytes(d.bytes))
 	return nil
+}
+
+// entrySize is the size of a listing entry, -1 when it has none.
+func entrySize(e wire.ListEntry) int64 {
+	if e.Size == nil || *e.Size < 0 {
+		return -1
+	}
+	return *e.Size
 }
 
 func (d *dirGet) say(format string, args ...any) {
@@ -226,33 +261,35 @@ func (d *dirGet) say(format string, args ...any) {
 }
 
 // file downloads one file of the listing unless a regular file with its
-// sha256 is already there (skipped); n is the number of bytes written.
-func (d *dirGet) file(e wire.ListEntry) (skipped bool, n int64, err error) {
+// sha256 is already there (skipped); n is the number of bytes written,
+// took the time of the download.
+func (d *dirGet) file(e wire.ListEntry) (skipped bool, n int64, took time.Duration, err error) {
 	if err := d.parents(e.Name); err != nil {
-		return false, 0, err
+		return false, 0, 0, err
 	}
 	fi, err := d.root.Lstat(e.Name)
 	switch {
 	case err == nil && !fi.Mode().IsRegular():
-		return false, 0, usageError{fmt.Errorf("exists and is not a regular file")}
+		return false, 0, 0, usageError{fmt.Errorf("exists and is not a regular file")}
 	case err == nil:
 		if e.SHA256 != "" {
 			same, err := d.sameSum(e.Name, e.SHA256)
 			if err != nil {
-				return false, 0, err
+				return false, 0, 0, err
 			}
 			if same {
-				return true, 0, nil
+				return true, 0, 0, nil
 			}
 		}
 		if !d.force {
-			return false, 0, usageError{errors.New("exists and differs; pass --force to overwrite it")}
+			return false, 0, 0, usageError{errors.New("exists and differs; pass --force to overwrite it")}
 		}
 	case !errors.Is(err, fs.ErrNotExist):
-		return false, 0, err
+		return false, 0, 0, err
 	}
+	start := d.now()
 	n, err = d.download(e.Name)
-	return false, n, err
+	return false, n, d.now().Sub(start), err
 }
 
 // parents creates the directories of name in the root; an element that
@@ -316,7 +353,12 @@ func (d *dirGet) download(name string) (int64, error) {
 		return 0, err
 	}
 	defer d.root.Remove(tmpName)
-	n, err := io.Copy(tmp, dl)
+	var src io.Reader = dl
+	if d.live != nil {
+		d.live.transfer(dl.Size)
+		src = &countReader{r: dl, add: d.live.add}
+	}
+	n, err := io.Copy(tmp, src)
 	if err == nil {
 		err = dl.Check()
 	}

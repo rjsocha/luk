@@ -135,6 +135,17 @@ func TestGetDirListing(t *testing.T) {
 	}
 }
 
+var (
+	durRE  = regexp.MustCompile(`\b[0-9m]*[0-9]+\.[0-9]s\b`)
+	rateRE = regexp.MustCompile(`\b[0-9.]+ (B|[KMGT]iB)/s\b`)
+)
+
+// untimed replaces the durations of a directory download output with T
+// and the rates with R.
+func untimed(s string) string {
+	return rateRE.ReplaceAllString(durRE.ReplaceAllString(s, "T"), "R")
+}
+
 func TestGetDirDownload(t *testing.T) {
 	v := newVaultEnv(t)
 	v.put(t, "db.sql.gz", "dump", "2026-10-03T10:00:00Z")
@@ -142,7 +153,7 @@ func TestGetDirDownload(t *testing.T) {
 	v.put(t, "2026/b.txt", "bb", "2026-10-01T08:00:00Z")
 	dest := filepath.Join(t.TempDir(), "backups") + "/"
 	code, out, errs := runLuk(t, "get", v.url, "-k", v.key, "-o", dest)
-	if want := "get 2026/10/a.txt\nget 2026/b.txt\nget db.sql.gz\n3 downloaded, 0 skipped, 7 B\n"; code != 0 || out != want {
+	if want := "get 2026/10/a.txt  1 B  T\nget 2026/b.txt  2 B  T\nget db.sql.gz  4 B  T\n3 downloaded, 0 skipped, 7 B in T, R\n"; code != 0 || untimed(out) != want {
 		t.Fatalf("fresh: exit %d %q %q", code, out, errs)
 	}
 	for rel, content := range map[string]string{"db.sql.gz": "dump", "2026/10/a.txt": "a", "2026/b.txt": "bb"} {
@@ -153,7 +164,7 @@ func TestGetDirDownload(t *testing.T) {
 	if left, _ := filepath.Glob(filepath.Join(dest, "2026", ".*")); len(left) != 0 {
 		t.Fatalf("temporary files left: %v", left)
 	}
-	if code, out, errs = runLuk(t, "get", v.url, "-k", v.key, "-o", dest); code != 0 || out != "skip 2026/10/a.txt\nskip 2026/b.txt\nskip db.sql.gz\n0 downloaded, 3 skipped, 0 B\n" {
+	if code, out, errs = runLuk(t, "get", v.url, "-k", v.key, "-o", dest); code != 0 || untimed(out) != "skip 2026/10/a.txt\nskip 2026/b.txt\nskip db.sql.gz\n0 downloaded, 3 skipped, 0 B in T, R\n" {
 		t.Fatalf("second: exit %d %q %q", code, out, errs)
 	}
 	// A subdirectory into an existing directory, quiet.
@@ -169,13 +180,13 @@ func TestGetDirDownload(t *testing.T) {
 	v.put(t, "2026/b.txt", "changed", "2026-10-04T08:00:00Z")
 	code, out, errs = runLuk(t, "get", v.url, "-k", v.key, "-o", dest)
 	if code != 1 || errs != "luk: 2026/b.txt: exists and differs; pass --force to overwrite it\nluk: 1 of 3 files failed\n" ||
-		out != "skip 2026/10/a.txt\nskip db.sql.gz\n0 downloaded, 2 skipped, 1 failed, 0 B\n" {
+		untimed(out) != "skip 2026/10/a.txt\nskip db.sql.gz\n0 downloaded, 2 skipped, 1 failed, 0 B in T, R\n" {
 		t.Fatalf("changed: exit %d %q %q", code, out, errs)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dest, "2026/b.txt")); string(b) != "bb" {
 		t.Fatalf("overwritten without --force: %q", b)
 	}
-	if code, out, errs = runLuk(t, "get", v.url, "-k", v.key, "-o", dest, "--force"); code != 0 || !strings.Contains(out, "get 2026/b.txt\n") || !strings.HasSuffix(out, "1 downloaded, 2 skipped, 7 B\n") {
+	if code, out, errs = runLuk(t, "get", v.url, "-k", v.key, "-o", dest, "--force"); code != 0 || !strings.Contains(untimed(out), "get 2026/b.txt  7 B  T\n") || !strings.HasSuffix(untimed(out), "1 downloaded, 2 skipped, 7 B in T, R\n") {
 		t.Fatalf("force: exit %d %q %q", code, out, errs)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dest, "2026/b.txt")); string(b) != "changed" {
@@ -286,7 +297,7 @@ func TestGetDirPartialFailure(t *testing.T) {
 	listing := `[{"name":"a","sha256":"` + sumOf("a") + `"},{"name":"gone"},{"name":"d/c"}]`
 	code, out, errs := runLuk(t, "get", fakeDir(t, listing, "gone"), "-k", key, "-o", dest)
 	if code != 2 || !strings.Contains(errs, "luk: gone: ") || !strings.Contains(errs, "404") || !strings.HasSuffix(errs, "luk: 1 of 3 files failed\n") ||
-		out != "get a\nget d/c\n2 downloaded, 0 skipped, 1 failed, 4 B\n" {
+		untimed(out) != "get a  1 B  T\nget d/c  3 B  T\n2 downloaded, 0 skipped, 1 failed, 4 B in T, R\n" {
 		t.Fatalf("exit %d %q %q", code, out, errs)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dest, "d/c")); string(b) != "d/c" {

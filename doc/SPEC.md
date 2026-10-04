@@ -3774,13 +3774,40 @@ name "../x" in the listing: path element ..; nothing downloaded`, exit
   the name, each element escaped) through the safe path of a single
   download: a temporary file `.<name>.luk-*` next to it, sha256 checked
   against the `ETag`, synced, then renamed over the old file with
-  `--force` or hard-linked without; `get NAME` on success. `--progress`
-  and `--bwlimit` apply to each file.
+  `--force` or hard-linked without; `get NAME  SIZE  TIME` on success
+  (`get 2026/10/db.sql.gz  45.0 MiB  3.0s`: the bytes written and the
+  time from the request to the file in place). `--bwlimit` applies to
+  each file; the files are fetched one at a time, so the run stays
+  under the rate.
+
+`--progress`, when stderr is a terminal, keeps one live line on stderr,
+redrawn in place at most five times a second:
+
+```
+[ 7/20] 2026/10/04/test-149.bin  12.0/45.0 MiB  15.1 MiB/s   total 120.4/248.0 MiB  ETA 0:08
+```
+
+`[n/N]` is the place of the current file among all the files of the
+listing (skipped and failed files count); then the bytes of the current
+file against its size (the bytes alone when neither the listing nor the
+answer gives one), in the unit of the size, and its rate; then `total`,
+the bytes transferred in the run against the bytes to transfer: the
+sizes of all the files, less those of skipped files once they are
+known to be the same and less what a failed file did not transfer. The
+ETA follows from the rate of the whole run, once it has downloaded for
+3 seconds. A name too long for the terminal width (80 when unknown) is
+cut in the middle (`2026/1...49.bin`). The line is cleared before every
+line of the output and every error, so they never mix; without a
+terminal there is no live line, and the output is the same with or
+without `--progress`. A single file download keeps its own progress
+line.
 
 A failed file is reported on stderr (`luk: NAME: <error>`) and the run
 goes on with the others; Ctrl-C ends it at once (exit 130). At the end
-a summary goes to stdout: `3 downloaded, 2 skipped, 1.2 MiB` (with `, N
-failed` before the size when any failed). `-q` prints only errors. When
+a summary goes to stdout: `3 downloaded, 2 skipped, 1.2 MiB in 4.1s,
+300.0 KiB/s` (with `, N failed` before the size when any failed): the
+bytes written, the time of the run after the listing (`2m5.3s` from a
+minute) and their rate. `-q` prints only errors. When
 any file failed, the last line on stderr is `luk: N of M files failed`
 and the exit code is that of the first failure (2 for a 404, 3 for a
 transfer, 4 for a sha256 mismatch, 1 for a local conflict). `-c`/`-o -`,
@@ -3791,13 +3818,13 @@ downloads only what changed.
 
 ```
 $ luk get luk://secure.box.example.com/v/ -o backups/
-get 2026/10/db.sql.gz
-get db.sql.gz
-2 downloaded, 0 skipped, 2.0 MiB
+get 2026/10/db.sql.gz  1.0 MiB  0.2s
+get db.sql.gz  1.0 MiB  0.2s
+2 downloaded, 0 skipped, 2.0 MiB in 0.5s, 4.0 MiB/s
 $ luk get luk://secure.box.example.com/v/ -o backups/
 skip 2026/10/db.sql.gz
 skip db.sql.gz
-0 downloaded, 2 skipped, 0 B
+0 downloaded, 2 skipped, 0 B in 0.1s, 0 B/s
 ```
 
 `luk link ls` sends a link `list` request to `--endpoint`, else to the

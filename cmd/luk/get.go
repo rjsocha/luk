@@ -74,10 +74,15 @@ sha256 is skipped; one that differs is refused unless --force; a symlink
 or anything else that is not a regular file is always refused, and no
 symlink in DIR is followed. Unsafe names (absolute, "..", control
 characters) in the listing stop the download before any file is written.
-It prints "get NAME" or "skip NAME" per file and a summary (-q prints
-nothing but errors). --progress and --bwlimit apply per file. A failed
-file is reported and the others still downloaded; the exit code is then
-that of the first failure. -c, --inplace and --head take no directory.`,
+It prints "get NAME  SIZE  TIME" or "skip NAME" per file and a summary
+"N downloaded, N skipped, SIZE in TIME, RATE/s" (-q prints nothing but
+errors). --progress keeps one live line on stderr when it is a terminal:
+the file among all ([7/20]), its bytes and rate, the bytes of the run
+against the bytes to transfer and an ETA; it is cleared before each
+line of the output. --bwlimit applies to each file; the files are
+fetched one at a time, so the run stays under it. A failed file is
+reported and the others still downloaded; the exit code is then that of
+the first failure. -c, --inplace and --head take no directory.`,
 		Example: `  luk get 'luk://secure.example.com/x7Kq...#sha256//Xk9...' -o notes.txt
   luk get luk://secure.example.com/x7Kq... -c | tar x
   luk get https://secure.example.com/x7Kq... -o notes.txt --force --progress
