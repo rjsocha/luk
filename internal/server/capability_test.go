@@ -2,9 +2,6 @@ package server
 
 import (
 	"net/http"
-	"os"
-	"path"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -106,7 +103,7 @@ func TestCapabilitiesLinks(t *testing.T) {
 }
 
 // TestSecretAllow: a reveal upload of a signer secret.allow does not grant
-// goes through the endpoint queue and pipelines, as without secret.
+// is refused before the body; it never reaches the disk.
 func TestSecretAllow(t *testing.T) {
 	other := newSigner(t)
 	f := newSecretFixture(t, func(s string) string {
@@ -119,15 +116,11 @@ func TestSecretAllow(t *testing.T) {
 		t.Fatalf("granted: %s", out.URL)
 	}
 	rec, _ := f.do(t, req{signer: other, path: "/drop", meta: secretMeta("theirs"), body: []byte("theirs")})
-	out = receipt(t, rec, http.StatusCreated)
-	if strings.HasPrefix(out.URL, "https://lukd.vm:8443/d/volatile/") {
-		t.Fatalf("not granted: %s", out.URL)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "does not keep secrets in RAM") {
+		t.Fatalf("not granted: %d %s", rec.Code, rec.Body)
 	}
 	f.settle(t)
-	if got, err := os.ReadFile(filepath.Join(f.root, "s/drop/file", path.Base(out.URL))); err != nil || string(got) != "theirs" {
-		t.Fatalf("stored %q %v", got, err)
-	}
-	if n := f.runs(t); n != 1 {
+	if n := f.runs(t); n != 0 {
 		t.Fatalf("run step ran %d times", n)
 	}
 	got := decodeList(t, f.list(t, listReq{signer: other}))

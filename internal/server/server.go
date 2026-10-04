@@ -377,7 +377,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 	secret := ""
 	pipes := []string{pipeline.SecretPipeline}
 	var skipped []string
-	if ep.Secrets(meta.Portal) && auth.Allowed(id, ep.Secret.Allow) {
+	if ep.Secrets(meta.Portal) {
+		// A signer secret.allow does not grant never has its secret
+		// written to disk instead of RAM.
+		if !auth.Allowed(id, ep.Secret.Allow) {
+			return 0, nil, fail(http.StatusUnprocessableEntity, "endpoint %s does not keep secrets in RAM for this key", ep.Name)
+		}
 		secret = ep.Secret.Storage
 	} else if pipes, skipped, err = Match(sn.cfg, ep.Name, meta.Tags); err != nil {
 		return 0, nil, err

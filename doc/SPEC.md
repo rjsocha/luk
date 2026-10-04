@@ -1141,10 +1141,10 @@ expose:
   the queue directory (relative to `root` or absolute, like
   `endpoint.<n>.path`); `storage` a local, exposed storage other than
   the endpoint `storage`. Without `secret` an endpoint works as before.
-- A `reveal` upload of a signer `secret.allow` does not grant is an
-  upload as to an endpoint without `secret`: it goes through the
-  endpoint queue and pipelines like any other upload (the endpoint
-  listing shows `secret: false` to that signer).
+- A `reveal` upload of a signer `secret.allow` does not grant is refused
+  before the body (422 `endpoint <n> does not keep secrets in RAM for
+  this key`): a secret meant for RAM never lands on disk by a fallback
+  (the endpoint listing shows `secret: false` to that signer).
 - A `reveal` upload of a granted signer is received into `secret.path`,
   never into the endpoint `path`, and is stored into `secret.storage`
   only: no pipeline of the endpoint runs for it (no `run`, no `encrypt`,
