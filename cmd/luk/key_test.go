@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -147,7 +148,7 @@ func TestSendKeyPrecedence(t *testing.T) {
 			t.Errorf("%v: signed by %s, want %s", c.args, got, c.want)
 		}
 	}
-	mustRun(t, "config", "--global", "key", "-k", "")
+	mustRun(t, "config", "--global", "key", "--clear")
 	if code, errs := dryRun(t, "-e", "nokey"); code != 0 || ks.signer() != fps[0] {
 		t.Errorf("first agent key: exit %d %s, signed by %s", code, errs, ks.signer())
 	}
@@ -248,5 +249,185 @@ func TestSendClockHint(t *testing.T) {
 	ks.mu.Unlock()
 	if code, errs := dryRun(t, "-e", ks.url); code != 2 || strings.Contains(errs, "your clock") {
 		t.Fatalf("other 401: exit %d: %s", code, errs)
+	}
+}
+
+func TestConfigKeyClear(t *testing.T) {
+	up := tempConfig(t)
+	mustRun(t, "config", "key", "-k", "~/.ssh/id.pub")
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"config", "key", "-k", ""}, "--key is empty; to remove the key use: luk config key --clear"},
+		{[]string{"config", "key", "--key="}, "luk config key --clear"},
+		{[]string{"config", "key", "-k", "x.pub", "--clear"}, "mutually exclusive"},
+		{[]string{"config", "key"}, "one of --key or --clear is required"},
+	} {
+		if code, _, errs := runLuk(t, c.args...); code != 1 || !strings.Contains(errs, c.want) {
+			t.Errorf("%v: exit %d: %s", c.args, code, errs)
+		}
+	}
+	if c, _ := client.LoadConfig(up); c.Key != "~/.ssh/id.pub" {
+		t.Fatalf("refused edits changed the key: %+v", c)
+	}
+	mustRun(t, "config", "key", "--clear")
+	if c, _ := client.LoadConfig(up); c.Key != "" {
+		t.Fatalf("not cleared: %+v", c)
+	}
+}
+
+const fpA, fpB = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA"
+
+func TestEndpointKeyOverlay(t *testing.T) {
+	up := tempConfig(t)
+	gp := globalConfig(t)
+	mustRun(t, "config", "--global", "endpoint", "add", "-e", "g", "--url", "https://g/x#"+goodPin, "-k", fpA)
+	mustRun(t, "config", "--global", "endpoint", "add", "-e", "plain", "--url", "http://g/plain")
+	mustRun(t, "config", "endpoint", "key", "-e", "g", "-k", fpB)
+	u, _ := client.LoadConfig(up)
+	if u.Endpoint["g"] != (client.EndpointConfig{Key: fpB}) {
+		t.Fatalf("user layer %+v", u.Endpoint)
+	}
+	if data, _ := os.ReadFile(up); strings.Contains(string(data), "url") {
+		t.Errorf("overlay has a url:\n%s", data)
+	}
+	if g, _ := client.LoadConfig(gp); g.Endpoint["g"].Key != fpA {
+		t.Errorf("global changed: %+v", g.Endpoint["g"])
+	}
+	cfg, _, err := client.LoadMerged()
+	if err != nil || cfg.KeyFor("g", "") != fpB {
+		t.Fatalf("merged key %v", err)
+	}
+	out := mustRun(t, "config", "endpoint", "show", "-e", "g")
+	for _, w := range []string{"url:     https://g/x\n", "pin:     " + goodPin, "key:     " + fpB, "source:  global, key: user\n"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("show missing %q:\n%s", w, out)
+		}
+	}
+	out = mustRun(t, "config", "endpoint", "ls")
+	if !regexp.MustCompile(`(?m)^g +https://g/x +pin +` + fpB + ` +global,key:user *$`).MatchString(out) {
+		t.Errorf("ls:\n%s", out)
+	}
+	if !regexp.MustCompile(`(?m)^plain +http://g/plain +- +- +global *$`).MatchString(out) {
+		t.Errorf("ls plain:\n%s", out)
+	}
+	out = mustRun(t, "config", "endpoint", "ls", "--layer", "user")
+	if !regexp.MustCompile(`(?m)^g +- +- +` + fpB + ` +user *$`).MatchString(out) {
+		t.Errorf("ls user layer:\n%s", out)
+	}
+	out = mustRun(t, "config", "show")
+	if !strings.Contains(out, "  g:  # global\n    url: https://g/x\n    pin: "+goodPin+"\n    key: "+fpB+"  # user\n") {
+		t.Errorf("config show:\n%s", out)
+	}
+	if out = mustRun(t, "config", "check"); !strings.HasSuffix(out, "ok\n") {
+		t.Errorf("check: %s", out)
+	}
+
+	// A user entry with a url gets the key itself; nothing is inherited.
+	mustRun(t, "config", "endpoint", "add", "-e", "plain", "--url", "http://u/plain")
+	mustRun(t, "config", "endpoint", "key", "-e", "plain", "-k", "~/.ssh/u.pub")
+	u, _ = client.LoadConfig(up)
+	if u.Endpoint["plain"] != (client.EndpointConfig{URL: "http://u/plain", Key: "~/.ssh/u.pub"}) {
+		t.Fatalf("own entry %+v", u.Endpoint["plain"])
+	}
+	mustRun(t, "config", "endpoint", "key", "-e", "plain", "--clear")
+	mustRun(t, "config", "endpoint", "key", "-e", "g", "--clear")
+	u, _ = client.LoadConfig(up)
+	if _, ok := u.Endpoint["g"]; ok || u.Endpoint["plain"] != (client.EndpointConfig{URL: "http://u/plain"}) {
+		t.Fatalf("after clear %+v", u.Endpoint)
+	}
+	if out := mustRun(t, "config", "endpoint", "show", "-e", "g"); !strings.Contains(out, "key:     "+fpA) || !strings.Contains(out, "source:  global\n") {
+		t.Errorf("global key back:\n%s", out)
+	}
+}
+
+func TestEndpointKeyGlobal(t *testing.T) {
+	up := tempConfig(t)
+	gp := globalConfig(t)
+	mustRun(t, "config", "--global", "endpoint", "add", "-e", "g", "--url", "http://g/x")
+	mustRun(t, "config", "endpoint", "add", "-e", "u", "--url", "http://u/x")
+	mustRun(t, "config", "endpoint", "key", "--global", "-e", "g", "-k", fpA)
+	if g, _ := client.LoadConfig(gp); g.Endpoint["g"] != (client.EndpointConfig{URL: "http://g/x", Key: fpA}) {
+		t.Fatalf("global %+v", g.Endpoint)
+	}
+	code, _, errs := runLuk(t, "config", "endpoint", "key", "-e", "g", "--clear")
+	if code != 1 || !strings.Contains(errs, "the key of endpoint g is set in the global config; use --global") {
+		t.Errorf("clear global key in user layer: exit %d: %s", code, errs)
+	}
+	code, _, errs = runLuk(t, "config", "endpoint", "key", "--global", "-e", "u", "-k", fpA)
+	if code != 1 || !strings.Contains(errs, `unknown endpoint "u" in the global config`) {
+		t.Errorf("user endpoint with --global: exit %d: %s", code, errs)
+	}
+	mustRun(t, "config", "endpoint", "key", "--global", "-e", "g", "--clear")
+	if g, _ := client.LoadConfig(gp); g.Endpoint["g"] != (client.EndpointConfig{URL: "http://g/x"}) {
+		t.Fatalf("global after clear %+v", g.Endpoint)
+	}
+	if u, _ := client.LoadConfig(up); len(u.Endpoint) != 1 {
+		t.Errorf("user layer touched: %+v", u.Endpoint)
+	}
+}
+
+func TestEndpointKeyErrors(t *testing.T) {
+	up := tempConfig(t)
+	mustRun(t, "config", "endpoint", "add", "-e", "u", "--url", "http://u/x")
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-e", "nope", "-k", fpA}, `unknown endpoint "nope"`},
+		{[]string{"-e", "nope", "--clear"}, `unknown endpoint "nope"`},
+		{[]string{"-e", "u", "-k", ""}, "--key is empty; to remove the key use: luk config endpoint key -e u --clear"},
+		{[]string{"-e", "u", "-k", fpA, "--clear"}, "mutually exclusive"},
+		{[]string{"-e", "u"}, "one of --key or --clear is required"},
+		{[]string{"-k", fpA}, "required flag"},
+		{[]string{"-e", "u", "-k", "rel.pub"}, "absolute path"},
+		{[]string{"-e", "u", "-k", "SHA256:short"}, "SHA256:short"},
+		{[]string{"-e", "u", "x"}, "unexpected argument"},
+	} {
+		args := append([]string{"config", "endpoint", "key"}, c.args...)
+		if code, _, errs := runLuk(t, args...); code != 1 || !strings.Contains(errs, c.want) {
+			t.Errorf("%v: exit %d: %s", c.args, code, errs)
+		}
+	}
+	if u, _ := client.LoadConfig(up); u.Endpoint["u"] != (client.EndpointConfig{URL: "http://u/x"}) || len(u.Endpoint) != 1 {
+		t.Errorf("refused edits changed the layer: %+v", u.Endpoint)
+	}
+}
+
+// An overlay whose global endpoint is gone is reported by check and when the
+// merged config is loaded; endpoint key --clear still removes it.
+func TestEndpointKeyUnmatched(t *testing.T) {
+	up := tempConfig(t)
+	mustRun(t, "config", "--global", "endpoint", "add", "-e", "g", "--url", "http://g/x")
+	mustRun(t, "config", "endpoint", "key", "-e", "g", "-k", fpA)
+	mustRun(t, "config", "--global", "endpoint", "rm", "-e", "g")
+	want := up + `: endpoint "g" has no url and sets only key, but the global config has no endpoint "g"; add a url or remove it (luk config endpoint key -e g --clear)`
+	for _, args := range [][]string{{"config", "check"}, {"config", "show"}, {"config", "endpoint", "ls"}} {
+		if code, _, errs := runLuk(t, args...); code != 1 || !strings.Contains(errs, want) {
+			t.Errorf("%v: exit %d: %s", args, code, errs)
+		}
+	}
+	if code, _, errs := runLuk(t, "config", "endpoint", "key", "-e", "g", "-k", fpB); code != 1 || !strings.Contains(errs, `unknown endpoint "g"`) {
+		t.Errorf("set on unmatched: exit %d: %s", code, errs)
+	}
+	mustRun(t, "config", "endpoint", "key", "-e", "g", "--clear")
+	if out := mustRun(t, "config", "check"); !strings.HasSuffix(out, "ok\n") {
+		t.Errorf("check after clear: %s", out)
+	}
+}
+
+func TestCheckOverlayLayers(t *testing.T) {
+	up := tempConfig(t)
+	writeCfg(t, client.GlobalConfigPath(), "endpoint:\n  g:\n    key: "+fpA+"\n")
+	writeCfg(t, up, "endpoint:\n  h:\n    pin: "+goodPin+"\n")
+	code, _, errs := runLuk(t, "config", "check")
+	if code != 1 || !strings.Contains(errs, `endpoint "g": url is missing`) || !strings.Contains(errs, `endpoint "h": pin without url`) {
+		t.Errorf("exit %d: %s", code, errs)
+	}
+	f := filepath.Join(t.TempDir(), "c.yaml")
+	writeCfg(t, f, "endpoint:\n  g:\n    key: "+fpA+"\n")
+	if code, _, errs := runLuk(t, "config", "check", "--file", f); code != 1 || !strings.Contains(errs, "url is missing") {
+		t.Errorf("--file: exit %d: %s", code, errs)
 	}
 }

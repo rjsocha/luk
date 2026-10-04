@@ -3220,18 +3220,32 @@ luk config show [--layer global|user]   merged config with the source of
                                  prints one raw layer
 luk config endpoint ls [--layer global|user]   merged endpoints, one per
                                  line: name, URL, pin or -, key or -, source,
-                                 * marks the default; --layer lists one raw
-                                 layer
+                                 * marks the default; the source of an
+                                 endpoint with a user key overlay is
+                                 global,key:user; --layer lists one raw
+                                 layer (an overlay shows - as URL)
 luk config endpoint show -e|--endpoint NAME   one merged endpoint: name, url,
                                  full pin, key, source, whether it is the
                                  default; with a pin, the line under url
                                  is the URL with #<pin>, as endpoint add
-                                 takes it
+                                 takes it; the source of an overlaid
+                                 endpoint is "global, key: user"
 luk config endpoint add -e|--endpoint NAME --url URL [--pin sha256//...]
                                  [-k|--key PATH|SHA256:FP]
 luk config endpoint rm -e|--endpoint NAME   (removing the default clears it)
+luk config endpoint key -e|--endpoint NAME (-k|--key PATH|SHA256:FP | --clear)
+                                 set or clear the key of one endpoint;
+                                 without --global in the user layer: the
+                                 key of the user's own entry when it has a
+                                 url, else a key overlay on the global
+                                 endpoint; --clear removes the overlay (or
+                                 the key of the own entry); with --global
+                                 the key of the global entry; NAME must be
+                                 in the merged config (in the global layer
+                                 with --global)
 luk config default -e|--endpoint NAME
-luk config key -k|--key PATH|SHA256:FP   (empty string clears)
+luk config key (-k|--key PATH|SHA256:FP | --clear)   set or clear the
+                                 default key
 luk config link ls               merged link hosts, one per line: host,
                                  endpoint, source
 luk config link add --url URL -e|--endpoint NAME   use the endpoint for the
@@ -3475,9 +3489,27 @@ Config has two layers, both YAML with the same schema:
 Both are read, global first. A missing file is an empty layer; a malformed
 one is a config error (exit 1) naming the file. The user layer overrides the
 global one per key: `default` and `key` replace when set in the user layer;
-`endpoint` merges by name, and a user entry replaces the global entry of the
-same name entirely (URL, pin and key together); `alias` merges by name the
-same way, `link` by host. `send`, `link`, `scan` and alias expansion use the
+`endpoint` merges by name: a user entry with a `url` replaces the global
+entry of the same name entirely (URL, pin and key together, nothing is
+inherited); a user entry without `url` is an overlay that sets only `key`
+on the global endpoint of the same name (`url` and `pin` come from the
+global entry):
+
+```yaml
+# user layer: sign for the global endpoint drop with another key
+endpoint:
+  drop:
+    key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s
+```
+
+An overlay must have a `key` and no `pin`, and only the user layer may have
+one (an entry without `url` in the global layer, or in the one file of
+`luk config check --file`, is an error). An overlay without a global
+endpoint of its name is an error of `luk config check` and of every command
+that loads the merged config (exit 1, naming the user file and the fix,
+`luk config endpoint key -e NAME --clear`); config edits still work, so the
+overlay can be removed. `alias` merges by name like a whole endpoint
+entry, `link` by host. `send`, `link`, `scan` and alias expansion use the
 merged result.
 
 `link` maps the host of a link URL (lowercase, without the port) to the
@@ -3516,10 +3548,15 @@ directory 0755, file 0644 when created; a permission error is a config
 error (exit 1) with a hint that `--global` needs root. `endpoint rm` without
 `--global` on an endpoint that exists only in the global layer fails with
 "endpoint NAME is defined in the global config; use --global". `default`
-accepts any endpoint name of the merged config.
+accepts any endpoint name of the merged config. `key` and `endpoint key`
+take exactly one of `--key` and `--clear`; an empty `--key` is a usage
+error pointing to `--clear`. `endpoint key --clear` without `--global` on an
+endpoint whose key comes from the global layer fails with "the key of
+endpoint NAME is set in the global config; use --global".
 
 `luk config show` prints both layer paths with whether each exists, then
-the merged config with a `# global` or `# user` comment on every value.
+the merged config with a `# global` or `# user` comment on every value; the
+`key` of an overlaid endpoint has its own `# user` comment.
 
 Aliases are git-style top-level commands. `alias` maps a name to an argv
 list. When the first argument of `luk` is not a built-in command and names

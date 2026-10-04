@@ -26,8 +26,10 @@ type Config struct {
 	Link map[string]string `yaml:"link,omitempty"`
 }
 
+// EndpointConfig is one endpoint entry. In the user layer an entry without
+// URL is an overlay: it sets only Key on the global endpoint of its name.
 type EndpointConfig struct {
-	URL string `yaml:"url"`
+	URL string `yaml:"url,omitempty"`
 	Pin string `yaml:"pin,omitempty"`
 	Key string `yaml:"key,omitempty"`
 }
@@ -89,19 +91,33 @@ func ParseConfig(path string, data []byte) (*Config, error) {
 
 // Sources records which layer each merged value came from.
 type Sources struct {
-	Default  string
-	Key      string
+	Default string
+	Key     string
+	// Endpoint is the layer of the url and pin of an endpoint.
 	Endpoint map[string]string
-	Alias    map[string]string
-	Link     map[string]string
+	// EndpointKey is the layer of the key of an endpoint when it is not the
+	// layer of its url: "user" for an overlay with a global endpoint.
+	EndpointKey map[string]string
+	// Unmatched lists, sorted, the user overlays without a global endpoint
+	// of their name; they are not in the merged config.
+	Unmatched []string
+	Alias     map[string]string
+	Link      map[string]string
 }
 
-// Merge overlays user on global: default and key replace when set, endpoints
-// and aliases merge by name and a user entry replaces the global one whole;
-// link mappings merge by host.
+// IsOverlay reports whether e is an overlay entry: no url, only a key.
+func (e EndpointConfig) IsOverlay() bool { return e.URL == "" }
+
+// Merge overlays user on global: default and key replace when set, aliases
+// merge by name and a user entry replaces the global one whole; link
+// mappings merge by host. Endpoints merge by name: a user entry with a url
+// replaces the global one whole (nothing is inherited), a user entry without
+// a url is an overlay that sets the key of the global endpoint of that name
+// (url and pin stay global); an overlay without one is left out and listed in
+// Sources.Unmatched.
 func Merge(global, user *Config) (*Config, Sources) {
 	m := &Config{Endpoint: map[string]EndpointConfig{}, Alias: map[string][]string{}, Link: map[string]string{}}
-	src := Sources{Endpoint: map[string]string{}, Alias: map[string]string{}, Link: map[string]string{}}
+	src := Sources{Endpoint: map[string]string{}, EndpointKey: map[string]string{}, Alias: map[string]string{}, Link: map[string]string{}}
 	for _, l := range []struct {
 		name string
 		c    *Config
@@ -113,6 +129,9 @@ func Merge(global, user *Config) (*Config, Sources) {
 			m.Key, src.Key = l.c.Key, l.name
 		}
 		for n, e := range l.c.Endpoint {
+			if l.c == user && e.IsOverlay() {
+				continue
+			}
 			m.Endpoint[n], src.Endpoint[n] = e, l.name
 		}
 		for n, a := range l.c.Alias {
@@ -122,21 +141,57 @@ func Merge(global, user *Config) (*Config, Sources) {
 			m.Link[h], src.Link[h] = e, l.name
 		}
 	}
+	for n, e := range user.Endpoint {
+		if !e.IsOverlay() {
+			continue
+		}
+		g, ok := global.Endpoint[n]
+		if !ok || g.IsOverlay() {
+			src.Unmatched = append(src.Unmatched, n)
+			continue
+		}
+		g.Key = e.Key
+		m.Endpoint[n], src.Endpoint[n], src.EndpointKey[n] = g, "global", "user"
+	}
+	sort.Strings(src.Unmatched)
 	return m, src
 }
 
-// LoadMerged loads the global and user layers and merges them.
-func LoadMerged() (*Config, Sources, error) {
+// LoadLayers loads the global and the user layer.
+func LoadLayers() (*Config, *Config, error) {
 	g, err := LoadConfig(GlobalConfigPath())
 	if err != nil {
-		return nil, Sources{}, err
+		return nil, nil, err
 	}
 	u, err := LoadConfig(DefaultConfigPath())
+	if err != nil {
+		return nil, nil, err
+	}
+	return g, u, nil
+}
+
+// LoadMerged loads the global and user layers and merges them. A user
+// overlay without a global endpoint of its name is an error.
+func LoadMerged() (*Config, Sources, error) {
+	g, u, err := LoadLayers()
 	if err != nil {
 		return nil, Sources{}, err
 	}
 	m, src := Merge(g, u)
+	if err := UnmatchedError(DefaultConfigPath(), src); err != nil {
+		return nil, Sources{}, err
+	}
 	return m, src, nil
+}
+
+// UnmatchedError reports each user overlay without a global endpoint, with
+// the command that removes it; nil when there is none.
+func UnmatchedError(userPath string, src Sources) error {
+	var errs []error
+	for _, n := range src.Unmatched {
+		errs = append(errs, fmt.Errorf("%s: endpoint %q has no url and sets only key, but the global config has no endpoint %q; add a url or remove it (luk config endpoint key -e %s --clear)", userPath, n, n, n))
+	}
+	return errors.Join(errs...)
 }
 
 // Resolve turns an endpoint argument (a config name, a URL, or empty for
@@ -309,10 +364,23 @@ func ValidateKey(key string) error {
 	return nil
 }
 
+// Layer says what a validated config file is.
+type Layer int
+
+const (
+	// Standalone is one file on its own, merged with nothing (check --file).
+	Standalone Layer = iota
+	// GlobalLayer is the global layer of a merge.
+	GlobalLayer
+	// UserLayer is the user layer of a merge, the only one with overlays.
+	UserLayer
+)
+
 // ValidateConfig checks one layer and returns every problem, joined. A
 // standalone config must also resolve its own default; a layer that is merged
-// later may name an endpoint from another layer (see ValidateDefault).
-func ValidateConfig(c *Config, standalone bool) error {
+// later may name an endpoint from another layer (see ValidateDefault). Only
+// the user layer may have overlays (entries without url, see Merge).
+func ValidateConfig(c *Config, layer Layer) error {
 	names := make([]string, 0, len(c.Endpoint))
 	for n := range c.Endpoint {
 		names = append(names, n)
@@ -320,7 +388,17 @@ func ValidateConfig(c *Config, standalone bool) error {
 	sort.Strings(names)
 	var errs []error
 	for _, n := range names {
-		if err := validateEndpoint(n, c.Endpoint[n]); err != nil {
+		e := c.Endpoint[n]
+		var err error
+		switch {
+		case e.IsOverlay() && layer == UserLayer:
+			err = validateOverlay(n, e)
+		case e.IsOverlay():
+			err = fmt.Errorf("endpoint %q: url is missing (only the user layer may set key alone on a global endpoint)", n)
+		default:
+			err = validateEndpoint(n, e)
+		}
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -328,7 +406,7 @@ func ValidateConfig(c *Config, standalone bool) error {
 		errs = append(errs, err)
 	}
 	var endpoints map[string]EndpointConfig
-	if standalone {
+	if layer == Standalone {
 		if err := ValidateDefault(c); err != nil {
 			errs = append(errs, err)
 		}
@@ -341,6 +419,61 @@ func ValidateConfig(c *Config, standalone bool) error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+func validateOverlay(name string, e EndpointConfig) error {
+	if e.Pin != "" {
+		return fmt.Errorf("endpoint %q: pin without url; an entry without url sets only key (url and pin come from the global config)", name)
+	}
+	if e.Key == "" {
+		return fmt.Errorf("endpoint %q: neither url nor key", name)
+	}
+	if err := ValidateKey(e.Key); err != nil {
+		return fmt.Errorf("endpoint %q: %w", name, err)
+	}
+	return nil
+}
+
+// SetEndpointKey sets the key of the endpoint name in this layer. An entry
+// with a url gets the key; otherwise the entry becomes an overlay of only
+// the key (user layer). key must not be empty, see ClearEndpointKey.
+func (c *Config) SetEndpointKey(name, key string) error {
+	if key == "" {
+		return errors.New("empty key")
+	}
+	e := c.Endpoint[name]
+	e.Key = key
+	var err error
+	if e.IsOverlay() {
+		err = validateOverlay(name, e)
+	} else {
+		err = validateEndpoint(name, e)
+	}
+	if err != nil {
+		return err
+	}
+	if c.Endpoint == nil {
+		c.Endpoint = map[string]EndpointConfig{}
+	}
+	c.Endpoint[name] = e
+	return nil
+}
+
+// ClearEndpointKey removes the key of the endpoint name from this layer: an
+// overlay goes away, an entry with a url keeps the rest. It reports whether
+// the layer had a key for name.
+func (c *Config) ClearEndpointKey(name string) bool {
+	e, ok := c.Endpoint[name]
+	if !ok || e.Key == "" && !e.IsOverlay() {
+		return false
+	}
+	if e.IsOverlay() {
+		delete(c.Endpoint, name)
+		return true
+	}
+	e.Key = ""
+	c.Endpoint[name] = e
+	return true
 }
 
 // ValidateDefault checks that the default, when set, names an endpoint.

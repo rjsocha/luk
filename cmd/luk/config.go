@@ -26,8 +26,11 @@ func newConfigCmd(out, errw io.Writer) *cobra.Command {
 /etc/site/luk/config.yaml ($LUK_GLOBAL_CONFIG overrides the path) and the
 user file ~/.config/luk/config.yaml ($LUK_CONFIG overrides the path). The
 user layer overrides the global one: default and key replace, endpoints and
-aliases merge by name, link mappings by host. Edits write the user layer, or the global one with
---global (needs root). Edits are validated and written atomically.`,
+aliases merge by name, link mappings by host. A user endpoint with a url
+replaces the global one of its name whole; a user endpoint without a url
+sets only the key of the global one (see luk config endpoint key). Edits
+write the user layer, or the global one with --global (needs root). Edits
+are validated and written atomically.`,
 	}
 	cfgCmd.PersistentFlags().BoolVar(&global, "global", false, "write the global layer instead of the user layer")
 	cfgCmd.AddCommand(
@@ -93,7 +96,9 @@ func newShowCmd(out io.Writer) *cobra.Command {
 				if e.Pin != "" {
 					fmt.Fprintf(out, "    pin: %s\n", e.Pin)
 				}
-				if e.Key != "" {
+				if ks := src.EndpointKey[n]; ks != "" {
+					fmt.Fprintf(out, "    key: %s  # %s\n", e.Key, ks)
+				} else if e.Key != "" {
 					fmt.Fprintf(out, "    key: %s\n", e.Key)
 				}
 			}
@@ -142,9 +147,18 @@ func newDefaultCmd(global *bool) *cobra.Command {
 
 func newKeyCmd(global *bool) *cobra.Command {
 	var key string
-	cmd := edit(global, "key", "Set the signing key (empty string clears it)",
-		"  luk config key --key ~/.ssh/id_ed25519.pub\n  luk config key --key SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n  luk config key --key \"\"",
+	var clear bool
+	var cmd *cobra.Command
+	cmd = edit(global, "key", "Set or clear the default signing key",
+		"  luk config key --key ~/.ssh/id_ed25519.pub\n  luk config key --key SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n  luk config key --clear",
 		func(layer, _ *client.Config) error {
+			if err := keyOrClear(cmd, key, clear, "luk config key --clear"); err != nil {
+				return err
+			}
+			if clear {
+				layer.Key = ""
+				return nil
+			}
 			if strings.HasPrefix(key, "SHA256:") {
 				if err := client.ValidateFingerprint(key); err != nil {
 					return err
@@ -153,9 +167,85 @@ func newKeyCmd(global *bool) *cobra.Command {
 			layer.Key = key
 			return nil
 		})
-	cmd.Flags().StringVarP(&key, "key", "k", "", "key file path, SHA256:... fingerprint of an agent key, or empty to clear")
-	cmd.MarkFlagRequired("key")
+	cmd.Flags().StringVarP(&key, "key", "k", "", "key file path, a .pub file of an agent key, or SHA256:... fingerprint of an agent key")
+	cmd.Flags().BoolVar(&clear, "clear", false, "remove the key from the layer")
 	completeFlags(cmd, map[string]cobra.CompletionFunc{"key": completeKey})
+	return cmd
+}
+
+// keyOrClear checks that exactly one of --key and --clear is given and that
+// --key is not empty; clearHint is the command that clears instead.
+func keyOrClear(cmd *cobra.Command, key string, clear bool, clearHint string) error {
+	set := cmd.Flags().Changed("key")
+	switch {
+	case set && clear:
+		return errors.New("--key and --clear are mutually exclusive")
+	case !set && !clear:
+		return errors.New("one of --key or --clear is required")
+	case set && key == "":
+		return fmt.Errorf("--key is empty; to remove the key use: %s", clearHint)
+	}
+	return nil
+}
+
+// newEndpointKeyCmd sets or clears the key of one endpoint: in the user
+// layer as an overlay on the global endpoint (or on the user's own entry),
+// with --global in the global entry.
+func newEndpointKeyCmd(global *bool) *cobra.Command {
+	var name, key string
+	var clear bool
+	var cmd *cobra.Command
+	cmd = edit(global, "key", "Set or clear the signing key of an endpoint",
+		`  luk config endpoint key -e drop -k ~/.ssh/id_ed25519.pub
+  luk config endpoint key -e drop -k SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s
+  luk config endpoint key -e drop --clear
+  luk config endpoint key --global -e drop -k /etc/ssh/ssh_host_ed25519_key`,
+		func(layer, merged *client.Config) error {
+			if err := keyOrClear(cmd, key, clear, "luk config endpoint key -e "+name+" --clear"); err != nil {
+				return err
+			}
+			if *global {
+				if e, ok := layer.Endpoint[name]; !ok || e.IsOverlay() {
+					return fmt.Errorf("unknown endpoint %q in the global config", name)
+				}
+				if clear {
+					layer.ClearEndpointKey(name)
+					return nil
+				}
+				return layer.SetEndpointKey(name, key)
+			}
+			if clear {
+				if layer.ClearEndpointKey(name) {
+					return nil
+				}
+				e, ok := merged.Endpoint[name]
+				switch {
+				case !ok:
+					return fmt.Errorf("unknown endpoint %q", name)
+				case e.Key != "":
+					if _, own := layer.Endpoint[name]; !own {
+						return fmt.Errorf("the key of endpoint %s is set in the global config; use --global", name)
+					}
+				}
+				return nil
+			}
+			if _, ok := merged.Endpoint[name]; !ok {
+				return fmt.Errorf("unknown endpoint %q", name)
+			}
+			return layer.SetEndpointKey(name, key)
+		})
+	cmd.Long = `Set or clear the signing key of an endpoint. Without --global it writes the
+user layer: when the user layer has the endpoint with a url, its key is set;
+otherwise an entry with only the key is written, which keeps the url and pin
+of the global endpoint (an overlay). --clear removes that overlay, or the key
+of the user's own entry. With --global it sets or clears the key of the
+global endpoint itself. KEY is a key file path, a .pub file of an agent key,
+or the SHA256:... fingerprint of an agent key.`
+	cmd.Flags().StringVarP(&name, "endpoint", "e", "", "endpoint name from the config")
+	cmd.Flags().StringVarP(&key, "key", "k", "", "key file path, a .pub file of an agent key, or SHA256:... fingerprint of an agent key")
+	cmd.Flags().BoolVar(&clear, "clear", false, "remove the key of the endpoint from the layer")
+	cmd.MarkFlagRequired("endpoint")
+	completeFlags(cmd, map[string]cobra.CompletionFunc{"endpoint": completeEndpoint, "key": completeKey})
 	return cmd
 }
 
@@ -163,7 +253,7 @@ func newEndpointCmd(out io.Writer, global *bool) *cobra.Command {
 	var name, url, pin, key string
 	ep := &cobra.Command{
 		Use:   "endpoint",
-		Short: "List, show, add or remove endpoints",
+		Short: "List, show, add or remove endpoints, or set their keys",
 	}
 	add := edit(global, "add", "Add or replace an endpoint",
 		"  luk config endpoint add -e drop --url https://lukd.vm:8443/drop --pin sha256//Xk9...\n  luk config endpoint add -e backup --url http://lukd.vm:8080/backup --key SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
@@ -188,7 +278,7 @@ func newEndpointCmd(out io.Writer, global *bool) *cobra.Command {
 	rm.Flags().StringVarP(&rmName, "endpoint", "e", "", "endpoint name")
 	rm.MarkFlagRequired("endpoint")
 	completeFlags(rm, map[string]cobra.CompletionFunc{"endpoint": completeEndpoint})
-	ep.AddCommand(newEndpointLsCmd(out), newEndpointShowCmd(out), add, rm)
+	ep.AddCommand(newEndpointLsCmd(out), newEndpointShowCmd(out), add, rm, newEndpointKeyCmd(global))
 	return ep
 }
 
@@ -212,10 +302,13 @@ func edit(global *bool, use, short, example string, fn func(layer, merged *clien
 			if err != nil {
 				return usageError{err}
 			}
-			merged, _, err := client.LoadMerged()
+			// An overlay without a global endpoint does not block edits:
+			// one of them is the edit that removes it.
+			g, u, err := client.LoadLayers()
 			if err != nil {
 				return usageError{err}
 			}
+			merged, _ := client.Merge(g, u)
 			if err := fn(layer, merged); err != nil {
 				return usageError{err}
 			}
@@ -233,13 +326,16 @@ func edit(global *bool, use, short, example string, fn func(layer, merged *clien
 func newEndpointLsCmd(out io.Writer) *cobra.Command {
 	var layer string
 	cmd := &cobra.Command{
-		Use:     "ls",
-		Short:   "List endpoints: name, URL, pin, key, source, default marker",
+		Use:   "ls",
+		Short: "List endpoints: name, URL, pin, key, source, default marker",
+		Long: `List endpoints, one per line: name, URL, pin or -, key or -, source, and
+* for the default. The source is global or user; an endpoint whose key comes
+from a user overlay on a global endpoint shows global,key:user.`,
 		Example: "  luk config endpoint ls\n  luk config endpoint ls --layer global",
 		Args:    noArgs,
 		RunE: func(*cobra.Command, []string) error {
 			var cfg *client.Config
-			src := client.Sources{Endpoint: map[string]string{}}
+			src := client.Sources{Endpoint: map[string]string{}, EndpointKey: map[string]string{}}
 			if layer != "" {
 				path, err := layerPath(layer)
 				if err != nil {
@@ -265,7 +361,13 @@ func newEndpointLsCmd(out io.Writer) *cobra.Command {
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			for _, n := range names {
 				e := cfg.Endpoint[n]
-				pin, key, mark := "-", "-", ""
+				url, pin, key, source, mark := e.URL, "-", "-", src.Endpoint[n], ""
+				if url == "" {
+					url = "-"
+				}
+				if ks := src.EndpointKey[n]; ks != "" {
+					source += ",key:" + ks
+				}
 				if e.Pin != "" {
 					pin = "pin"
 				}
@@ -275,7 +377,7 @@ func newEndpointLsCmd(out io.Writer) *cobra.Command {
 				if n == cfg.Default {
 					mark = "*"
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", n, e.URL, pin, key, src.Endpoint[n], mark)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", n, url, pin, key, source, mark)
 			}
 			return tw.Flush()
 		},
@@ -313,8 +415,12 @@ func newEndpointShowCmd(out io.Writer) *cobra.Command {
 				// The URL with the pin as its fragment, as endpoint add takes it.
 				fmt.Fprintf(out, "         %s#%s\n", e.URL, e.Pin)
 			}
+			source := src.Endpoint[name]
+			if ks := src.EndpointKey[name]; ks != "" {
+				source += ", key: " + ks
+			}
 			fmt.Fprintf(out, "pin:     %s\nkey:     %s\nsource:  %s\ndefault: %t\n",
-				pin, key, src.Endpoint[name], name == cfg.Default)
+				pin, key, source, name == cfg.Default)
 			return nil
 		},
 	}
@@ -352,7 +458,7 @@ is only checked for its form.`,
 			if cmd.Flags().Changed("file") {
 				c, err := loadStrict(file)
 				if err == nil {
-					err = errors.Join(client.ValidateConfig(c, true), client.ValidateAliases(c, builtin, flags))
+					err = errors.Join(client.ValidateConfig(c, client.Standalone), client.ValidateAliases(c, builtin, flags))
 				}
 				if err != nil {
 					return usageError{err}
@@ -363,7 +469,7 @@ is only checked for its form.`,
 			}
 			var problems []error
 			var layers []*client.Config
-			for _, path := range []string{client.GlobalConfigPath(), client.DefaultConfigPath()} {
+			for i, path := range []string{client.GlobalConfigPath(), client.DefaultConfigPath()} {
 				c, err := client.LoadConfig(path)
 				if err != nil {
 					problems = append(problems, err)
@@ -375,11 +481,14 @@ is only checked for its form.`,
 					continue
 				}
 				fmt.Fprintf(out, "checked %s\n", path)
-				problems = append(problems, prefixed(path, client.ValidateConfig(c, false))...)
+				problems = append(problems, prefixed(path, client.ValidateConfig(c, []client.Layer{client.GlobalLayer, client.UserLayer}[i]))...)
 				problems = append(problems, prefixed(path, client.ValidateAliases(c, builtin, flags))...)
 				warnKey(errw, c)
 			}
-			merged, _ := client.Merge(layers[0], layers[1])
+			merged, src := client.Merge(layers[0], layers[1])
+			if err := client.UnmatchedError(client.DefaultConfigPath(), src); err != nil {
+				problems = append(problems, err)
+			}
 			if err := client.ValidateDefault(merged); err != nil {
 				problems = append(problems, err)
 			}

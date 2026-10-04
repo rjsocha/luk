@@ -125,7 +125,7 @@ func TestConfigRoundTrip(t *testing.T) {
 		t.Errorf("show:\n%s", out)
 	}
 	ok("config", "endpoint", "rm", "-e", "drop")
-	ok("config", "key", "--key", "")
+	ok("config", "key", "--clear")
 	c, _ = client.LoadConfig(path)
 	if c.Default != "" || c.Key != "" || len(c.Endpoint) != 1 {
 		t.Fatalf("after rm %+v", c)

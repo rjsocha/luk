@@ -38,6 +38,7 @@ func TestCompleteEndpoint(t *testing.T) {
 		{"scan", ""},
 		{"config", "default", "--endpoint", ""},
 		{"config", "endpoint", "rm", "-e", ""},
+		{"config", "endpoint", "key", "-e", ""},
 		{"config", "endpoint", "rm", "--endpoint", ""},
 		{"config", "endpoint", "show", "-e", ""},
 		{"config", "endpoint", "add", "-e", ""},
@@ -76,6 +77,7 @@ func TestCompleteKey(t *testing.T) {
 		{"send", "-k", "SHA"},
 		{"config", "key", "--key", ""},
 		{"config", "endpoint", "add", "-k", ""},
+		{"config", "endpoint", "key", "-e", "x", "-k", ""},
 	} {
 		wantCompletion(t, args, want, ":0")
 	}

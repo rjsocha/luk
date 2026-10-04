@@ -217,13 +217,121 @@ func TestValidateConfigKeys(t *testing.T) {
 		"a": {URL: "http://h/a", Key: "SHA256:alsobad"},
 		"b": {URL: "http://h/b", Key: testFP},
 	}}
-	err := ValidateConfig(c, false)
+	err := ValidateConfig(c, UserLayer)
 	if err == nil || !strings.Contains(err.Error(), `endpoint "a": key`) || !strings.Contains(err.Error(), "SHA256:bad") {
 		t.Fatalf("%v", err)
 	}
 	c.Key = testFP
 	delete(c.Endpoint, "a")
-	if err := ValidateConfig(c, false); err != nil {
+	if err := ValidateConfig(c, UserLayer); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMergeOverlay(t *testing.T) {
+	g := &Config{Endpoint: map[string]EndpointConfig{
+		"a": {URL: "https://g/a", Pin: "sha256//g", Key: "/g/a.pub"},
+		"b": {URL: "http://g/b"},
+	}}
+	u := &Config{Endpoint: map[string]EndpointConfig{
+		"a":    {Key: testFP},
+		"b":    {URL: "http://u/b"},
+		"gone": {Key: testFP},
+	}}
+	m, src := Merge(g, u)
+	if m.Endpoint["a"] != (EndpointConfig{URL: "https://g/a", Pin: "sha256//g", Key: testFP}) {
+		t.Errorf("overlay a: %+v", m.Endpoint["a"])
+	}
+	if src.Endpoint["a"] != "global" || src.EndpointKey["a"] != "user" {
+		t.Errorf("sources of a: %q key %q", src.Endpoint["a"], src.EndpointKey["a"])
+	}
+	if m.Endpoint["b"] != (EndpointConfig{URL: "http://u/b"}) || src.Endpoint["b"] != "user" || src.EndpointKey["b"] != "" {
+		t.Errorf("whole b: %+v %q %q", m.Endpoint["b"], src.Endpoint["b"], src.EndpointKey["b"])
+	}
+	if _, ok := m.Endpoint["gone"]; ok || len(src.Unmatched) != 1 || src.Unmatched[0] != "gone" {
+		t.Errorf("unmatched: %+v %v", m.Endpoint, src.Unmatched)
+	}
+	if g.Endpoint["a"].Key != "/g/a.pub" {
+		t.Errorf("global layer changed: %+v", g.Endpoint["a"])
+	}
+	err := UnmatchedError("/u.yaml", src)
+	if err == nil || !strings.Contains(err.Error(), `/u.yaml: endpoint "gone" has no url`) || !strings.Contains(err.Error(), "luk config endpoint key -e gone --clear") {
+		t.Errorf("%v", err)
+	}
+}
+
+func TestLoadMergedUnmatched(t *testing.T) {
+	dir := t.TempDir()
+	up := filepath.Join(dir, "u.yaml")
+	t.Setenv("LUK_GLOBAL_CONFIG", filepath.Join(dir, "g.yaml"))
+	t.Setenv("LUK_CONFIG", up)
+	os.WriteFile(up, []byte("endpoint:\n  x:\n    key: "+testFP+"\n"), 0o600)
+	if _, _, err := LoadMerged(); err == nil || !strings.Contains(err.Error(), up) || !strings.Contains(err.Error(), `endpoint "x"`) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestValidateOverlay(t *testing.T) {
+	c := &Config{Endpoint: map[string]EndpointConfig{"a": {Key: testFP}}}
+	if err := ValidateConfig(c, UserLayer); err != nil {
+		t.Errorf("user overlay: %v", err)
+	}
+	for _, l := range []Layer{GlobalLayer, Standalone} {
+		if err := ValidateConfig(c, l); err == nil || !strings.Contains(err.Error(), "url is missing") {
+			t.Errorf("layer %d: %v", l, err)
+		}
+	}
+	for e, want := range map[EndpointConfig]string{
+		{}:                       "neither url nor key",
+		{Key: "rel.pub"}:         "absolute path",
+		{Key: testFP, Pin: "x"}:  "pin without url",
+		{Key: "SHA256:tooshort"}: "SHA256:tooshort",
+	} {
+		c := &Config{Endpoint: map[string]EndpointConfig{"a": e}}
+		if err := ValidateConfig(c, UserLayer); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%+v: %v, want %q", e, err, want)
+		}
+	}
+}
+
+func TestSetClearEndpointKey(t *testing.T) {
+	c := &Config{Endpoint: map[string]EndpointConfig{"own": {URL: "http://h/own"}}}
+	if err := c.SetEndpointKey("g", testFP); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetEndpointKey("own", "~/.ssh/id.pub"); err != nil {
+		t.Fatal(err)
+	}
+	if c.Endpoint["g"] != (EndpointConfig{Key: testFP}) || c.Endpoint["own"] != (EndpointConfig{URL: "http://h/own", Key: "~/.ssh/id.pub"}) {
+		t.Fatalf("%+v", c.Endpoint)
+	}
+	for _, k := range []string{"", "rel.pub", "SHA256:x"} {
+		if err := c.SetEndpointKey("n", k); err == nil {
+			t.Errorf("key %q accepted", k)
+		}
+	}
+	if _, ok := c.Endpoint["n"]; ok {
+		t.Error("invalid key stored")
+	}
+	if !c.ClearEndpointKey("g") || !c.ClearEndpointKey("own") || c.ClearEndpointKey("own") || c.ClearEndpointKey("none") {
+		t.Error("clear results")
+	}
+	if _, ok := c.Endpoint["g"]; ok || c.Endpoint["own"] != (EndpointConfig{URL: "http://h/own"}) {
+		t.Errorf("after clear %+v", c.Endpoint)
+	}
+}
+
+func TestOverlayRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := SaveConfig(path, &Config{Endpoint: map[string]EndpointConfig{"g": {Key: testFP}}}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "url") {
+		t.Errorf("overlay written with url:\n%s", data)
+	}
+	c, err := LoadConfig(path)
+	if err != nil || c.Endpoint["g"] != (EndpointConfig{Key: testFP}) {
+		t.Fatalf("%+v %v", c, err)
 	}
 }
