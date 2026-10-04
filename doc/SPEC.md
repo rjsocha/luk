@@ -1,6 +1,6 @@
 # luk - spec
 
-luk is a file intake server. One file per upload,
+luk is an SSH-authenticated storage server. One file per upload,
 authenticated by an SSH key, routed by endpoint and tags into pipelines
 that process it and store the results; stored results can be exposed over
 HTTP. It replaces two things with one:

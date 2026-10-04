@@ -75,7 +75,7 @@ nfpms:
     bindir: /usr/bin
     maintainer: Robert Socha <socha@socha.it>
     license: Unlicense
-    description: luk - client of lukd, SSH-signed uploads, links and secrets.
+    description: luk - client of lukd, the SSH-Authenticated Storage Server.
     section: net
     priority: optional
   - id: lukd
@@ -86,7 +86,7 @@ nfpms:
     bindir: /usr/bin
     maintainer: Robert Socha <socha@socha.it>
     license: Unlicense
-    description: lukd - SSH-signed upload, drop and backup server with pipelines.
+    description: lukd - SSH-Authenticated Storage Server.
     section: net
     priority: optional
     dependencies:

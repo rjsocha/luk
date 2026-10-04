@@ -41,7 +41,7 @@ func rootCmd() *cobra.Command {
 	var cfgPath string
 	root := &cobra.Command{
 		Use:           "lukd",
-		Short:         "luk server: SSH-signed file intake",
+		Short:         "lukd: SSH-Authenticated Storage Server",
 		Version:       buildVersion,
 		SilenceUsage:  true,
 		SilenceErrors: true,
