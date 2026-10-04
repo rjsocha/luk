@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"hash"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 
@@ -143,6 +145,84 @@ func Get(ctx context.Context, o GetOptions) (*Download, error) {
 	}
 	d.r = io.TeeReader(src, d.h)
 	return d, nil
+}
+
+// IsDirURL reports whether the URL of luk get names a directory: its
+// path ends with a slash (as in rsync).
+func IsDirURL(u *url.URL) bool { return strings.HasSuffix(u.Path, "/") }
+
+// maxListing is the largest signed listing read.
+const maxListing = 64 << 20
+
+// List sends a signed GET of the directory URL o.URL, with the query
+// recursive=1 when recursive (replacing any query of the URL), and returns
+// the listing: one level, or every file below the directory named
+// relative to it. Errors as for Get; Progress and BWLimit do not apply.
+func List(ctx context.Context, o GetOptions, recursive bool) ([]wire.ListEntry, error) {
+	u := *o.URL
+	u.RawQuery, u.ForceQuery = "", false
+	if recursive {
+		u.RawQuery = wire.QueryRecursive
+	}
+	o.URL = &u
+	resp, err := signedGet(ctx, o, http.MethodGet, wire.GetNamespace)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxListing+1))
+	if err != nil {
+		return nil, transferError(ctx, err, u.Host, int64(len(data)), resp.ContentLength, true)
+	}
+	if len(data) > maxListing {
+		return nil, fmt.Errorf("listing larger than %s", HumanBytes(maxListing))
+	}
+	var ents []wire.ListEntry
+	if err := json.Unmarshal(data, &ents); err != nil {
+		return nil, fmt.Errorf("listing: not a JSON array of entries: %w", err)
+	}
+	return ents, nil
+}
+
+// ChildURL is the URL of the name rel (relative, elements separated by
+// slashes) under the directory URL dir, each element escaped.
+func ChildURL(dir *url.URL, rel string) *url.URL {
+	u := *dir
+	u.RawQuery, u.ForceQuery = "", false
+	parts := strings.Split(rel, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	u.Path = dir.Path + rel
+	u.RawPath = dir.EscapedPath() + strings.Join(parts, "/")
+	return &u
+}
+
+// ValidListName reports whether a file name of a recursive listing is
+// safe to create under a local directory: relative, valid UTF-8, without
+// empty, "." or ".." elements and without characters Printable escapes
+// (control characters among them).
+func ValidListName(name string) error {
+	bad := func(why string) error { return fmt.Errorf("unsafe name %q in the listing: %s", name, why) }
+	switch {
+	case name == "":
+		return bad("empty")
+	case !utf8.ValidString(name):
+		return bad("not UTF-8")
+	case strings.HasPrefix(name, "/"):
+		return bad("absolute")
+	case strings.ContainsFunc(name, unsafeRune):
+		return bad("control or formatting characters")
+	}
+	for _, e := range strings.Split(name, "/") {
+		switch e {
+		case "":
+			return bad("empty path element")
+		case ".", "..":
+			return bad("path element " + e)
+		}
+	}
+	return nil
 }
 
 // Head is what the server announces for a file without sending it.

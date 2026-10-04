@@ -23,12 +23,12 @@ import (
 
 func newGetCmd(out io.Writer) *cobra.Command {
 	var (
-		output, key, bwlimit                           string
-		force, inplace, progress, head, asJSON, stdout bool
+		output, key, bwlimit                                             string
+		force, inplace, progress, head, asJSON, stdout, recursive, quiet bool
 	)
 	cmd := &cobra.Command{
 		Use:   "get URL",
-		Short: "Download a private file with a signed request",
+		Short: "Download a file or a directory with a signed request",
 		Long: `Download a private file (luk send --private) from URL: the luk:// URL luk
 send printed, or the https:// URL of the same expose. luk:// always means
 https. The request is signed with an SSH key; the server answers only the
@@ -55,11 +55,36 @@ rate in bytes per second (K, M, G, T suffixes; 0 = unlimited).
 --head sends a signed HEAD instead (it never claims a once file) and
 prints what the server announces, one "key: value" per line: name, size,
 content_type, sha256, expires and once (each only when announced; once
-is printed as true); --json prints them as a JSON object. Exit codes as for luk send.`,
+is printed as true); --json prints them as a JSON object. Exit codes as for luk send.
+
+A URL ending with a slash names a directory (as in rsync) of an expose
+that serves every file of its storage to signed requests (an auth.ssh
+expose that is the expose of a storage). Without -o it prints the
+listing: NAME, SIZE, RECEIVED (local time) and SHA256 (the first 12
+characters), directories first; -r lists every file below the directory
+with relative names; --json prints the entries as JSON (name, dir, size,
+received, sha256 in full). The listing leaves out once and portal uploads,
+so a directory download never claims a once file.
+
+-o DIR/ (ending with a slash, or an existing directory; created when
+missing) downloads every file below the directory into DIR, recreating
+the subdirectories. Each file goes through a temporary file and is
+checked against its sha256. A file that exists in DIR with the same
+sha256 is skipped; one that differs is refused unless --force; a symlink
+or anything else that is not a regular file is always refused, and no
+symlink in DIR is followed. Unsafe names (absolute, "..", control
+characters) in the listing stop the download before any file is written.
+It prints "get NAME" or "skip NAME" per file and a summary (-q prints
+nothing but errors). --progress and --bwlimit apply per file. A failed
+file is reported and the others still downloaded; the exit code is then
+that of the first failure. -c, --inplace and --head take no directory.`,
 		Example: `  luk get 'luk://secure.example.com/x7Kq...#sha256//Xk9...' -o notes.txt
   luk get luk://secure.example.com/x7Kq... -c | tar x
   luk get https://secure.example.com/x7Kq... -o notes.txt --force --progress
-  luk get luk://secure.example.com/x7Kq... --head`,
+  luk get luk://secure.example.com/x7Kq... --head
+  luk get luk://secure.example.com/v/2026/
+  luk get luk://secure.example.com/v/ -r --json
+  luk get luk://secure.example.com/v/2026/ -o backups/`,
 		Args:              oneURL,
 		ValidArgsFunction: completeNone,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -73,6 +98,15 @@ is printed as true); --json prints them as a JSON object. Exit codes as for luk 
 					return usageError{errors.New("-c/--stdout and -o exclude each other")}
 				}
 				output = "-"
+			}
+			if client.IsDirURL(u) {
+				return getDir(cmd, rawURL, u, pin, dirOptions{
+					output: output, key: key, bwlimit: bwlimit, force: force, inplace: inplace, progress: progress,
+					head: head, asJSON: asJSON, recursive: recursive, quiet: quiet,
+				}, out)
+			}
+			if recursive {
+				return usageError{errors.New("-r needs a directory URL (ending with a slash)")}
 			}
 			switch {
 			case inplace && (head || output == "-"):
@@ -145,17 +179,21 @@ is printed as true); --json prints them as a JSON object. Exit codes as for luk 
 			if err := save(output, d, force); err != nil {
 				return err
 			}
-			fmt.Fprintln(out, output)
+			if !quiet {
+				fmt.Fprintln(out, output)
+			}
 			return nil
 		},
 	}
 	f := cmd.Flags()
-	f.StringVarP(&output, "output", "o", "", "file to write, - for stdout (required unless -c or --head)")
+	f.StringVarP(&output, "output", "o", "", "file to write, - for stdout (required unless -c or --head); DIR/ for a directory URL")
 	f.BoolVarP(&stdout, "stdout", "c", false, "write the content to stdout (as -o -)")
 	f.BoolVar(&force, "force", false, "overwrite an existing file")
 	f.BoolVar(&inplace, "inplace", false, "write into FILE directly, no temporary file (keeps its inode; devices and FIFOs work)")
 	f.BoolVar(&head, "head", false, "print what the server announces (name, size, content_type, sha256, expires, once) without downloading")
-	f.BoolVar(&asJSON, "json", false, "with --head: print a JSON object")
+	f.BoolVar(&asJSON, "json", false, "with --head: print a JSON object; with a directory URL: print the listing as JSON")
+	f.BoolVarP(&recursive, "recursive", "r", false, "with a directory URL: list every file below it")
+	f.BoolVarP(&quiet, "quiet", "q", false, "print nothing but errors")
 	f.StringVarP(&key, "key", "k", "", "private key file (uses PATH-cert.pub when present), a .pub file of an agent key, or SHA256:... fingerprint of an agent key")
 	f.BoolVar(&progress, "progress", false, "show transfer progress on stderr (terminal only)")
 	f.StringVar(&bwlimit, "bwlimit", "", "limit the download rate, bytes per second with K, M, G, T suffix (0 = unlimited)")
