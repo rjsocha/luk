@@ -90,7 +90,7 @@ func TestIndexListing(t *testing.T) {
 			t.Errorf("line %d %v, want %v", i, got[i], want[i])
 		}
 	}
-	for _, s := range []string{"Index of /d/", "5 bytes", `<time datetime="2026-09-30T10:15:00Z" title="2026-09-30 10:15 UTC">2026-09-30 10:15 UTC</time>`, "Powered by", `href="../"`} {
+	for _, s := range []string{"Index of /d/", "max-width: 80rem", "5 bytes", `<time datetime="2026-09-30T10:15:00Z" title="2026-09-30 10:15 UTC">2026-09-30 10:15 UTC</time>`, "Powered by", `href="../"`} {
 		if strings.Contains(body, s) != (s != `href="../"`) {
 			t.Errorf("%q: %s", s, body)
 		}

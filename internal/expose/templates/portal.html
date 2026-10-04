@@ -209,7 +209,8 @@ textarea { display: block; width: 100%; min-height: 12rem; margin: 0 0 1rem; pad
 <p>The content is larger than {{.Limit}} and cannot be shown here.</p>
 {{template "foot" .}}{{end}}
 
-{{define "index"}}{{template "head" .}}<h1>Index of {{.Dir}}</h1>
+{{define "index"}}{{template "head" .}}<style nonce="{{.Nonce}}">main, footer { max-width: 80rem; }</style>
+<h1>Index of {{.Dir}}</h1>
 <table>
 <thead><tr><th>Name</th><th>Size</th><th>Stored</th></tr></thead>
 <tbody>
