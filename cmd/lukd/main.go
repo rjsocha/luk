@@ -186,7 +186,7 @@ func rootCmd() *cobra.Command {
 	var asJSON bool
 	statusCmd := &cobra.Command{
 		Use:   "status",
-		Short: "Print the last pipeline result per pipeline and sender",
+		Short: "Print the last pipeline result per pipeline and sender, and the watch evaluations",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(cfgPath)

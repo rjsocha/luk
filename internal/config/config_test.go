@@ -2053,3 +2053,65 @@ func TestRetentionErrors(t *testing.T) {
 		t.Errorf("s3: %v", err)
 	}
 }
+
+func TestWatch(t *testing.T) {
+	const rules = `watch: [{origin: [db1-prod], file: ["db.sql*"], every: 26h, size: {min: 2G, max: 20G, step: 500M}, same: 3}, {origin: "*-stage", every: 50h, size: {min: 100M}}, {file: "*.tar", same: 2}]`
+	src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", `+rules+`}`, 1)
+	c, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := c.Storage["archive"]
+	w := st.Watch[0]
+	if *w.Every != Duration(26*time.Hour) || *w.Size.Min != 2<<30 || *w.Size.Max != 20<<30 || *w.Size.Step != 500<<20 || *w.Same != 3 {
+		t.Fatalf("rule 1: %+v", w)
+	}
+	if w := st.Watch[1]; w.Size.Max != nil || w.Size.Step != nil || w.Same != nil || len(w.File) != 0 {
+		t.Fatalf("rule 2: %+v", w)
+	}
+	for _, c := range []struct {
+		origin, file string
+		want         int
+	}{
+		{"db1-prod", "db.sql", 0}, {"db1-prod", "db.sql.gz", 0}, {"db1-prod", "site.tar", 2}, {"db1-prod", "other", -1},
+		{"db1-stage", "anything", 1}, {"web1", "site.tar", 2}, {"web1", "site.zip", -1},
+	} {
+		if got := st.WatchRule(c.origin, c.file); got != c.want {
+			t.Errorf("%s/%s: rule %d, want %d", c.origin, c.file, got, c.want)
+		}
+	}
+}
+
+func TestWatchErrors(t *testing.T) {
+	for rules, want := range map[string]string{
+		`[{origin: "[x", every: 1h}]`:               `storage archive: watch rule 1: origin "[x": syntax error in pattern`,
+		`[{file: "[x", every: 1h}]`:                 `storage archive: watch rule 1: file "[x": syntax error in pattern`,
+		`[{origin: [""], every: 1h}]`:               "storage archive: watch rule 1: empty origin glob",
+		`[{file: [""], every: 1h}]`:                 "storage archive: watch rule 1: empty file glob",
+		`[{origin: x, every: 0s}]`:                  "storage archive: watch rule 1: every must be above 0",
+		`[{origin: x, every: -1h}]`:                 "storage archive: watch rule 1: every must be above 0",
+		`[{origin: x, size: {min: 0}}]`:             "storage archive: watch rule 1: size.min must be above 0",
+		`[{origin: x, size: {max: 0}}]`:             "storage archive: watch rule 1: size.max must be above 0",
+		`[{origin: x, size: {step: 0}}]`:            "storage archive: watch rule 1: size.step must be above 0",
+		`[{origin: x, size: {min: 2G, max: 1G}}]`:   "storage archive: watch rule 1: size.min must not exceed size.max",
+		`[{origin: x, same: 1}]`:                    "storage archive: watch rule 1: same must be at least 2",
+		`[{origin: x}]`:                             "storage archive: watch rule 1: needs a check (every, size.min, size.max, size.step, same)",
+		`[{origin: x, size: {}}]`:                   "storage archive: watch rule 1: needs a check",
+		`[{every: 1h}, {origin: x, every: 1h}]`:     "storage archive: watch rule 1 matches every series and must be the last: the rules after it are unreachable",
+		`[{origin: x, every: 1h, hourly: 1}]`:       "field hourly not found",
+		`[{origin: x, every: 1h, size: {avg: 1G}}]`: "field avg not found",
+	} {
+		src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", watch: `+rules+`}`, 1)
+		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v", rules, err)
+		}
+	}
+	src := strings.Replace(good, "storage:\n", "storage:\n  off: {type: s3, bucket: b, watch: [{every: 1h}]}\n", 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage off: watch needs a local storage") {
+		t.Errorf("s3: %v", err)
+	}
+	src = strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", watch: [{origin: x, every: 1h}, {every: 2h}]}`, 1)
+	if _, err := Parse([]byte(src)); err != nil {
+		t.Errorf("catch-all last: %v", err)
+	}
+}

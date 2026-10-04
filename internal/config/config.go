@@ -717,6 +717,10 @@ type Storage struct {
 	// first rule whose origin globs match the origin of a file applies
 	// (see RetentionRule).
 	Retention []Retention `yaml:"retention"`
+	// Watch holds the monitoring rules of the series (local only): the
+	// first rule whose origin and file globs match a series applies (see
+	// WatchRule).
+	Watch []Watch `yaml:"watch"`
 
 	pathTmpl *template.Template
 	nested   []string
@@ -797,6 +801,55 @@ func (r Retention) Matches(origin string) bool {
 func (s *Storage) RetentionRule(origin string) int {
 	for i, r := range s.Retention {
 		if r.Matches(origin) {
+			return i
+		}
+	}
+	return -1
+}
+
+// Watch is one watch rule of a storage: Origin and File hold globs
+// (path.Match) on the origin and the file name of a series, none for any;
+// the checks are those set: Every bounds the age of the newest copy,
+// Size.Min and Size.Max its size, Size.Step the difference to the copy
+// before it, and Same the number of newest copies with one sha256.
+type Watch struct {
+	Origin StringList `yaml:"origin"`
+	File   StringList `yaml:"file"`
+	Every  *Duration  `yaml:"every"`
+	Size   WatchSize  `yaml:"size"`
+	Same   *int       `yaml:"same"`
+}
+
+// WatchSize holds the size checks of a watch rule.
+type WatchSize struct {
+	Min  *Size `yaml:"min"`
+	Max  *Size `yaml:"max"`
+	Step *Size `yaml:"step"`
+}
+
+// Matches reports whether the rule applies to the series of origin and
+// file: each glob list is empty or has a match.
+func (w Watch) Matches(origin, file string) bool {
+	return globsMatch(w.Origin, origin) && globsMatch(w.File, file)
+}
+
+func globsMatch(globs StringList, s string) bool {
+	if len(globs) == 0 {
+		return true
+	}
+	for _, g := range globs {
+		if ok, _ := path.Match(g, s); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// WatchRule is the index of the first watch rule matching the series of
+// origin and file, -1 when none does.
+func (s *Storage) WatchRule(origin, file string) int {
+	for i, w := range s.Watch {
+		if w.Matches(origin, file) {
 			return i
 		}
 	}
@@ -1498,6 +1551,46 @@ func (c *Config) validate() []error {
 			}
 			if len(r.Origin) == 0 && i < len(s.Retention)-1 {
 				bad("storage %s: retention rule %d matches every origin and must be the last: the rules after it are unreachable", name, i+1)
+			}
+		}
+		if len(s.Watch) > 0 && s.Type != "local" {
+			bad("storage %s: watch needs a local storage", name)
+		}
+		for i, w := range s.Watch {
+			for _, l := range []struct {
+				key   string
+				globs StringList
+			}{{"origin", w.Origin}, {"file", w.File}} {
+				for _, g := range l.globs {
+					if g == "" {
+						bad("storage %s: watch rule %d: empty %s glob", name, i+1, l.key)
+					} else if _, err := path.Match(g, ""); err != nil {
+						bad("storage %s: watch rule %d: %s %q: %v", name, i+1, l.key, g, err)
+					}
+				}
+			}
+			if w.Every != nil && *w.Every <= 0 {
+				bad("storage %s: watch rule %d: every must be above 0", name, i+1)
+			}
+			for _, z := range []struct {
+				key string
+				v   *Size
+			}{{"min", w.Size.Min}, {"max", w.Size.Max}, {"step", w.Size.Step}} {
+				if z.v != nil && *z.v <= 0 {
+					bad("storage %s: watch rule %d: size.%s must be above 0", name, i+1, z.key)
+				}
+			}
+			if w.Size.Min != nil && w.Size.Max != nil && *w.Size.Min > *w.Size.Max {
+				bad("storage %s: watch rule %d: size.min must not exceed size.max", name, i+1)
+			}
+			if w.Same != nil && *w.Same < 2 {
+				bad("storage %s: watch rule %d: same must be at least 2", name, i+1)
+			}
+			if w.Every == nil && w.Size == (WatchSize{}) && w.Same == nil {
+				bad("storage %s: watch rule %d: needs a check (every, size.min, size.max, size.step, same)", name, i+1)
+			}
+			if len(w.Origin) == 0 && len(w.File) == 0 && i < len(s.Watch)-1 {
+				bad("storage %s: watch rule %d matches every series and must be the last: the rules after it are unreachable", name, i+1)
 			}
 		}
 		if s.Random != (Random{}) {

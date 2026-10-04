@@ -1480,6 +1480,13 @@ and `ssh.d/ca/`):
   without `origin` (every origin) is
   the last (`storage <n>: retention rule <i> matches every origin and
   must be the last: the rules after it are unreachable`);
+- `storage.<n>.watch` needs a local storage; every `origin` and `file`
+  glob is non-empty and valid for path.Match; `every` is above 0,
+  `size.min`, `size.max` and `size.step` are above 0, `size.min` is at
+  most `size.max`, `same` is at least 2, and a rule has at least one
+  check (`storage <n>: watch rule <i>: needs a check (every, size.min,
+  size.max, size.step, same)`); a rule without `origin` and `file` (every
+  series) is the last;
 - `respond: url` requires `storage`, and that storage must be exposed;
 - a storage with `shard` is not the `expose` of an expose with `index`;
 - the capability lists (`link.remove`, `link.ttl`, `link.replace`,
@@ -2136,6 +2143,60 @@ pipeline:
     logged at INFO: `retention removed` with `storage`, `name`, `id`,
     `pipeline`, `origin`, `file` and `rule` (1-based).
   - `lukd storage retention` shows the plan without changing anything.
+- `watch` (local only) - monitoring rules of the series (as in
+  `retention`: pipeline, origin and file name), with thresholds that are
+  only the configured values (nothing is learned or adapted):
+
+  ```yaml
+  storage:
+    archive:
+      watch:
+        - origin: ["db1-prod"]            # globs on the origin; absent: any origin
+          file: ["db.sql*"]               # globs on the file name of the series; absent: any
+          every: 26h                      # newest copy older than this: CRIT
+          size: {min: 2G, max: 20G, step: 500M}
+          same: 3                         # this many newest copies with one sha256: WARN
+        - origin: ["*-stage"]
+          every: 50h
+          size: {min: 100M}
+  ```
+
+  - The first rule whose `origin` globs match the origin and whose `file`
+    globs match the file name of a series applies (path.Match; an absent
+    list matches anything). A series no rule matches is not watched.
+  - The copies of a series are its stored files whose `received` can be
+    read, newest first; the newest copy is the first. The checks, each
+    only when set:
+    - `every` (a duration): the newest copy was received longer than
+      `every` before now: CRIT (`last copy 31h ago (every 26h)`);
+    - `size.min`, `size.max`: the size of the newest copy is below
+      `min` or above `max`: CRIT (`980M below min 2G`, `25.5G above max
+      20G`);
+    - `size.step`: the size of the newest copy differs from the one
+      before it by more than `step`: WARN (`grew by 1G to 5G (step
+      500M)`, `shrank by 1G to 3G (step 500M)`); one copy passes;
+    - `same` (2 or more): the `same` newest copies have one known sha256:
+      WARN (`last 3 copies identical (sha256 0123456789ab)`).
+    A series without a copy (only unreadable `received`) is CRIT (`no
+    copy with a readable received time`).
+  - All checks of the rule combine: the state is the worst, and the
+    message names the series and every failed check, CRIT ones first,
+    sizes in K, M, G, T (`db1-prod/db.sql: 980M below min 2G; last copy
+    31h ago (every 26h)`). A series that passes is OK with the age and
+    size of its newest copy (`db1-prod/db.sql: last copy 3h ago, 4.1G`).
+  - A rule no series matches (none at all, or every match taken by an
+    earlier rule) is WARN: `rule 2 (origin *-stage): no series matches`.
+  - The process role evaluates the rules of every storage after each
+    maintenance pass (every minute) and after each pipeline that stored
+    a file into a storage with `watch`, and writes the result to the
+    `watch` section of `status.json` (see Status); `lukd status` shows
+    it, the checkmk check makes a service of each record.
+  - With `dedup` (see below) an upload identical to the newest version
+    of its path places no new copy, so `every` keeps counting from the
+    stored one and `same` sees no repeat; with a path per upload (a
+    date or `.Id` in `path`) every upload is a copy of its own.
+  - `lukd storage watch` shows the evaluation and, with `--suggest`,
+    values observed on recent copies as hints for the thresholds.
 - The janitor covers every local storage, exposed or not: the expiry
   pass (expired files, `cleanup.age`, stale claimed files, every minute)
   runs in the receive role, the maintenance (retention, aliases, catalog,
@@ -2389,6 +2450,42 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   `files`, each with `name`, `id`, `received`, `keep` (true or false) and
   `reasons`. Sidecars that cannot be read are reported after the plan
   (exit 1).
+- `lukd storage watch --storage NAME [--json] [--suggest]`: the
+  evaluation of the watch rules (see `watch`) now, read only. First the
+  rules (`rule <i>: <globs>: <checks>`), then, per series in order of
+  pipeline, origin and file name, aligned columns `STORAGE`, `SERIES`
+  (`<origin>/<file>`), `PIPELINE`, `RULE`, `STATE`, `NEWEST` (received
+  of the newest copy), `SIZE` (its size), `COPIES` and `MESSAGE`; a
+  series no rule matches shows `-` as rule and state and `not watched`,
+  a rule no series matches follows with `-` as series. `--suggest` adds
+  a table of hints, clearly labelled as such: values observed on the
+  newest 30 copies of each series (`COPIES`, `NEWEST SIZE`, `MIN SIZE`,
+  `MAX SIZE`, `MAX STEP` between neighbours, the median `INTERVAL`
+  between copies with `MIN INTERVAL` and `MAX INTERVAL`, and `SAME`, the
+  newest copies with the content of the newest). They help to choose
+  thresholds; lukd never uses them as thresholds.
+
+  ```
+  rule 1: origin db1-prod; file db.sql*: every 26h, size.min 2G, size.step 500M
+  rule 2: origin *-dev: same 2
+
+  STORAGE  SERIES           PIPELINE  RULE  STATE  NEWEST                SIZE  COPIES  MESSAGE
+  archive  db1-prod/db.sql  nightly   1     CRIT   2026-10-03T05:00:00Z  980M  3       db1-prod/db.sql: 980M below min 2G; last copy 31h ago (every 26h); shrank by 2G to 980M (step 500M)
+  archive  web1/db.sql      nightly   -     -      2026-10-04T11:00:00Z  1M    1       not watched
+  archive  -                -         2     WARN   -                     -     0       rule 2 (origin *-dev): no series matches
+
+  HINTS: observed on the newest 30 copies of each series; not thresholds
+  SERIES           PIPELINE  COPIES  NEWEST SIZE  MIN SIZE  MAX SIZE  MAX STEP  INTERVAL  MIN INTERVAL  MAX INTERVAL  SAME
+  db1-prod/db.sql  nightly   3       980M         980M      2.9G      2G        24h       24h           24h           1
+  web1/db.sql      nightly   1       1M           1M        1M        0         -         -             -             1
+  ```
+
+  `--json` prints an array of the rows: the fields of a `watch` record of
+  `status.json` (`state` empty and `rule` 0 for a series no rule
+  matches) and, with `--suggest`, `hints` (`copies`, `newest_size`,
+  `min_size`, `max_size`, `max_step`, `interval`, `min_interval`,
+  `max_interval`, `same`). Sidecars that cannot be read are reported
+  after the rows (exit 1).
 
 ## Expose
 
@@ -2595,17 +2692,47 @@ verification.
 ## Status
 
 lukd writes `status.json` atomically (and may serve it as
-`GET /status` behind auth), one entry per (pipeline, sender):
+`GET /status` behind auth): an object with `pipelines`, one entry per
+(pipeline, sender), and `watch`, the evaluation of the watch rules of
+the storages (see `watch` under Storage and catalog), one record per
+watched series and per rule no series matches:
 
 ```json
-{"pipeline": "devdb", "sender": "hosts:replica.aws.example.net",
- "tags": ["prod", "devdump"], "last_received": "...", "last_success": "...",
- "last_failure": "...", "failed_step": 2, "error": "dbdump exit 1",
- "size": 314572800, "failed": 0}
+{
+  "pipelines": [
+    {"pipeline": "devdb", "sender": "hosts:replica.aws.example.net",
+     "tags": ["prod", "devdump"], "last_id": "...", "last_received": "...",
+     "last_success": "...", "last_failure": "...", "failed_step": 2,
+     "error": "dbdump exit 1", "size": 314572800, "failed": 0}
+  ],
+  "watch": [
+    {"storage": "archive", "rule": 1, "pipeline": "nightly",
+     "origin": "db1-prod", "file": "db.sql", "state": "CRIT",
+     "message": "db1-prod/db.sql: 980M below min 2G; last copy 31h ago (every 26h)",
+     "newest_received": "2026-10-03T05:00:00Z", "size": 1027604480,
+     "copies": 3, "evaluated": "2026-10-04T12:00:00Z"},
+    {"storage": "archive", "rule": 2, "pipeline": "", "origin": "",
+     "file": "", "state": "WARN",
+     "message": "rule 2 (origin *-stage): no series matches",
+     "size": 0, "copies": 0, "evaluated": "2026-10-04T12:00:00Z"}
+  ]
+}
 ```
 
-lukd reports facts only. Thresholds ("expect every 24h, at least 300M")
-live in the checkmk check, generated by host-policy.
+A watch record holds `storage`, `rule` (1-based), the series
+(`pipeline`, `origin`, `file`; empty for a rule no series matches),
+`state` (`OK`, `WARN`, `CRIT`), `message`, `newest_received` and `size`
+of the newest copy (`newest_received` omitted without one), `copies`
+and `evaluated` (when the process role evaluated it, about every
+minute). The `watch` section is replaced by each evaluation; a storage
+without rules has no records. lukd reads a `status.json` of an older
+release (an array of pipeline entries) and writes the object from then
+on.
+
+For the pipelines lukd reports facts only. Their thresholds ("expect
+every 24h, at least 300M") live in the checkmk check, generated by
+host-policy. The thresholds of the watch rules are the `watch`
+configuration of the storages.
 
 ## TLS
 
@@ -2856,9 +2983,10 @@ systemctl enable --now lukd
   seconds is the fallback (lost events, queue overflow, inotify not
   available); an entry already running is skipped. It runs the pipelines
   (run and store steps), keeps `failed/` and `status.json` (loaded at
-  start, results, failed counts) and does the storage maintenance of the
-  janitor (retention, aliases, catalog rebuild, content objects, crash
-  leftovers, old work directories). `SIGHUP` reloads the configuration (see Reload); the
+  start, results, failed counts, watch evaluations) and does the storage
+  maintenance of the janitor (retention, aliases, catalog rebuild,
+  content objects, crash leftovers, old work directories), followed by
+  the evaluation of the watch rules. `SIGHUP` reloads the configuration (see Reload); the
   queue directories of new endpoints are watched from then on.
 
 Each role runs once per `root`: `lukd receive` holds a `flock` on
@@ -4002,10 +4130,28 @@ disk. Test on lukd.vm / luk.vm.
 ### Phase 5 - status
 
 - lukd keeps `<root>/status.json` (atomic writes, loaded at start), one
-  entry per (pipeline, sender): `pipeline`, `sender`, `tags`, `last_id`,
-  `last_received`, `last_success`, `last_failure`, `failed_step`,
-  `error` (last failure, up to 4 KiB), `size`.
-- `lukd status` prints it; checkmk reads the file (a local check).
+  entry per (pipeline, sender) under `pipelines`: `pipeline`, `sender`,
+  `tags`, `last_id`, `last_received`, `last_success`, `last_failure`,
+  `failed_step`, `error` (last failure, up to 4 KiB), `size`; and the
+  watch evaluations under `watch` (see Status).
+- `lukd status` prints it: a table of the pipelines and, when there are
+  watch records, a table of them (`STORAGE`, `SERIES`, `PIPELINE`,
+  `RULE`, `STATE`, `NEWEST`, `SIZE`, `COPIES`, `MESSAGE`); `--json`
+  prints the file. checkmk reads the file (a local check).
+- The checkmk check makes one service `luk <pipeline> <sender>` per
+  pipeline entry, one `luk watch <storage> <pipeline> <origin>/<file>`
+  per watched series (`-` for an empty pipeline) and one `luk watch
+  <storage> rule <i>` per rule no series matches, with the state and
+  message of the record (metrics `age` of the newest copy and `size`):
+
+  ```
+  2 "luk watch archive nightly db1-prod/db.sql" age=111600|size=1027604480 db1-prod/db.sql: 980M below min 2G; last copy 31h ago (every 26h)
+  1 "luk watch archive rule 2" - rule 2 (origin *-stage): no series matches
+  ```
+
+  A record evaluated more than 10 minutes ago is UNKNOWN (`evaluated
+  2h 5m ago, is lukd process running? last: ...`): the process role
+  evaluates every minute.
 - `failed` per entry is the number of uploads waiting in the failed
   queue. `contrib/checkmk/luk_status` is the checkmk local check (installed
   to `/usr/lib/check_mk_agent/local/`); its thresholds live in

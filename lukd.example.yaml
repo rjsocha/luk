@@ -204,6 +204,18 @@ storage:
     #   - origin: ["*-stage"]
     #     keep: {daily: 7, within: 2d}   # and every file of the last 2 days
     #   - keep: {daily: 7, weekly: 4}   # no origin: every other origin (last rule)
+    # watch:                    # monitoring per series (status.json, lukd status,
+    #                           # checkmk); the first rule whose origin and file
+    #                           # globs match applies, unmatched series are not
+    #                           # watched; thresholds are these values only
+    #   - origin: ["db1-prod"]  # absent: any origin
+    #     file: ["db.sql*"]     # absent: any file name
+    #     every: 26h            # newest copy older: CRIT
+    #     size: {min: 2G, max: 20G, step: 500M}   # min/max: CRIT, step: WARN
+    #     same: 3               # 3 newest copies with one sha256: WARN
+    #   - origin: ["*-stage"]
+    #     every: 50h
+    #     size: {min: 100M}
   publish:
     type: local
     base: storage/publish

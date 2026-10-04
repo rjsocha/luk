@@ -22,6 +22,7 @@ import (
 	"luk/internal/queue"
 	"luk/internal/status"
 	"luk/internal/store"
+	"luk/internal/watch"
 )
 
 var ErrClosed = errors.New("pipeline: dispatcher closed")
@@ -183,6 +184,8 @@ type Dispatcher struct {
 	status *status.Store
 	// failMu orders the failed counts written to the status.
 	failMu sync.Mutex
+	// watchMu orders the watch evaluations written to the status.
+	watchMu sync.Mutex
 
 	mu       sync.Mutex
 	closed   bool
@@ -642,7 +645,7 @@ func (d *Dispatcher) finished(j Job, remaining []string, failed []Failure) {
 // runPipeline reports whether the pipeline was interrupted by Close, or its
 // failure. It runs on the configuration current when it gets its slot.
 func (d *Dispatcher) runPipeline(j Job, name string) (bool, *Failure) {
-	var stored []string
+	var stored, into []string
 	var output, logged string
 	cfg := d.config()
 	work := filepath.Join(cfg.WorkDir(), j.Entry.ID, name)
@@ -736,6 +739,7 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, *Failure) {
 						stored = append(stored, sn+":"+res.Rel+" (dedup)")
 					} else {
 						stored = append(stored, sn+":"+res.Rel)
+						into = append(into, sn)
 					}
 				}
 			}
@@ -747,6 +751,7 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, *Failure) {
 		return true, nil
 	}
 	d.report(j, name, step, err, output)
+	d.storedInto(into)
 	if err != nil {
 		args := []any{"id", j.Entry.ID, "pipeline", name, "step", step, "error", err, "stored", stored}
 		if used {
@@ -890,7 +895,37 @@ func (d *Dispatcher) runReplace(j Job, names []string) (bool, []Failure) {
 		d.report(j, name, 0, nil, "")
 		d.log.Info("pipeline done", "id", j.Entry.ID, "pipeline", name, "stored", stored)
 	}
+	var into []string
+	for _, t := range targets {
+		into = append(into, t.storage)
+	}
+	d.storedInto(into)
 	return false, nil
+}
+
+// storedInto evaluates the watch rules again when one of the storages
+// a pipeline stored into has any.
+func (d *Dispatcher) storedInto(storages []string) {
+	if watch.Watched(d.config(), storages) {
+		d.RefreshWatch(time.Now())
+	}
+}
+
+// RefreshWatch evaluates the watch rules of every storage at now and
+// writes the result to the status.
+func (d *Dispatcher) RefreshWatch(now time.Time) {
+	if d.status == nil {
+		return
+	}
+	d.watchMu.Lock()
+	defer d.watchMu.Unlock()
+	ws, err := watch.All(d.config(), now)
+	if err != nil {
+		d.log.Warn("watch", "error", err)
+	}
+	if err := d.status.SetWatch(ws); err != nil {
+		d.log.Warn("status not written", "error", err)
+	}
 }
 
 // localStorage is the storage name of cfg, which stores support for local

@@ -193,6 +193,76 @@ class TestRules(Base):
                 self.assertRegex(part, r"^[a-z]+=\d+(;\d*){0,4}$")
 
 
+def watch(**kw):
+    w = {"storage": "archive", "rule": 1, "pipeline": "nightly", "origin": "db1-prod", "file": "db.sql",
+         "state": "OK", "message": "db1-prod/db.sql: last copy 3h ago, 4G",
+         "newest_received": "2026-09-30T09:00:00Z", "size": 4 * 1024**3, "copies": 3,
+         "evaluated": "2026-09-30T11:59:00Z"}
+    w.update(kw)
+    return w
+
+
+class TestWatch(Base):
+    def test_object_with_pipelines_and_watch(self):
+        out = self.check({"pipelines": [entry()], "watch": [watch()]})
+        self.assertEqual(len(out), 2, out)
+        self.assertTrue(out[0].startswith('0 "luk devdb replica.aws.example.net" '), out)
+        self.assertEqual(out[1], '0 "luk watch archive nightly db1-prod/db.sql" age=10800|size=4294967296 '
+                                 'db1-prod/db.sql: last copy 3h ago, 4G')
+
+    def test_states(self):
+        for state, want in (("OK", "0"), ("WARN", "1"), ("CRIT", "2"), ("BOGUS", "3"), (None, "3")):
+            l = self.one({"pipelines": [], "watch": [watch(state=state)]}, conf=None)
+            self.assertEqual(l[0], want, (state, l))
+
+    def test_crit_message(self):
+        msg = "db1-prod/db.sql: 980M below min 2G; last copy 31h ago (every 26h)"
+        l = self.one({"pipelines": [], "watch": [watch(state="CRIT", message=msg, size=980 * 1024**2,
+                                                       newest_received="2026-09-29T05:00:00Z")]}, conf=None)
+        self.assertEqual(l, '2 "luk watch archive nightly db1-prod/db.sql" age=111600|size=1027604480 ' + msg)
+
+    def test_rule_without_series(self):
+        w = {"storage": "archive", "rule": 2, "pipeline": "", "origin": "", "file": "", "state": "WARN",
+             "message": "rule 2 (origin *-stage): no series matches", "size": 0, "copies": 0,
+             "evaluated": "2026-09-30T11:59:00Z"}
+        l = self.one({"pipelines": [], "watch": [w]}, conf=None)
+        self.assertEqual(l, '1 "luk watch archive rule 2" - rule 2 (origin *-stage): no series matches')
+
+    def test_series_without_copy(self):
+        l = self.one({"pipelines": [], "watch": [watch(state="CRIT", newest_received=None, size=0, copies=0,
+                                                       message="db1-prod/db.sql: no copy with a readable received time")]}, conf=None)
+        self.assertTrue(l.startswith('2 "luk watch archive nightly db1-prod/db.sql" - '), l)
+
+    def test_stale_evaluation(self):
+        l = self.one({"pipelines": [], "watch": [watch(evaluated="2026-09-30T11:49:00Z")]}, conf=None)
+        self.assertTrue(l.startswith("3 "), l)
+        self.assertIn("evaluated 11m ago, is lukd process running? last: db1-prod/db.sql", l)
+        l = self.one({"pipelines": [], "watch": [watch(evaluated="2026-09-30T11:50:00Z")]}, conf=None)
+        self.assertTrue(l.startswith("0 "), l)
+
+    def test_not_evaluated_or_bad_time(self):
+        l = self.one({"pipelines": [], "watch": [watch(evaluated="")]}, conf=None)
+        self.assertTrue(l.startswith("3 ") and "not evaluated" in l, l)
+        l = self.one({"pipelines": [], "watch": [watch(newest_received="soon")]}, conf=None)
+        self.assertTrue(l.startswith('3 "luk watch archive nightly db1-prod/db.sql" - bad timestamp'), l)
+
+    def test_names_sanitized(self):
+        l = self.one({"pipelines": [], "watch": [watch(storage="a b", pipeline="", file="my db.sql\x01",
+                                                       message="x|y\nz")]}, conf=None)
+        self.assertTrue(l.startswith('0 "luk watch a_b - db1-prod/my_db.sql_" '), l)
+        self.assertTrue(l.endswith(" x y z"), l)
+        self.assertEqual(len(l.splitlines()), 1)
+
+    def test_watch_optional_and_old_array(self):
+        self.assertEqual(len(self.check({"pipelines": [entry()]})), 1)
+        self.assertEqual(len(self.check([entry()])), 1)
+
+    def test_invalid_watch(self):
+        for raw in ('{"pipelines": [], "watch": {}}', '{"pipelines": [], "watch": [1]}', '{"watch": []}', '"x"'):
+            l = self.one(None, raw=raw)
+            self.assertTrue(l.startswith('3 "luk status" - status.json invalid'), (raw, l))
+
+
 class TestBadInput(Base):
     def test_status_missing(self):
         out = self.check(None)

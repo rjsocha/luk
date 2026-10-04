@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,11 +40,14 @@ func readFile(t *testing.T, p string) []Entry {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var es []Entry
-	if err := json.Unmarshal(b, &es); err != nil {
-		t.Fatal(err)
+	var f struct {
+		Pipelines []Entry `json:"pipelines"`
+		Watch     []Watch `json:"watch"`
 	}
-	return es
+	if err := json.Unmarshal(b, &f); err != nil || f.Pipelines == nil || f.Watch == nil {
+		t.Fatalf("%s: %v", b, err)
+	}
+	return f.Pipelines
 }
 
 func TestRecordSuccessAndFailure(t *testing.T) {
@@ -274,7 +278,7 @@ func TestPrintMissing(t *testing.T) {
 		t.Fatalf("table:\n%s", b.String())
 	}
 	b.Reset()
-	if err := Print(&b, p, true); err != nil || strings.TrimSpace(b.String()) != "[]" {
+	if err := Print(&b, p, true); err != nil || b.String() != "{\n  \"pipelines\": [],\n  \"watch\": []\n}\n" {
 		t.Fatalf("json %q %v", b.String(), err)
 	}
 }
@@ -396,5 +400,86 @@ func TestSetFailedRetriesFailedSync(t *testing.T) {
 	}
 	if es := readFile(t, p); es[0].Failed != 1 {
 		t.Fatalf("on disk %+v", es[0])
+	}
+}
+
+func TestOpenOlderArray(t *testing.T) {
+	p := Path(t.TempDir())
+	old := `[{"pipeline":"devdb","sender":"alice","tags":[],"last_id":"id1","last_received":"2026-09-30T11:59:00Z","failed_step":0,"size":42,"failed":1}]`
+	if err := os.WriteFile(p, []byte(old), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	if err := Print(&b, p, false); err != nil || !strings.Contains(b.String(), "alice") {
+		t.Fatalf("print: %v\n%s", err, b.String())
+	}
+	s, aside, err := Open(p)
+	if err != nil || aside != "" {
+		t.Fatalf("open: %v %q", err, aside)
+	}
+	if es := s.Entries(); len(es) != 1 || es[0].Sender != "alice" || es[0].Failed != 1 {
+		t.Fatalf("entries %+v", es)
+	}
+	// The next write is the object.
+	if err := s.Record(result("devdb", "bob", "id2", "", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if es := readFile(t, p); len(es) != 2 {
+		t.Fatalf("entries %+v", es)
+	}
+}
+
+func TestSetWatch(t *testing.T) {
+	s, p := open(t)
+	if err := s.SetWatch(nil); err != nil || exists(p) {
+		t.Fatalf("no watch wrote the file: %v", err)
+	}
+	ws := []Watch{
+		{Storage: "archive", Rule: 1, Pipeline: "nightly", Origin: "db1-prod", File: "db.sql", State: "CRIT",
+			Message: "db1-prod/db.sql: 980M below min 2G", NewestReceived: "2026-09-30T06:00:00Z", Size: 980 << 20, Copies: 3,
+			Evaluated: "2026-09-30T12:00:00Z"},
+		{Storage: "archive", Rule: 2, State: "WARN", Message: "rule 2 (origin *-stage): no series matches", Evaluated: "2026-09-30T12:00:00Z"},
+	}
+	if err := s.SetWatch(ws); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	var f struct {
+		Watch []Watch `json:"watch"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil || len(f.Watch) != 2 || f.Watch[0] != ws[0] || f.Watch[1] != ws[1] {
+		t.Fatalf("file:\n%s", b)
+	}
+	for _, key := range []string{`"storage"`, `"rule"`, `"pipeline"`, `"origin"`, `"file"`, `"state"`, `"message"`, `"newest_received"`, `"size"`, `"copies"`, `"evaluated"`} {
+		if !strings.Contains(string(b), key) {
+			t.Errorf("no %s in\n%s", key, b)
+		}
+	}
+	// Unchanged: no write.
+	fi, _ := os.Stat(p)
+	old := rename
+	rename = func(string, string) error { return errors.New("rename failed") }
+	if err := s.SetWatch(slices.Clone(ws)); err != nil {
+		t.Fatalf("unchanged watch written: %v", err)
+	}
+	rename = old
+	if fi2, _ := os.Stat(p); !fi2.ModTime().Equal(fi.ModTime()) {
+		t.Fatal("rewritten")
+	}
+	// The pipelines and the watch survive a restart.
+	s.Record(result("devdb", "alice", "id1", "", 0))
+	s2, _, err := Open(p)
+	if err != nil || len(s2.Watch()) != 2 || len(s2.Entries()) != 1 {
+		t.Fatalf("reopen: %v %+v", err, s2.Watch())
+	}
+	var out bytes.Buffer
+	if err := Print(&out, p, false); err != nil {
+		t.Fatal(err)
+	}
+	want := "STORAGE  SERIES           PIPELINE  RULE  STATE  NEWEST                SIZE  COPIES  MESSAGE\n" +
+		"archive  db1-prod/db.sql  nightly   1     CRIT   2026-09-30T06:00:00Z  980M  3       db1-prod/db.sql: 980M below min 2G\n" +
+		"archive  -                -         2     WARN   -                     -     0       rule 2 (origin *-stage): no series matches\n"
+	if _, tail, _ := strings.Cut(out.String(), "\n\n"); tail != want {
+		t.Fatalf("table:\n%s\nwant:\n%s", out.String(), want)
 	}
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""check_mk local check for lukd: one service per (pipeline, sender)."""
+"""check_mk local check for lukd: one service per (pipeline, sender) and
+one per watched series of a storage."""
 import configparser
 import fnmatch
 import json
@@ -14,6 +15,10 @@ OK, WARN, CRIT, UNKNOWN = 0, 1, 2, 3
 DUR_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 SIZE_UNITS = {"k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
 KEYS = {"warn_age", "crit_age", "min_size"}
+WATCH_STATES = {"OK": OK, "WARN": WARN, "CRIT": CRIT}
+# The process role evaluates the watch rules every minute; an older
+# evaluation means it does not run.
+WATCH_STALE = 600
 
 
 class ConfError(Exception):
@@ -174,6 +179,39 @@ def check_entry(e, exp, now):
     return line(state, name, "|".join(metrics), "; ".join(texts))
 
 
+def watch_name(w):
+    storage = clean_name(w.get("storage", ""))
+    origin, file = str(w.get("origin", "")), str(w.get("file", ""))
+    if not origin and not file and not w.get("pipeline"):
+        return "watch %s rule %s" % (storage, clean_name(w.get("rule", "")))
+    return "watch %s %s %s" % (storage, clean_name(w.get("pipeline", "") or "-"),
+                                clean_name(origin + "/" + file))
+
+
+def check_watch(w, now):
+    name = watch_name(w)
+    state = WATCH_STATES.get(w.get("state"), UNKNOWN)
+    text = clean_text(w.get("message") or "no message", 400)
+    metrics = []
+    try:
+        newest = parse_time(w.get("newest_received"))
+        evaluated = parse_time(w.get("evaluated"))
+    except ValueError as ex:
+        return line(UNKNOWN, name, "", clean_text(ex, 100))
+    if newest is not None:
+        metrics.append("age=%d" % max(0, int((now - newest).total_seconds())))
+    size = w.get("size")
+    if newest is not None and isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+        metrics.append("size=%d" % size)
+    if evaluated is None:
+        return line(UNKNOWN, name, "|".join(metrics), "not evaluated: %s" % text)
+    age = int((now - evaluated).total_seconds())
+    if age > WATCH_STALE:
+        return line(UNKNOWN, name, "|".join(metrics),
+                    "evaluated %s ago, is lukd process running? last: %s" % (fmt_age(age), text))
+    return line(state, name, "|".join(metrics), text)
+
+
 def run(env):
     status_path = env.get("LUK_STATUS", DEFAULT_STATUS)
     conf_path = env.get("LUK_CHECK_CONF", DEFAULT_CONF)
@@ -192,11 +230,19 @@ def run(env):
         return unknown("status.json missing")
     try:
         with open(status_path, encoding="utf-8") as f:
-            entries = json.load(f)
+            data = json.load(f)
     except (OSError, ValueError) as ex:
         return unknown("status.json unreadable: %s" % clean_text(ex, 200))
-    if not isinstance(entries, list) or not all(isinstance(x, dict) for x in entries):
-        return unknown("status.json invalid: expected an array of objects")
+    # An older lukd writes the array of pipeline entries only.
+    if isinstance(data, list):
+        entries, watches = data, []
+    elif isinstance(data, dict):
+        entries, watches = data.get("pipelines"), data.get("watch", [])
+    else:
+        entries = watches = None
+    if (not isinstance(entries, list) or not all(isinstance(x, dict) for x in entries)
+            or not isinstance(watches, list) or not all(isinstance(x, dict) for x in watches)):
+        return unknown("status.json invalid: expected pipelines and watch arrays of objects")
 
     out = []
     used = set()
@@ -212,6 +258,8 @@ def run(env):
         if i not in used:
             out.append(line(CRIT, "%s %s" % (clean_name(x[0]), clean_name(x[1])), "",
                             "never received"))
+    for w in watches:
+        out.append(check_watch(w, now))
     return out
 
 

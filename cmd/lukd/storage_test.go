@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"luk/internal/config"
+	"luk/internal/status"
 	"luk/internal/store"
 	"luk/internal/wire"
 )
@@ -417,5 +418,109 @@ func TestKeepText(t *testing.T) {
 	k := config.Keep{Last: 3, Daily: 14, Within: config.Duration(48 * time.Hour)}
 	if got := keepText(k); got != "last 3, daily 14, within 2d" {
 		t.Fatalf("%q", got)
+	}
+}
+
+func TestStorageWatch(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	text := `root: ` + root + `
+listen: {main: {addr: "127.0.0.1:0"}}
+auth:
+  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+endpoint:
+  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [robert.socha]}
+pipeline:
+  nightly: {endpoint: [backup], steps: [{store: archive}]}
+storage:
+  archive:
+    type: local
+    base: s/archive
+    path: "{{ .Origin }}/{{ .Id }}/{{ .File }}"
+    watch:
+      - origin: ["db1-prod"]
+        file: ["db.sql*"]
+        every: 26h
+        size: {min: 2G, step: 500M}
+      - origin: ["*-dev"]
+        same: 2
+`
+	if err := os.WriteFile(cfgPath, []byte(text), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := store.FromConfig(cfg.Storage["archive"])
+	if err := os.MkdirAll(l.Base, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Minute)
+	const M = int64(1) << 20
+	for _, f := range []struct {
+		name, origin string
+		ago          time.Duration
+		size         int64
+	}{
+		{"db1-prod/3/db.sql", "db1-prod", 31 * time.Hour, 980 * M},
+		{"db1-prod/2/db.sql", "db1-prod", 55 * time.Hour, 3000 * M},
+		{"db1-prod/1/db.sql", "db1-prod", 79 * time.Hour, 2900 * M},
+		{"web1/1/db.sql", "web1", time.Hour, M},
+	} {
+		src := filepath.Join(t.TempDir(), "src")
+		if err := os.WriteFile(src, []byte(f.name), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		sc := store.Sidecar{ID: "id-" + f.name, Sender: "robert.socha", Endpoint: "backup", Received: now.Add(-f.ago).Format(time.RFC3339),
+			Size: f.size, SHA256: f.name, Pipeline: "nightly", Origin: f.origin, Client: wire.Meta{File: "db.sql"}}
+		if _, err := l.Put(src, f.name, sc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := runLukd(t, "storage", "watch", "--storage", "archive", "-c", cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(d time.Duration) string { return now.Add(-d).Format(time.RFC3339) }
+	want := `rule 1: origin db1-prod; file db.sql*: every 26h, size.min 2G, size.step 500M
+rule 2: origin *-dev: same 2
+
+STORAGE  SERIES           PIPELINE  RULE  STATE  NEWEST                SIZE  COPIES  MESSAGE
+archive  db1-prod/db.sql  nightly   1     CRIT   ` + at(31*time.Hour) + `  980M  3       db1-prod/db.sql: 980M below min 2G; last copy 31h ago (every 26h); shrank by 2G to 980M (step 500M)
+archive  web1/db.sql      nightly   -     -      ` + at(time.Hour) + `  1M    1       not watched
+archive  -                -         2     WARN   -                     -     0       rule 2 (origin *-dev): no series matches
+`
+	if out != want {
+		t.Fatalf("watch:\n%s\nwant:\n%s", out, want)
+	}
+	out, err = runLukd(t, "storage", "watch", "--storage", "archive", "--suggest", "-c", cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHints := `HINTS: observed on the newest 30 copies of each series; not thresholds
+SERIES           PIPELINE  COPIES  NEWEST SIZE  MIN SIZE  MAX SIZE  MAX STEP  INTERVAL  MIN INTERVAL  MAX INTERVAL  SAME
+db1-prod/db.sql  nightly   3       980M         980M      2.9G      2G        24h       24h           24h           1
+web1/db.sql      nightly   1       1M           1M        1M        0         -         -             -             1
+`
+	if !strings.HasPrefix(out, want) || !strings.HasSuffix(out, "\n"+wantHints) {
+		t.Fatalf("suggest:\n%s", out)
+	}
+	out, err = runLukd(t, "storage", "watch", "--storage", "archive", "--json", "--suggest", "-c", cfgPath)
+	var rows []struct {
+		status.Watch
+		Hints *struct {
+			Copies   int    `json:"copies"`
+			MaxStep  int64  `json:"max_step"`
+			Interval string `json:"interval"`
+		} `json:"hints"`
+	}
+	if err != nil || json.Unmarshal([]byte(out), &rows) != nil || len(rows) != 3 || rows[0].State != "CRIT" || rows[0].Rule != 1 ||
+		rows[0].Hints == nil || rows[0].Hints.Copies != 3 || rows[0].Hints.MaxStep != 2020*M || rows[0].Hints.Interval != "24h" ||
+		rows[1].Rule != 0 || rows[1].Message != "not watched" || rows[2].State != "WARN" || rows[2].Hints != nil {
+		t.Fatalf("json: %v\n%s", err, out)
+	}
+	if got := strings.Join(complete(t, "storage", "watch", "-c", cfgPath, "--storage", ""), ","); got != "archive" {
+		t.Errorf("completion %q", got)
 	}
 }

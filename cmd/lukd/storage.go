@@ -21,6 +21,7 @@ import (
 	"luk/internal/status"
 	"luk/internal/store"
 	"luk/internal/tlsself"
+	"luk/internal/watch"
 	"luk/internal/wire"
 )
 
@@ -140,8 +141,116 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	ret.MarkFlagRequired("storage")
 	completeFlags(ret, map[string]cobra.CompletionFunc{"storage": completeStorage})
 
-	cmd.AddCommand(ls, rm, ret)
+	var watchStorage string
+	var watchJSON, suggest bool
+	wat := &cobra.Command{
+		Use:   "watch",
+		Short: "Evaluate the watch rules of a storage",
+		Long: "Evaluate the watch rules of a local storage now, read only: its rules, then per\n" +
+			"series (pipeline, origin, file name) the rule that applies, the state (OK,\n" +
+			"WARN, CRIT), the newest copy, its size, the number of copies and the message\n" +
+			"naming every failed check. A series no rule matches is listed as not watched;\n" +
+			"a rule no series matches is WARN. --suggest adds, per series, values observed\n" +
+			"on its newest copies (sizes, largest step, intervals, identical newest copies)\n" +
+			"as hints for setting the thresholds; they are never used as thresholds.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, st, l, err := openStorage(*cfgPath, watchStorage)
+			if err != nil {
+				return err
+			}
+			series, werr := l.SeriesCopies()
+			rows := storageWatch(watchStorage, st, series, time.Now(), suggest)
+			if err := printWatch(cmd.OutOrStdout(), st, rows, watchJSON, suggest); err != nil {
+				return err
+			}
+			return werr
+		},
+	}
+	wat.Flags().StringVar(&watchStorage, "storage", "", "storage name")
+	wat.Flags().BoolVar(&watchJSON, "json", false, "print JSON")
+	wat.Flags().BoolVar(&suggest, "suggest", false, "add observed values per series as hints for thresholds")
+	wat.MarkFlagRequired("storage")
+	completeFlags(wat, map[string]cobra.CompletionFunc{"storage": completeStorage})
+
+	cmd.AddCommand(ls, rm, ret, wat)
 	return cmd
+}
+
+// watchRow is one line of lukd storage watch: the evaluation of a series
+// (State empty and Rule 0 when no rule matches it) or of a rule no series
+// matches, and with --suggest the hints of the series.
+type watchRow struct {
+	status.Watch
+	Hints *watch.Hints `json:"hints,omitempty"`
+}
+
+// storageWatch evaluates the watch rules of the storage name on its series
+// at now: every series in series order, then the rules no series matches.
+func storageWatch(name string, st *config.Storage, series []store.SeriesCopies, now time.Time, suggest bool) []watchRow {
+	rows := []watchRow{}
+	for _, s := range series {
+		var w status.Watch
+		if i := st.WatchRule(s.Origin, s.File); i >= 0 {
+			w = watch.Record(name, i+1, st.Watch[i], s, now)
+		} else {
+			w = status.Watch{Storage: name, Pipeline: s.Pipeline, Origin: s.Origin, File: s.File, Copies: len(s.Copies), Message: "not watched"}
+			if len(s.Copies) > 0 {
+				w.NewestReceived, w.Size = s.Copies[0].Received.UTC().Format(time.RFC3339), s.Copies[0].Size
+			}
+		}
+		r := watchRow{Watch: w}
+		if suggest {
+			h := watch.Suggest(s.Copies)
+			r.Hints = &h
+		}
+		rows = append(rows, r)
+	}
+	for _, w := range watch.Unmatched(name, st, series, now) {
+		rows = append(rows, watchRow{Watch: w})
+	}
+	return rows
+}
+
+// printWatch prints the rules of st and the rows: a table of the
+// evaluations and, with suggest, one of the hints.
+func printWatch(w io.Writer, st *config.Storage, rows []watchRow, asJSON, suggest bool) error {
+	if asJSON {
+		b, err := json.MarshalIndent(rows, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(append(b, '\n'))
+		return err
+	}
+	if len(st.Watch) == 0 {
+		fmt.Fprintln(w, "no watch rules")
+	}
+	for i, r := range st.Watch {
+		fmt.Fprintf(w, "rule %d: %s: %s\n", i+1, status.Clean(watch.RuleText(r)), watch.ChecksText(r))
+	}
+	fmt.Fprintln(w)
+	ws := make([]status.Watch, len(rows))
+	for i, r := range rows {
+		ws[i] = r.Watch
+	}
+	if err := status.PrintWatch(w, ws); err != nil || !suggest {
+		return err
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "HINTS: observed on the newest %d copies of each series; not thresholds\n", watch.SuggestCopies)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "SERIES\tPIPELINE\tCOPIES\tNEWEST SIZE\tMIN SIZE\tMAX SIZE\tMAX STEP\tINTERVAL\tMIN INTERVAL\tMAX INTERVAL\tSAME")
+	for _, r := range rows {
+		if r.Hints == nil {
+			continue
+		}
+		h := r.Hints
+		fmt.Fprintf(tw, "%s/%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n", status.Clean(r.Origin), status.Clean(r.File), dash(status.Clean(r.Pipeline)),
+			h.Copies, wire.HumanSize(h.NewestSize), wire.HumanSize(h.MinSize), wire.HumanSize(h.MaxSize), wire.HumanSize(h.MaxStep),
+			dash(h.Interval), dash(h.MinInterval), dash(h.MaxInterval), h.Same)
+	}
+	return tw.Flush()
 }
 
 // printRetention prints the retention plans of the storage st: per series

@@ -73,3 +73,20 @@ func TestFlagGuard(t *testing.T) {
 		t.Errorf("err %v", err)
 	}
 }
+
+func TestStatusCommandWatch(t *testing.T) {
+	cfg, root := statusConfig(t)
+	st := status.New(status.Path(root))
+	if err := st.SetWatch([]status.Watch{{Storage: "archive", Rule: 1, Pipeline: "archive", Origin: "db1-prod", File: "db.sql", State: "CRIT",
+		Message: "db1-prod/db.sql: last copy 31h ago (every 26h)", NewestReceived: "2026-10-03T05:00:00Z", Size: 4 << 30, Copies: 2,
+		Evaluated: "2026-10-04T12:00:00Z"}}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runLukd(t, "status", "-c", cfg)
+	want := "PIPELINE  SENDER  FAILED  LAST RECEIVED  LAST SUCCESS  LAST FAILURE  STEP  SIZE  LAST ID  ERROR\n\n" +
+		"STORAGE  SERIES           PIPELINE  RULE  STATE  NEWEST                SIZE  COPIES  MESSAGE\n" +
+		"archive  db1-prod/db.sql  archive   1     CRIT   2026-10-03T05:00:00Z  4G    2       db1-prod/db.sql: last copy 31h ago (every 26h)\n"
+	if err != nil || out != want {
+		t.Fatalf("table: %v\n%s\nwant:\n%s", err, out, want)
+	}
+}

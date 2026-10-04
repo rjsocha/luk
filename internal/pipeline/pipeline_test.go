@@ -627,3 +627,45 @@ func TestReplaceFanOut(t *testing.T) {
 		t.Fatalf("pending %v %v", p, err)
 	}
 }
+
+func TestStoreRefreshesWatch(t *testing.T) {
+	e := newEnv(t, 1)
+	every := config.Duration(time.Hour)
+	e.cfg.Storage["b"].Watch = []config.Watch{{Origin: config.StringList{"robert.socha"}, Every: &every}, {Origin: config.StringList{"none"}, Every: &every}}
+	st, _, err := status.Open(filepath.Join(e.root, "status.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := e.dispatcher()
+	d.SetStatus(st)
+	// A store into a storage without watch rules evaluates nothing.
+	if err := d.Submit(e.enqueue(t, "w0", "up", "cloud")); err != nil {
+		t.Fatal(err)
+	}
+	d.Wait()
+	if ws := st.Watch(); len(ws) != 0 {
+		t.Fatalf("watch after a store into a: %+v", ws)
+	}
+	recv := func(j *Job) {
+		j.Sidecar.Received = time.Now().UTC().Format(time.RFC3339)
+		j.Sidecar.Client.File = "f.txt"
+	}
+	if err := d.Submit(e.enqueueWith(t, "w1", "up", recv, "serial")); err != nil {
+		t.Fatal(err)
+	}
+	d.Wait()
+	ws := st.Watch()
+	if len(ws) != 2 || ws[0].Storage != "b" || ws[0].Pipeline != "serial" || ws[0].Origin != "robert.socha" || ws[0].File != "f.txt" ||
+		ws[0].State != "OK" || ws[0].Copies != 1 || ws[1].Rule != 2 || ws[1].State != "WARN" {
+		t.Fatalf("watch %+v", ws)
+	}
+	b, _ := os.ReadFile(filepath.Join(e.root, "status.json"))
+	if !strings.Contains(string(b), `"watch": [`) || !strings.Contains(string(b), `"origin": "robert.socha"`) {
+		t.Fatalf("status.json:\n%s", b)
+	}
+	// The janitor pass evaluates again at its time.
+	d.RefreshWatch(time.Now().Add(2 * time.Hour))
+	if ws := st.Watch(); ws[0].State != "CRIT" || !strings.Contains(ws[0].Message, "(every 1h)") {
+		t.Fatalf("later: %+v", ws)
+	}
+}

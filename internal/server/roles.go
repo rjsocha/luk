@@ -123,7 +123,7 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		}
 		return fmt.Errorf("queue: %w", err)
 	}
-	expose.StartJanitor(ctx, s.config, log, time.Minute, expose.Expire, nil)
+	expose.StartJanitor(ctx, s.config, log, time.Minute, expose.Expire, nil, nil)
 	errc := make(chan error, 1)
 	if servers, err = s.listen(cfg, certs, errc); err != nil {
 		return err
@@ -201,7 +201,7 @@ func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	}
 	var cur atomic.Pointer[config.Config]
 	cur.Store(cfg)
-	expose.StartJanitor(ctx, cur.Load, log, time.Minute, expose.Maintain, d.Maintain)
+	expose.StartJanitor(ctx, cur.Load, log, time.Minute, expose.Maintain, d.Maintain, d.RefreshWatch)
 	wake := make(chan struct{}, 1)
 	watch := watchQueues(ctx, wake, log)
 	watch(pipeline.QueueDirs(cfg))

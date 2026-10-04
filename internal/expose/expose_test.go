@@ -405,7 +405,7 @@ func TestCleanupAgeAndClaimed(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	StartJanitor(ctx, func() *config.Config { return e.cfg }, slog.New(slog.DiscardHandler), 0, Expire, nil)
+	StartJanitor(ctx, func() *config.Config { return e.cfg }, slog.New(slog.DiscardHandler), 0, Expire, nil, nil)
 	deadline := time.Now().Add(5 * time.Second)
 	for exists(filepath.Join(e.base, store.DataDir, "old")) || exists(stale) {
 		if time.Now().After(deadline) {
@@ -697,6 +697,25 @@ expose:
 		New(cfg, log, time.Now, c.listen, nil).ServeHTTP(w, httptest.NewRequest(http.MethodGet, c.path, nil))
 		if w.Code != c.code || (c.code == 200 && w.Body.String() != c.body) {
 			t.Errorf("%s %s: %d %q", c.listen, c.path, w.Code, w.Body)
+		}
+	}
+}
+
+func TestJanitorBeforeAndAfter(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := make(chan string, 4)
+	cfg := &config.Config{Storage: map[string]*config.Storage{}}
+	StartJanitor(ctx, func() *config.Config { return cfg }, slog.New(slog.DiscardHandler), time.Hour, Maintain,
+		func(time.Time) { calls <- "before" }, func(time.Time) { calls <- "after" })
+	for _, want := range []string{"before", "after"} {
+		select {
+		case got := <-calls:
+			if got != want {
+				t.Fatalf("%s, want %s", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no %s", want)
 		}
 	}
 }

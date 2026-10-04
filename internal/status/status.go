@@ -1,9 +1,12 @@
 // Package status keeps <root>/status.json: the last pipeline result per
-// (pipeline, sender). lukd reports facts only; thresholds live in the
-// monitoring check that reads the file.
+// (pipeline, sender) and the evaluation of the watch rules of the
+// storages. For the pipelines lukd reports facts only; their thresholds
+// live in the monitoring check that reads the file. The watch rules hold
+// their thresholds in the lukd configuration.
 package status
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +23,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"luk/internal/wire"
 )
 
 // MaxError caps the stored error text.
@@ -51,6 +57,29 @@ type Entry struct {
 	Failed       int      `json:"failed"`
 }
 
+// Watch is the evaluation of one series a watch rule of a storage applies
+// to, or of a rule no series matches (Pipeline, Origin and File empty).
+// State is OK, WARN or CRIT; Message names every failed check.
+type Watch struct {
+	Storage        string `json:"storage"`
+	Rule           int    `json:"rule"`
+	Pipeline       string `json:"pipeline"`
+	Origin         string `json:"origin"`
+	File           string `json:"file"`
+	State          string `json:"state"`
+	Message        string `json:"message"`
+	NewestReceived string `json:"newest_received,omitempty"`
+	Size           int64  `json:"size"`
+	Copies         int    `json:"copies"`
+	Evaluated      string `json:"evaluated"`
+}
+
+// file is the content of status.json.
+type file struct {
+	Pipelines []Entry `json:"pipelines"`
+	Watch     []Watch `json:"watch"`
+}
+
 // Result is one finished pipeline run; a non-empty Error marks a failure
 // at Step.
 type Result struct {
@@ -70,6 +99,7 @@ type Store struct {
 
 	mu      sync.Mutex
 	entries map[Key]Entry
+	watch   []Watch
 	// dirty marks entries the file does not hold yet: the last write failed.
 	dirty bool
 }
@@ -105,9 +135,10 @@ func Open(path string) (*Store, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	for _, e := range es {
+	for _, e := range es.Pipelines {
 		s.entries[Key{e.Pipeline, e.Sender}] = e
 	}
+	s.watch = es.Watch
 	return s, "", nil
 }
 
@@ -122,19 +153,32 @@ func pruneAside(path string) {
 	}
 }
 
-func read(path string) ([]Entry, error) {
+// read loads path: an object with pipelines and watch, or the array of
+// pipeline entries an older lukd wrote.
+func read(path string) (file, error) {
+	f := file{Pipelines: []Entry{}, Watch: []Watch{}}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return []Entry{}, nil
+		return f, nil
 	}
 	if err != nil {
-		return nil, err
+		return f, err
 	}
-	var es []Entry
-	if err := json.Unmarshal(b, &es); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	if t := bytes.TrimLeft(b, " \t\r\n"); len(t) > 0 && t[0] == '[' {
+		err = json.Unmarshal(b, &f.Pipelines)
+	} else {
+		err = json.Unmarshal(b, &f)
 	}
-	return es, nil
+	if err != nil {
+		return f, fmt.Errorf("%s: %w", path, err)
+	}
+	if f.Pipelines == nil {
+		f.Pipelines = []Entry{}
+	}
+	if f.Watch == nil {
+		f.Watch = []Watch{}
+	}
+	return f, nil
 }
 
 // Record updates the entry of r and rewrites the file atomically. A failure
@@ -195,6 +239,25 @@ func (s *Store) SetFailed(counts map[Key]int) error {
 	return s.persist()
 }
 
+// SetWatch replaces the watch evaluations and rewrites the file when they
+// changed or an earlier write failed.
+func (s *Store) SetWatch(ws []Watch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if slices.Equal(s.watch, ws) && !s.dirty {
+		return nil
+	}
+	s.watch = slices.Clone(ws)
+	return s.persist()
+}
+
+// Watch returns the watch evaluations.
+func (s *Store) Watch() []Watch {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.watch)
+}
+
 // CapError keeps the last MaxError bytes, on a rune boundary.
 func CapError(s string) string {
 	if len(s) <= MaxError {
@@ -237,7 +300,11 @@ func (s *Store) persist() error {
 }
 
 func (s *Store) write() error {
-	b, err := json.MarshalIndent(s.sorted(), "", "  ")
+	w := s.watch
+	if w == nil {
+		w = []Watch{}
+	}
+	b, err := json.MarshalIndent(file{Pipelines: s.sorted(), Watch: w}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -273,13 +340,14 @@ func (s *Store) write() error {
 	return syncDir(d)
 }
 
-// Print writes the file at path: the raw JSON, or a table. A missing file
-// prints an empty list.
+// Print writes the file at path: the raw JSON, or a table of the
+// pipelines and, when there are any, one of the watch evaluations. A
+// missing file prints empty lists.
 func Print(w io.Writer, path string, raw bool) error {
 	if raw {
 		b, err := os.ReadFile(path)
 		if errors.Is(err, fs.ErrNotExist) {
-			_, err = io.WriteString(w, "[]\n")
+			_, err = io.WriteString(w, "{\n  \"pipelines\": [],\n  \"watch\": []\n}\n")
 			return err
 		}
 		if err != nil {
@@ -288,13 +356,13 @@ func Print(w io.Writer, path string, raw bool) error {
 		_, err = w.Write(b)
 		return err
 	}
-	es, err := read(path)
+	f, err := read(path)
 	if err != nil {
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "PIPELINE\tSENDER\tFAILED\tLAST RECEIVED\tLAST SUCCESS\tLAST FAILURE\tSTEP\tSIZE\tLAST ID\tERROR")
-	for _, e := range es {
+	for _, e := range f.Pipelines {
 		step := ""
 		if e.FailedStep > 0 {
 			step = strconv.Itoa(e.FailedStep)
@@ -302,16 +370,46 @@ func Print(w io.Writer, path string, raw bool) error {
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", clean(e.Pipeline), clean(e.Sender), e.Failed, dash(clean(e.LastReceived)),
 			dash(clean(e.LastSuccess)), dash(clean(e.LastFailure)), dash(step), e.Size, dash(clean(e.LastID)), dash(OneLine(e.Error)))
 	}
+	if err := tw.Flush(); err != nil || len(f.Watch) == 0 {
+		return err
+	}
+	fmt.Fprintln(w)
+	return PrintWatch(w, f.Watch)
+}
+
+// PrintWatch writes watch evaluations as a table: the storage, the series
+// (origin/file, or the rule a series no matches), the pipeline, the rule,
+// the state, the newest copy, its size, the number of copies and the
+// message.
+func PrintWatch(w io.Writer, ws []Watch) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "STORAGE\tSERIES\tPIPELINE\tRULE\tSTATE\tNEWEST\tSIZE\tCOPIES\tMESSAGE")
+	for _, x := range ws {
+		series, size := clean(x.Origin)+"/"+clean(x.File), wire.HumanSize(x.Size)
+		if x.Origin == "" && x.File == "" && x.Copies == 0 {
+			series, size = "-", "-"
+		}
+		rule := "-"
+		if x.Rule > 0 {
+			rule = strconv.Itoa(x.Rule)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", clean(x.Storage), series, dash(clean(x.Pipeline)), rule,
+			dash(clean(x.State)), dash(clean(x.NewestReceived)), size, x.Copies, dash(oneLine(x.Message, 200)))
+	}
 	return tw.Flush()
 }
 
 // OneLine is the first line of s with control characters escaped, cut to
 // 80 characters.
-func OneLine(s string) string {
+func OneLine(s string) string { return oneLine(s, 80) }
+
+// oneLine is the first line of s with control characters escaped, cut to
+// n characters.
+func oneLine(s string, n int) string {
 	msg, _, _ := strings.Cut(s, "\n")
 	msg = clean(msg)
-	if r := []rune(msg); len(r) > 80 {
-		msg = string(r[:77]) + "..."
+	if r := []rune(msg); len(r) > n {
+		msg = string(r[:n-3]) + "..."
 	}
 	return msg
 }
