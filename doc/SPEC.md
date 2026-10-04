@@ -3469,7 +3469,7 @@ luk send [flags]      (aliases: put, push)
                             without one (with --dry-run: the would-be
                             URL); the upload id is in --json
 
-luk get URL (-o|--output FILE [--force] [--inplace] | --head [--json])
+luk get URL (-o|--output FILE [--force] [--inplace] | -c|--stdout | --head [--json])
         [-k|--key PATH|SHA256:FP] [--progress] [--bwlimit RATE]
                                  download a private file (see Private
                                  files) with a signed request (luk-get@v1);
@@ -3576,9 +3576,10 @@ endpoint the `link` map of the config names for the host of the URL
 (lowercase, port ignored), the top-level `key`, else the first key of the
 SSH agent (the hint of `send` applies to a 401 `unknown key`).
 
-A download needs `--output FILE`, or `--output -` for stdout; without
-`--output` and without `--head` it is a usage error (`luk get needs -o
-FILE (or -o - for stdout), or --head`, exit 1). The server never names
+A download needs `--output FILE`, or `-c`/`--stdout` (the same as
+`--output -`) for stdout; `-c` with `-o` is a usage error; without either
+and without `--head` it is a usage error (`luk get needs -o FILE, -c for
+stdout, or --head`, exit 1). The server never names
 the local file (its `Content-Disposition` is not used for that). An
 existing FILE (a dangling symlink too) is refused unless `--force`
 (exit 1, `FILE exists; pass --force to overwrite it`), checked before the
@@ -3607,8 +3608,8 @@ or FIFO is ignored). A failure leaves FILE as written: a mismatch is
 `sha256 mismatch, FILE kept as written (got <hex>, want <hex>)` (exit 4),
 a transfer that breaks off adds `; FILE is partial` to its message
 (`interrupted after 1.2 MiB of 8.0 MiB; FILE is partial`, exit 130 or
-3). `--inplace` with `-o -` or `--head` is a usage error (`--inplace takes
-no --head or -o -`, exit 1). On success FILE is printed on stdout
+3). `--inplace` with `-o -`, `-c` or `--head` is a usage error (`--inplace
+takes no --head, -o - or -c`, exit 1). On success FILE is printed on stdout
 (nothing with `-o -`). `--progress` and `--bwlimit` as for `send`, on the
 download.
 

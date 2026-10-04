@@ -23,8 +23,8 @@ import (
 
 func newGetCmd(out io.Writer) *cobra.Command {
 	var (
-		output, key, bwlimit                   string
-		force, inplace, progress, head, asJSON bool
+		output, key, bwlimit                           string
+		force, inplace, progress, head, asJSON, stdout bool
 	)
 	cmd := &cobra.Command{
 		Use:   "get URL",
@@ -41,7 +41,7 @@ has one, else by the system CAs. The key is --key, else the key of the
 endpoint luk config link maps the host of the URL to, else the config key,
 else the first agent key.
 
-The content goes to --output FILE (required; - for stdout); the server
+The content goes to --output FILE (required; - or -c/--stdout for stdout); the server
 never names the local file. An existing FILE is refused unless --force,
 before any request is sent. The content is written to a temporary file
 next to FILE and renamed on success; a failed download leaves nothing.
@@ -57,7 +57,7 @@ prints what the server announces, one "key: value" per line: name, size,
 content_type, sha256, expires and once (each only when announced; once
 is printed as true); --json prints them as a JSON object. Exit codes as for luk send.`,
 		Example: `  luk get 'luk://secure.example.com/x7Kq...#sha256//Xk9...' -o notes.txt
-  luk get luk://secure.example.com/x7Kq... -o - | tar x
+  luk get luk://secure.example.com/x7Kq... -c | tar x
   luk get https://secure.example.com/x7Kq... -o notes.txt --force --progress
   luk get luk://secure.example.com/x7Kq... --head`,
 		Args:              oneURL,
@@ -68,13 +68,19 @@ is printed as true); --json prints them as a JSON object. Exit codes as for luk 
 			if err != nil {
 				return usageError{err}
 			}
+			if stdout {
+				if output != "" {
+					return usageError{errors.New("-c/--stdout and -o exclude each other")}
+				}
+				output = "-"
+			}
 			switch {
 			case inplace && (head || output == "-"):
-				return usageError{errors.New("--inplace takes no --head or -o -")}
+				return usageError{errors.New("--inplace takes no --head, -o - or -c")}
 			case head && output != "":
-				return usageError{errors.New("--head takes no --output")}
+				return usageError{errors.New("--head takes no --output or -c")}
 			case !head && output == "":
-				return usageError{errors.New("luk get needs -o FILE (or -o - for stdout), or --head")}
+				return usageError{errors.New("luk get needs -o FILE, -c for stdout, or --head")}
 			case asJSON && !head:
 				return usageError{errors.New("--json needs --head")}
 			}
@@ -144,7 +150,8 @@ is printed as true); --json prints them as a JSON object. Exit codes as for luk 
 		},
 	}
 	f := cmd.Flags()
-	f.StringVarP(&output, "output", "o", "", "file to write, - for stdout (required unless --head)")
+	f.StringVarP(&output, "output", "o", "", "file to write, - for stdout (required unless -c or --head)")
+	f.BoolVarP(&stdout, "stdout", "c", false, "write the content to stdout (as -o -)")
 	f.BoolVar(&force, "force", false, "overwrite an existing file")
 	f.BoolVar(&inplace, "inplace", false, "write into FILE directly, no temporary file (keeps its inode; devices and FIFOs work)")
 	f.BoolVar(&head, "head", false, "print what the server announces (name, size, content_type, sha256, expires, once) without downloading")

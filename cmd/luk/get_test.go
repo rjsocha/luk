@@ -117,7 +117,7 @@ func TestGetPrivate(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	code, out, errs := runLuk(t, "get", link, "-k", e.key)
-	if code != 1 || !strings.Contains(errs, "luk get needs -o FILE (or -o - for stdout), or --head") {
+	if code != 1 || !strings.Contains(errs, "luk get needs -o FILE, -c for stdout, or --head") {
 		t.Fatalf("no -o: exit %d %q %q", code, out, errs)
 	}
 	if left, _ := os.ReadDir(dir); len(left) != 0 {
@@ -148,6 +148,14 @@ func TestGetPrivate(t *testing.T) {
 		t.Fatalf("-o existing: exit %d %q", code, errs)
 	}
 	// The https URL of the expose works as well.
+	for _, flag := range []string{"-c", "--stdout"} {
+		if code, out, errs = runLuk(t, "get", link, "-k", e.key, flag); code != 0 || out != "secret" {
+			t.Fatalf("%s: exit %d %q %q", flag, code, out, errs)
+		}
+	}
+	if code, _, errs = runLuk(t, "get", link, "-k", e.key, "-c", "-o", "x"); code != 1 || !strings.Contains(errs, "-c/--stdout and -o exclude each other") {
+		t.Fatalf("-c -o: exit %d %q", code, errs)
+	}
 	if code, out, errs = runLuk(t, "get", strings.Replace(link, "luk://", "https://", 1), "-k", e.key, "-o", "-"); code != 0 || out != "secret" {
 		t.Fatalf("https: exit %d %q %q", code, out, errs)
 	}
@@ -478,7 +486,7 @@ func TestGetInplace(t *testing.T) {
 
 	for _, args := range [][]string{{"-o", "-"}, {"--head"}, {"--head", "-o", "x"}} {
 		code, _, errs := runLuk(t, append([]string{"get", u, "-k", key, "--inplace"}, args...)...)
-		if code != 1 || !strings.Contains(errs, "--inplace takes no --head or -o -") {
+		if code != 1 || !strings.Contains(errs, "--inplace takes no --head, -o - or -c") {
 			t.Errorf("%v: exit %d %q", args, code, errs)
 		}
 	}
