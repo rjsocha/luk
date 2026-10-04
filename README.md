@@ -1,9 +1,10 @@
-# luk
+# luk - SSH-Authenticated Storage Server
 
-luk is a file intake server (`lukd`) and its client (`luk`). One file per
-upload, every request signed with an SSH key: the server decides by who
-signed it, not by a shared token. Uploads go through pipelines that process
-them and store the results; stored files can be served over HTTP.
+luk is an SSH-authenticated storage server (`lukd`) and its client
+(`luk`). One file per upload, every request signed with an SSH key: the
+server decides by who signed it, not by a shared token. Uploads go through
+pipelines that process them and store the results; stored files can be
+served over HTTP.
 
 Typical uses:
 
