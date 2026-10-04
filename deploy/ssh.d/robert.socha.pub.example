@@ -1,0 +1,6 @@
+# /etc/site/lukd/ssh.d/robert.socha.pub: the plain keys of the identity
+# "robert.socha" (the file base name), for `allow` entries and logs.
+# Not writable by group or others. One public key per line in
+# authorized_keys form, without options; text after the key is a comment.
+# Certificates and CA keys are refused: CAs belong in ssh.d/ca or auth.ca.
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n laptop

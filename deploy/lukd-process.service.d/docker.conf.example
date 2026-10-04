@@ -1,0 +1,6 @@
+# Lets run programs use the docker socket (e.g. a MariaDB restore in a
+# container). Run programs belong to the process role: install as
+# /etc/systemd/system/lukd-process.service.d/docker.conf, then:
+#   systemctl daemon-reload && systemctl restart lukd-process
+[Service]
+SupplementaryGroups=docker

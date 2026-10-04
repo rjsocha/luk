@@ -1,0 +1,41 @@
+[Unit]
+Description=luk run connection (one allowlisted job)
+# Started per connection by lukd-run.socket.
+CollectMode=inactive-or-failed
+
+[Service]
+# Root: reads /etc/site/lukd/run.yaml and run.d/, checks the work
+# directory of the peer and starts the job with systemd-run, which needs no
+# polkit as root. The job runs in its own transient unit, outside this
+# sandbox.
+ExecStart=/usr/bin/lukd run
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+# Lock files of the jobs with state: locked (/run/lukd-run/<job>/<pipeline>.lock),
+# shared by all instances: kept when an instance stops, emptied by a reboot.
+RuntimeDirectory=lukd-run
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+# Traverse and stat the work directories of luk under /var/lib/luk.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = configure ]; then
+  systemd-sysusers luk.conf
+  systemd-tmpfiles --create luk.conf
+  for d in /etc/site/lukd /etc/site/lukd/config.d /etc/site/lukd/ssh.d /etc/site/lukd/ssh.d/ca /etc/site/lukd/ssh.d/ca/host /etc/site/lukd/ssh.d/ca/user /etc/site/lukd/gpg.d; do
+    [ -d "$d" ] || install -d -o root -g luk -m 0750 "$d"
+  done
+  [ -d /etc/site/lukd/run.d ] || install -d -o root -g root -m 0755 /etc/site/lukd/run.d
+  systemctl daemon-reload || true
+  if [ -n "$2" ]; then
+    systemctl try-restart lukd-receive.service lukd-process.service || true
+  fi
+fi

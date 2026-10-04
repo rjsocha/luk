@@ -1,0 +1,10 @@
+# Grants write access to /storage.
+# The directory must exist and be writable by luk:
+#   install -d -o luk -g luk -m 0750 /storage
+# A place only a run program writes to: install as
+# /etc/systemd/system/lukd-process.service.d/storage.conf. A storage base
+# is used by both roles: install it also as
+# /etc/systemd/system/lukd-receive.service.d/storage.conf. Then:
+#   systemctl daemon-reload && systemctl restart lukd
+[Service]
+ReadWritePaths=/storage

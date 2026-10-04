@@ -1,0 +1,17 @@
+[Unit]
+Description=luk run socket (allowlisted jobs as other users for run steps)
+
+[Socket]
+ListenStream=/run/luk/run.sock
+SocketUser=root
+SocketGroup=luk
+SocketMode=0660
+# /run/luk itself comes from tmpfiles.d (deploy/luk.tmpfiles.conf) as
+# root:luk 0750; a directory created here would be root:root and closed
+# to luk.
+DirectoryMode=0750
+Accept=yes
+MaxConnections=16
+
+[Install]
+WantedBy=sockets.target

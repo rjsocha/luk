@@ -1,0 +1,13 @@
+/luk
+/lukd
+/.artifacts/
+/luk-job
+/cmd/luk/luk
+/cmd/lukd/lukd
+/cmd/luk-job/luk-job
+/dist
+/*.md
+!/README.md
+/audit/
+/config.yaml
+/.claude/

@@ -1,0 +1,297 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"luk/internal/config"
+	"luk/internal/expose"
+	"luk/internal/status"
+	"luk/internal/store"
+	"luk/internal/tlsself"
+	"luk/internal/wire"
+)
+
+// storageFile is one stored file as lukd storage ls shows it: its name,
+// its URL when the storage is exposed, the number of names holding its
+// content (see store.Local.Links), and its sidecar.
+type storageFile struct {
+	Name  string `json:"name"`
+	URL   string `json:"url,omitempty"`
+	Links int    `json:"links"`
+	store.Sidecar
+}
+
+func storageCmd(cfgPath *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "storage",
+		Short: "Files of a local storage",
+		Long: "Files of a local storage, read from their sidecars. The commands work on files\n" +
+			"and may run while lukd runs (rm takes the base lock). Run as root they run\n" +
+			"again as the owner of the storage base (the service user).",
+	}
+
+	var lsStorage, owner, older string
+	var asJSON bool
+	ls := &cobra.Command{
+		Use:   "ls",
+		Short: "List the stored files",
+		Long: "List the stored files of a local storage, newest first: name, size, received,\n" +
+			"expiry, owner (the name the portal shows, and the owner key), endpoint, flags\n" +
+			"(once, mutable, reveal or download, private or any, shared when other names\n" +
+			"hold the same content as hardlinks) and the URL when the\n" +
+			"storage is exposed (the luk:// URL of its protect expose for a private file).\n" +
+			"--owner keeps the files of an identity: a key name, or the full owner key\n" +
+			"(key:<name>, cert:<ca>:<keyid>); --older those received longer ago than the\n" +
+			"duration (7d, 12h). Aliases and claimed files are not listed.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var age time.Duration
+			if older != "" {
+				d, err := wire.ParseDuration(older)
+				if err != nil || d <= 0 {
+					return fmt.Errorf("--older %q: want a positive duration such as 7d or 12h", older)
+				}
+				age = d
+			}
+			cfg, st, l, err := openStorage(*cfgPath, lsStorage)
+			if err != nil {
+				return err
+			}
+			// Unreadable entries are reported after the readable ones.
+			files, werr := storageFiles(cfg, lsStorage, l, owner, age, time.Now())
+			if err := printStorage(cmd.OutOrStdout(), files, st.Expose != "" || st.Protect != "", asJSON); err != nil {
+				return err
+			}
+			return werr
+		},
+	}
+	ls.Flags().StringVar(&lsStorage, "storage", "", "storage name")
+	ls.Flags().StringVar(&owner, "owner", "", "only the files of this identity: a key name or an owner key")
+	ls.Flags().StringVar(&older, "older", "", "only the files received longer ago than this (e.g. 7d)")
+	ls.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	ls.MarkFlagRequired("storage")
+
+	var rmStorage string
+	var names []string
+	var yes bool
+	rm := &cobra.Command{
+		Use:   "rm",
+		Short: "Remove stored files and their sidecars",
+		Long: "Remove stored files and their sidecars under the base lock; emptied\n" +
+			"directories are pruned, an alias moves to the next newest file and the\n" +
+			"catalog is rebuilt. Every name is checked before anything is removed.\n" +
+			"Asks for confirmation on a terminal; elsewhere --yes is required.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, _, l, err := openStorage(*cfgPath, rmStorage)
+			if err != nil {
+				return err
+			}
+			return removeStored(l, rmStorage, names, yes, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+		},
+	}
+	rm.Flags().StringVar(&rmStorage, "storage", "", "storage name")
+	rm.Flags().StringArrayVar(&names, "name", nil, "stored name, as ls shows it (repeatable)")
+	rm.Flags().BoolVar(&yes, "yes", false, "do not ask for confirmation")
+	rm.MarkFlagRequired("storage")
+	rm.MarkFlagRequired("name")
+
+	cmd.AddCommand(ls, rm)
+	return cmd
+}
+
+// openStorage loads the configuration and the local storage name, and runs
+// as the owner of its base (see asOwner).
+func openStorage(cfgPath, name string) (*config.Config, *config.Storage, store.Local, error) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return nil, nil, store.Local{}, err
+	}
+	st := cfg.Storage[name]
+	switch {
+	case st == nil:
+		return nil, nil, store.Local{}, fmt.Errorf("unknown storage %q", name)
+	case st.Type != "local":
+		return nil, nil, store.Local{}, fmt.Errorf("storage %s is not a local storage (%s)", name, st.Type)
+	}
+	if err := asOwner("lukd storage", st.Base); err != nil {
+		return nil, nil, store.Local{}, err
+	}
+	if err := store.CheckLayout(st.Base); err != nil {
+		return nil, nil, store.Local{}, fmt.Errorf("storage %s: %w", name, err)
+	}
+	return cfg, st, store.FromConfig(st), nil
+}
+
+// storageLayouts checks the base of every local storage (see
+// store.CheckLayout), in name order.
+func storageLayouts(cfg *config.Config) []error {
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(cfg.Storage)) {
+		if st := cfg.Storage[name]; st.Type == "local" {
+			if err := store.CheckLayout(st.Base); err != nil {
+				errs = append(errs, fmt.Errorf("storage %s: %w", name, err))
+			}
+		}
+	}
+	return errs
+}
+
+// storageFiles reads the stored files of l, newest first, keeping those of
+// owner (when set) received more than age (when set) before now.
+func storageFiles(cfg *config.Config, name string, l store.Local, owner string, age time.Duration, now time.Time) ([]storageFile, error) {
+	st := cfg.Storage[name]
+	base, exposed := "", false
+	if st.Expose != "" {
+		base, exposed = cfg.ExposeURL(st.Expose)
+	}
+	// Private files have the luk:// URL of the protect expose, pinned as
+	// lukd answers it when the certificate file is readable.
+	pbase, pl, protected := cfg.ProtectURL(name)
+	pin := ""
+	if protected && pl.TLS != nil && (pl.TLS.Mode == "self" || pl.TLS.Mode == "files") {
+		if p, err := tlsself.PinFile(pl.TLS.Cert); err == nil {
+			pin = "#" + p
+		}
+	}
+	files := []storageFile{}
+	err := l.Walk(func(rel string, sc store.Sidecar) error {
+		if sc.AliasOf != "" {
+			return nil
+		}
+		if owner != "" && (sc.OwnerKey == "" || (sc.OwnerKey != owner && sc.OwnerKey != "key:"+owner)) {
+			return nil
+		}
+		if age > 0 {
+			at, err := time.Parse(time.RFC3339, sc.Received)
+			if err != nil || now.Sub(at) <= age {
+				return nil
+			}
+		}
+		f := storageFile{Name: rel, Links: l.Links(rel, sc), Sidecar: sc}
+		switch {
+		case sc.Client.Access != "" && protected:
+			f.URL = expose.NameURL(pbase, rel) + pin
+		case sc.Client.Access == "" && exposed:
+			f.URL = expose.NameURL(base, rel)
+		}
+		files = append(files, f)
+		return nil
+	})
+	slices.SortFunc(files, func(a, b storageFile) int {
+		ta, _ := time.Parse(time.RFC3339, a.Received)
+		tb, _ := time.Parse(time.RFC3339, b.Received)
+		if c := tb.Compare(ta); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return files, err
+}
+
+func printStorage(w io.Writer, files []storageFile, exposed, asJSON bool) error {
+	if asJSON {
+		b, err := json.MarshalIndent(files, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(append(b, '\n'))
+		return err
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	head := "NAME\tSIZE\tRECEIVED\tEXPIRES\tOWNER\tOWNER KEY\tENDPOINT\tFLAGS"
+	if exposed {
+		head += "\tURL"
+	}
+	fmt.Fprintln(tw, head)
+	for _, f := range files {
+		var flags []string
+		if f.Client.Once {
+			flags = append(flags, "once")
+		}
+		if f.Client.Mutable {
+			flags = append(flags, "mutable")
+		}
+		if f.Client.Portal == wire.PortalReveal || f.Client.Portal == wire.PortalDownload {
+			flags = append(flags, f.Client.Portal)
+		}
+		if f.Client.Access != "" {
+			flags = append(flags, f.Client.Access)
+		}
+		if f.Links > 1 {
+			flags = append(flags, "shared")
+		}
+		line := strings.Join([]string{status.Clean(f.Name), strconv.FormatInt(f.Size, 10), dash(status.Clean(f.Received)),
+			dash(status.Clean(f.Expires)), dash(status.Clean(f.Owner)), dash(status.Clean(f.OwnerKey)),
+			dash(status.Clean(f.Endpoint)), dash(strings.Join(flags, ","))}, "\t")
+		if exposed {
+			line += "\t" + dash(f.URL)
+		}
+		fmt.Fprintln(tw, line)
+	}
+	return tw.Flush()
+}
+
+// removeStored removes the stored files names of l after checking them all
+// and, without yes, a confirmation on a terminal. A file replaced since
+// the check is kept.
+func removeStored(l store.Local, storage string, names []string, yes bool, in io.Reader, w, errw io.Writer) error {
+	var scs []store.Sidecar
+	for _, name := range names {
+		f, sc, err := l.Open(name)
+		switch {
+		case errors.Is(err, store.ErrInvalid):
+			return fmt.Errorf("--name %q: refused: %w", name, err)
+		case errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("storage %s: no stored file %q", storage, name)
+		case err != nil:
+			return err
+		}
+		f.Close()
+		if sc.AliasOf != "" {
+			return fmt.Errorf("storage %s: %q is an alias of %q; remove that file", storage, name, sc.AliasOf)
+		}
+		scs = append(scs, sc)
+	}
+	if !yes {
+		if !stdinIsTerminal() {
+			return errors.New("refusing to remove without --yes: stdin is not a terminal")
+		}
+		fmt.Fprintf(errw, "Remove from storage %s:\n", storage)
+		for i, name := range names {
+			fmt.Fprintf(errw, "  %s (%d bytes, received %s, owner %s)\n", status.Clean(name), scs[i].Size,
+				dash(status.Clean(scs[i].Received)), dash(status.Clean(scs[i].OwnerKey)))
+		}
+		fmt.Fprint(errw, "[y/N] ")
+		line, _ := bufio.NewReader(in).ReadString('\n')
+		if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
+			return errors.New("nothing removed")
+		}
+	}
+	var errs []error
+	for i, name := range names {
+		err := l.RemoveIf(name, scs[i].ID)
+		if errors.Is(err, fs.ErrNotExist) {
+			err = fmt.Errorf("%s: removed or replaced meanwhile, kept", name)
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		fmt.Fprintf(w, "%s: removed\n", status.Clean(name))
+	}
+	return errors.Join(errs...)
+}

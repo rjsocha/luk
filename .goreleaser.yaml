@@ -1,0 +1,139 @@
+version: 2
+
+project_name: luk
+
+builds:
+  # luk for linux/amd64 alone feeds the deb; luk for the other
+  # platforms only the release binaries.
+  - id: luk-amd64
+    main: ./cmd/luk
+    binary: luk
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.buildVersion={{ .Version }}"]
+    goos: [linux]
+    goarch: [amd64]
+  - id: luk
+    main: ./cmd/luk
+    binary: luk
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.buildVersion={{ .Version }}"]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: linux
+        goarch: amd64
+  - id: lukd
+    main: ./cmd/lukd
+    binary: lukd
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.buildVersion={{ .Version }}"]
+    goos: [linux]
+    goarch: [amd64]
+  - id: luk-job
+    main: ./cmd/luk-job
+    binary: luk-job
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.buildVersion={{ .Version }}"]
+    goos: [linux]
+    goarch: [amd64]
+
+# The release carries the luk client only: plain binaries for linux and
+# macOS (luk-linux-amd64, ...), and the deb packages (amd64).
+archives:
+  - id: luk
+    ids: [luk, luk-amd64]
+    formats: [binary]
+    name_template: "luk-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: SHA256SUMS
+
+nfpms:
+  - id: luk
+    package_name: luk
+    ids: [luk-amd64]
+    file_name_template: "luk_{{ .Version }}_{{ .Arch }}"
+    formats: [deb]
+    bindir: /usr/bin
+    maintainer: Robert Socha <socha@socha.it>
+    license: Unlicense
+    description: luk - client of lukd, SSH-signed uploads, links and secrets.
+    section: net
+    priority: optional
+  - id: lukd
+    package_name: lukd
+    ids: [lukd, luk-job]
+    file_name_template: "lukd_{{ .Version }}_{{ .Arch }}"
+    formats: [deb]
+    bindir: /usr/bin
+    maintainer: Robert Socha <socha@socha.it>
+    license: Unlicense
+    description: lukd - SSH-signed upload, drop and backup server with pipelines.
+    section: net
+    priority: optional
+    dependencies:
+      - systemd (>= 257)
+    contents:
+      - src: deploy/lukd.service
+        dst: /lib/systemd/system/lukd.service
+        file_info:
+          mode: 0644
+      - src: deploy/lukd-receive.service
+        dst: /lib/systemd/system/lukd-receive.service
+        file_info:
+          mode: 0644
+      - src: deploy/lukd-process.service
+        dst: /lib/systemd/system/lukd-process.service
+        file_info:
+          mode: 0644
+      - src: deploy/lukd-run.socket
+        dst: /lib/systemd/system/lukd-run.socket
+        file_info:
+          mode: 0644
+      - src: deploy/lukd-run@.service
+        dst: /lib/systemd/system/lukd-run@.service
+        file_info:
+          mode: 0644
+      - src: deploy/luk.tmpfiles.conf
+        dst: /usr/lib/tmpfiles.d/luk.conf
+        file_info:
+          mode: 0644
+      - src: packaging/lukd/sysusers.conf
+        dst: /usr/lib/sysusers.d/luk.conf
+        file_info:
+          mode: 0644
+      - src: lukd.example.yaml
+        dst: /usr/share/doc/lukd/examples/config.yaml
+        file_info:
+          mode: 0644
+      - src: deploy/run.yaml.example
+        dst: /usr/share/doc/lukd/examples/run.yaml
+        file_info:
+          mode: 0644
+      - src: deploy/run.d/s3-upload.yaml.example
+        dst: /usr/share/doc/lukd/examples/run.d/s3-upload.yaml
+        file_info:
+          mode: 0644
+      - src: deploy/ssh.d/robert.socha.pub.example
+        dst: /usr/share/doc/lukd/examples/ssh.d/robert.socha.pub
+        file_info:
+          mode: 0644
+      - src: deploy/ssh.d/ca/host/hosts.pub.example
+        dst: /usr/share/doc/lukd/examples/ssh.d/ca/host/hosts.pub
+        file_info:
+          mode: 0644
+      - src: deploy/lukd-process.service.d/
+        dst: /usr/share/doc/lukd/examples/lukd-process.service.d/
+        file_info:
+          mode: 0644
+    scripts:
+      postinstall: packaging/lukd/postinst
+      preremove: packaging/lukd/prerm
+      postremove: packaging/lukd/postrm
+
+release:
+  draft: false

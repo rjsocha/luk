@@ -1,0 +1,221 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>luk</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232b5fd9'/%3E%3Cpath d='M16 6v12m-5-5 5 5 5-5M8 21v4h16v-4' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style nonce="{{.Nonce}}">
+:root { color-scheme: light dark; --fg: #1d1d1f; --bg: #f6f6f4; --card: #ffffff; --muted: #6b6b70; --line: #deded9; --accent: #2b5fd9; --accent-fg: #ffffff; --accent-bg: #e8effc; --error: #b3261e; --once: #6d28d9; --once-bg: #f3effd; --danger: #c62828; --danger-fg: #ffffff; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e8e8ea; --bg: #151517; --card: #1f1f22; --muted: #9a9aa2; --line: #333338; --accent: #6d95f2; --accent-fg: #0d0d10; --accent-bg: #1d2740; --error: #f2938c; --once: #b794f6; --once-bg: #272040; --danger: #ef5350; --danger-fg: #160b0b; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 2rem 1rem; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+main { max-width: 42rem; margin: 0 auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1.5rem; }
+h1 { margin: 0 0 1rem; font-size: 1.25rem; overflow-wrap: anywhere; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem; margin: 0 0 1.5rem; }
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+code { font: .85rem/1.4 ui-monospace, monospace; }
+p { margin: 0 0 1rem; }
+.notice { padding: .75rem 1rem; border: 1px solid var(--once); border-left-width: 4px; border-radius: 6px; background: var(--once-bg); }
+.notice strong { color: var(--once); }
+button.danger { background: var(--danger); color: var(--danger-fg); }
+footer { max-width: 42rem; margin: .75rem auto 0; text-align: center; color: var(--muted); font-size: .8rem; }
+footer a { color: inherit; }
+.error { color: var(--error); }
+[hidden] { display: none !important; }
+button { font: inherit; padding: .5rem 1.25rem; border: 0; border-radius: 6px; background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+label { display: block; margin: 0 0 .35rem; color: var(--muted); }
+table { width: 100%; border-collapse: collapse; margin: 0 0 1rem; }
+th, td { padding: .35rem .5rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: normal; }
+td.name { overflow-wrap: anywhere; }
+td.size, td.time { white-space: nowrap; }
+td a { color: var(--accent); }
+textarea { display: block; width: 100%; min-height: 12rem; margin: 0 0 1rem; padding: .75rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: .9rem/1.4 ui-monospace, monospace; resize: vertical; }
+</style>
+</head>
+<body>
+<main>
+{{end}}
+
+{{define "stamp"}}{{if .ISO}}<time datetime="{{.ISO}}" title="{{.Text}}">{{.Text}}</time>{{else}}{{.Text}}{{end}}{{end}}
+
+{{define "foot"}}</main>
+<footer>Powered by <a href="https://github.com/rjsocha/luk" rel="noopener noreferrer">LUK</a></footer>
+<script nonce="{{.Nonce}}">
+(function () {
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  var zone = "";
+  try {
+    var parts = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(new Date());
+    for (var i = 0; i < parts.length; i++) { if (parts[i].type === "timeZoneName") { zone = " " + parts[i].value; } }
+  } catch (e) {}
+  var els = document.querySelectorAll("time[datetime]");
+  for (var j = 0; j < els.length; j++) {
+    var d = new Date(els[j].getAttribute("datetime"));
+    if (isNaN(d)) { continue; }
+    var local = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + zone;
+    els[j].textContent = els[j].textContent.replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/, local);
+  }
+})();
+</script>
+</body>
+</html>
+{{end}}
+
+{{define "landing"}}{{template "head" .}}<h1>{{.Name}}</h1>
+<dl>
+<dt>Size</dt><dd>{{.Size}}</dd>
+<dt>Type</dt><dd>{{.Type}}</dd>
+{{if .SHA256}}<dt>SHA-256</dt><dd><code>{{.SHA256}}</code></dd>
+{{end}}{{if .Owner}}<dt>Sent by</dt><dd>{{.Owner}}</dd>
+{{end}}{{if .Published.Text}}<dt>Published</dt><dd>{{template "stamp" .Published}}</dd>
+{{end}}{{if .Updated.Text}}<dt>Updated</dt><dd>{{template "stamp" .Updated}}</dd>
+{{end}}<dt>Expires</dt><dd>{{template "stamp" .Expires}}</dd>
+</dl>
+{{if .Once}}<p class="notice" id="once">{{if eq .Action "reveal"}}<strong>One-time secret.</strong><br><b>It will be deleted as soon as it is revealed.</b>{{else}}<strong>One-time download.</strong><br><b>It will be deleted as soon as it is downloaded.</b>{{end}}</p>
+{{end}}<form method="post" action="{{.Target}}" id="action">
+<button type="submit"{{if .Once}} class="danger"{{end}}>{{if eq .Action "reveal"}}Reveal{{else}}Download{{end}}{{if .Once}} and delete{{end}}</button>
+</form>
+{{if eq .Action "reveal"}}<p class="error" id="error" role="alert" hidden></p>
+<div id="revealed" hidden>
+{{template "deleted" .}}<div id="binary" hidden>
+<p><button type="button" id="save" data-name="{{.SaveName}}">Save binary</button></p>
+<label for="content">Base64</label>
+</div>
+<textarea id="content" readonly spellcheck="false" autocomplete="off"></textarea>
+<button type="button" id="copy">Copy to clipboard</button>
+</div>
+<script nonce="{{.Nonce}}">
+(function () {
+  // Reveals on this page: the same POST as the form, asking for the raw
+  // bytes as text/plain, and no navigation, so a refresh shows the landing
+  // page again.
+  var form = document.getElementById("action");
+  if (!window.fetch || !form) { return; }
+  var button = form.querySelector("button");
+  var error = document.getElementById("error");
+  var once = document.getElementById("once");
+  function fail(msg, gone) {
+    error.textContent = msg;
+    error.hidden = false;
+    button.disabled = false;
+    if (gone) { form.hidden = true; }
+  }
+  // Text is valid UTF-8 without control characters other than tab,
+  // newline and carriage return, as the reveal page decides on the server.
+  function asText(bytes) {
+    var text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch (e) {
+      return null;
+    }
+    return /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/.test(text) ? null : text;
+  }
+  function base64(bytes) {
+    var s = "";
+    for (var i = 0; i < bytes.length; i += 8192) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    }
+    return btoa(s);
+  }
+  // Binary content is saved from the bytes already fetched, with no second
+  // request (a once upload is gone by now). The <a download> of a blob: URL
+  // is a download, not a fetch, so the CSP needs nothing for it.
+  function binary(bytes) {
+    var save = document.getElementById("save");
+    document.getElementById("binary").hidden = false;
+    save.addEventListener("click", function () {
+      var href = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+      var a = document.createElement("a");
+      a.href = href;
+      a.download = save.getAttribute("data-name");
+      a.hidden = true;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(href); }, 10000);
+    });
+    return base64(bytes);
+  }
+  function show(buf) {
+    var bytes = new Uint8Array(buf);
+    var text = asText(bytes);
+    document.getElementById("content").value = text === null ? binary(bytes) : text;
+    form.hidden = true;
+    if (once) { once.hidden = true; }
+    document.getElementById("revealed").hidden = false;
+  }
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    button.disabled = true;
+    error.hidden = true;
+    fetch(form.getAttribute("action"), { method: "POST", headers: { "Accept": "text/plain" }, credentials: "same-origin", cache: "no-store" }).then(function (res) {
+      if (res.ok) {
+        return res.arrayBuffer().then(show);
+      }
+      if (res.status === 404) {
+        fail("This is no longer available: it was already opened or it has expired.", true);
+      } else if (res.status === 413) {
+        fail("The content is too large to be shown here.", true);
+      } else {
+        fail("Reveal failed (HTTP " + res.status + ").", false);
+      }
+    }).catch(function () {
+      fail("Network error, nothing was shown. Try again.", false);
+    });
+  });
+})();
+</script>
+{{template "copy" .}}{{end}}{{template "foot" .}}{{end}}
+
+{{define "reveal"}}{{template "head" .}}<h1>{{.Name}}</h1>
+{{template "deleted" .}}{{if .Binary}}<label for="content">Base64</label>
+{{end}}<textarea id="content" readonly spellcheck="false" autocomplete="off">
+{{.Content}}</textarea>
+<button type="button" id="copy">Copy to clipboard</button>
+{{template "copy" .}}{{template "foot" .}}{{end}}
+
+{{define "deleted"}}{{if .Once}}<p class="notice"><strong>Deleted.</strong><br><b>This page is the only copy.</b></p>
+{{end}}{{end}}
+
+{{define "copy"}}<script nonce="{{.Nonce}}">
+(function () {
+  var button = document.getElementById("copy");
+  var field = document.getElementById("content");
+  function done(ok) { button.textContent = ok ? "Copied" : "Copy failed, select the text"; }
+  function fallback() {
+    field.focus();
+    field.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) {}
+    done(ok);
+  }
+  button.addEventListener("click", function () {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(field.value).then(function () { done(true); }, fallback);
+    } else {
+      fallback();
+    }
+  });
+})();
+</script>
+{{end}}
+
+{{define "toolarge"}}{{template "head" .}}<h1>{{.Name}}</h1>
+<p>The content is larger than {{.Limit}} and cannot be shown here.</p>
+{{template "foot" .}}{{end}}
+
+{{define "index"}}{{template "head" .}}<h1>Index of {{.Dir}}</h1>
+<table>
+<thead><tr><th>Name</th><th>Size</th><th>Stored</th></tr></thead>
+<tbody>
+{{if .Parent}}<tr><td class="name"><a href="../">../</a></td><td class="size"></td><td class="time"></td></tr>
+{{end}}{{range .Entries}}<tr><td class="name"><a href="{{.Href}}">{{.Name}}</a></td><td class="size">{{.Size}}</td><td class="time">{{if not .Dir}}{{template "stamp" .Stored}}{{end}}</td></tr>
+{{end}}</tbody>
+</table>
+{{if not .Entries}}<p>No files.</p>
+{{end}}{{template "foot" .}}{{end}}

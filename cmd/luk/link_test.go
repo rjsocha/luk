@@ -1,0 +1,540 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+
+	"luk/internal/client"
+	"luk/internal/config"
+	"luk/internal/server"
+	"luk/internal/wire"
+)
+
+// newKeyFile writes a new ed25519 private key and returns its path and
+// the authorized_keys line of its public key.
+func newKeyFile(t *testing.T) (string, string) {
+	t.Helper()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	blk, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "id")
+	if err := os.WriteFile(p, pem.EncodeToMemory(blk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sp, _ := ssh.NewPublicKey(pub)
+	return p, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sp)))
+}
+
+// lukdEnv runs both lukd roles on a free port with a drop endpoint that
+// allows every link action; the luk config has the endpoint drop. The
+// drop storage has the ttl policy {user: true, min: 1h, max: 7d} unless
+// newLukdEnvTTL gives another.
+type lukdEnv struct {
+	base       string // http://addr
+	key, other string // key files of robert.socha and of other
+	logs       *logBuf
+}
+
+func newLukdEnv(t *testing.T) *lukdEnv {
+	t.Helper()
+	return newLukdEnvTTL(t, "{user: true, min: 1h, max: 7d}")
+}
+
+func newLukdEnvTTL(t *testing.T, ttl string) *lukdEnv {
+	t.Helper()
+	tempConfig(t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	e := &lukdEnv{base: "http://" + addr}
+	var pub, otherPub string
+	e.key, pub = newKeyFile(t)
+	e.other, otherPub = newKeyFile(t)
+	dir := t.TempDir()
+	text := fmt.Sprintf(`
+root: %s
+listen: {main: {addr: "%s", public: "http://%s"}}
+auth:
+  keys: [{name: robert.socha, key: "%s"}, {name: other, key: "%s"}]
+endpoint:
+  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha, other], respond: url, storage: drop, link: {remove: true, ttl: true, replace: true, list: true}}
+pipeline:
+  drop: {endpoint: [drop], steps: [{store: drop}]}
+storage:
+  drop: {type: local, base: s/drop, path: "{{ .Random }}", expose: drop, ttl: %s}
+expose:
+  drop: {listen: main, path: /d/}
+`, t.TempDir(), addr, addr, pub, otherPub, ttl)
+	e.logs = startLukd(t, filepath.Join(dir, "config.yaml"), text, addr)
+	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", e.base+"/drop")
+	mustRun(t, "config", "link", "add", "--url", e.base+"/d/", "--endpoint", "drop")
+	return e
+}
+
+// logBuf collects the log lines of lukd.
+type logBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+// count is the number of log lines with the message msg.
+func (l *logBuf) count(msg string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Count(l.b.String(), "msg=\""+msg+"\"")
+}
+
+// startLukd writes the config text to p and runs both lukd roles on it
+// until the test ends, logging into the returned buffer; addr is an
+// address it listens on.
+func startLukd(t *testing.T, p, text, addr string) *logBuf {
+	t.Helper()
+	if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	logs := &logBuf{}
+	log := slog.New(slog.NewTextHandler(logs, nil))
+	var done []chan error
+	for _, role := range []func(context.Context, *config.Config, *slog.Logger) error{server.Receive, server.Process} {
+		c := make(chan error, 1)
+		go func() { c <- role(ctx, cfg, log) }()
+		done = append(done, c)
+	}
+	t.Cleanup(func() {
+		cancel()
+		for _, c := range done {
+			if err := <-c; err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	waitUntil(t, "lukd listens", func() bool {
+		c, err := net.Dial("tcp", addr)
+		if err == nil {
+			c.Close()
+		}
+		return err == nil
+	})
+	return logs
+}
+
+func waitUntil(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		if ok() {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting: %s", what)
+}
+
+func httpGet(t *testing.T, u string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+// waitContent waits until the link serves want.
+func waitContent(t *testing.T, link, want string) {
+	t.Helper()
+	waitUntil(t, link+" serves "+want, func() bool {
+		code, body := httpGet(t, link)
+		return code == 200 && body == want
+	})
+}
+
+func namedFile(t *testing.T, name, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestLinkEndToEnd(t *testing.T) {
+	e := newLukdEnv(t)
+	link := strings.TrimSpace(mustRun(t, "send", "-e", "drop", "-k", e.key, "--mutable", "--file", namedFile(t, "a.txt", "hello")))
+	if !strings.HasPrefix(link, e.base+"/d/") {
+		t.Fatalf("link %q", link)
+	}
+	waitContent(t, link, "hello")
+
+	code, out, errs := runLuk(t, "link", link, "--ttl", "30d", "-k", e.key)
+	if code != 0 || errs != "luk: ttl 30d capped to 7d by the server (allowed 1h to 7d)\n" {
+		t.Fatalf("ttl: exit %d %q", code, errs)
+	}
+	exp, err := time.Parse(time.RFC3339, strings.TrimSpace(out))
+	if err != nil || exp.Before(time.Now().Add(7*24*time.Hour-time.Minute)) {
+		t.Fatalf("ttl out %q: %v", out, err)
+	}
+
+	code, out, errs = runLuk(t, "link", link, "--file", namedFile(t, "b.txt", "new content"), "-k", e.key)
+	if code != 0 || out != link+"\n" {
+		t.Fatalf("replace: exit %d %q %q", code, out, errs)
+	}
+	waitContent(t, link, "new content")
+
+	defer stdinFrom(t, "from stdin")()
+	code, out, errs = runLuk(t, "link", link, "--stdin", "-k", e.key, "--json")
+	if code != 0 || !strings.Contains(out, `"url": "`+link+`"`) || !strings.Contains(out, `"id": "`) {
+		t.Fatalf("replace --stdin --json: exit %d %q %q", code, out, errs)
+	}
+	waitContent(t, link, "from stdin")
+
+	// Another identity allowed on the endpoint is not the owner.
+	code, _, errs = runLuk(t, "link", link, "--rm", "-k", e.other)
+	if code != 2 || !strings.Contains(errs, "404") || !strings.Contains(errs, "link not found") {
+		t.Fatalf("other: exit %d %q", code, errs)
+	}
+
+	code, out, errs = runLuk(t, "link", link, "--rm", "-k", e.key)
+	if code != 0 || out != "" {
+		t.Fatalf("rm: exit %d %q %q", code, out, errs)
+	}
+	if code, _ := httpGet(t, link); code != 404 {
+		t.Fatalf("after rm: %d", code)
+	}
+}
+
+func TestLinkNotMutable(t *testing.T) {
+	e := newLukdEnv(t)
+	link := strings.TrimSpace(mustRun(t, "send", "-e", "drop", "-k", e.key, "--file", namedFile(t, "a.txt", "hello")))
+	waitContent(t, link, "hello")
+	code, _, errs := runLuk(t, "link", link, "--file", namedFile(t, "b.txt", "x"), "-k", e.key)
+	if code != 2 || !strings.Contains(errs, "link is not mutable") {
+		t.Fatalf("exit %d %q", code, errs)
+	}
+}
+
+func TestLinkUsageErrors(t *testing.T) {
+	tempConfig(t)
+	for _, args := range [][]string{
+		{"link"},
+		{"link", "https://d.example/d/x"},
+		{"link", "https://d.example/d/x", "--rm", "--ttl", "1d"},
+		{"link", "https://d.example/d/x", "--rm", "--stdin"},
+		{"link", "https://d.example/d/x", "--file", "a", "--stdin"},
+		{"link", "https://d.example/d/x", "--ttl", "soon"},
+		{"link", "https://d.example/d/x", "--rm", "--progress"},
+		{"link", "ftp://d.example/d/x", "--rm"},
+		{"link", "https://d.example/d/x", "--rm", "x"},
+	} {
+		if code, _, _ := runLuk(t, args...); code != 1 {
+			t.Errorf("%v: exit %d, want 1", args, code)
+		}
+	}
+	code, _, errs := runLuk(t, "link", "https://d.example/d/x", "--rm")
+	if code != 1 || !strings.Contains(errs, "no endpoint for host d.example; add one with luk config link add --url LINK -e NAME") {
+		t.Errorf("no endpoint: exit %d %q", code, errs)
+	}
+}
+
+func TestLinkEndpointOrder(t *testing.T) {
+	tempConfig(t)
+	var hits []string
+	srv := func(name string) string {
+		s := newHTTPServer(t, func(w http.ResponseWriter, r *http.Request) {
+			hits = append(hits, name+" "+r.Method+" "+r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"url":"x","removed":true}`)
+		})
+		mustRun(t, "config", "endpoint", "add", "-e", name, "--url", s+"/"+name)
+		return s
+	}
+	srv("byhost")
+	srv("def")
+	srv("flag")
+	key, _ := newKeyFile(t)
+	const link = "https://Drop.Example:8443/d/x"
+	rm := func(extra ...string) {
+		t.Helper()
+		if code, _, errs := runLuk(t, append([]string{"link", link, "--rm", "-k", key}, extra...)...); code != 0 {
+			t.Fatalf("exit %d %s", code, errs)
+		}
+	}
+	mustRun(t, "config", "default", "-e", "def")
+	rm()
+	mustRun(t, "config", "link", "add", "--url", "https://drop.example/", "--endpoint", "byhost")
+	rm()
+	rm("-e", "flag")
+	want := []string{"def DELETE /def", "byhost DELETE /byhost", "flag DELETE /flag"}
+	if strings.Join(hits, ",") != strings.Join(want, ",") {
+		t.Fatalf("hits %v, want %v", hits, want)
+	}
+}
+
+func newHTTPServer(t *testing.T, h http.HandlerFunc) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &http.Server{Handler: h}
+	go s.Serve(l)
+	t.Cleanup(func() { s.Close() })
+	return "http://" + l.Addr().String()
+}
+
+func TestConfigLinkLayers(t *testing.T) {
+	user := tempConfig(t)
+	global := globalConfig(t)
+	writeCfg(t, global, "endpoint:\n  drop: {url: https://lukd.vm/drop}\n  other: {url: https://other.vm/drop}\nlink:\n  drop.example: drop\n  g.example: other\n")
+	mustRun(t, "config", "link", "add", "--url", "https://DROP.example:8443/d/x", "--endpoint", "other")
+	c, err := client.LoadConfig(user)
+	if err != nil || c.Link["drop.example"] != "other" || len(c.Link) != 1 {
+		t.Fatalf("user layer %+v %v", c, err)
+	}
+	out := mustRun(t, "config", "link", "ls")
+	for _, want := range []string{"drop.example  other  user\n", "g.example     other  global\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ls lacks %q:\n%s", want, out)
+		}
+	}
+	if out := mustRun(t, "config", "show"); !strings.Contains(out, "link:\n  drop.example: other  # user\n  g.example: other  # global\n") {
+		t.Errorf("show:\n%s", out)
+	}
+	if code, _, errs := runLuk(t, "config", "link", "rm", "--host", "g.example"); code != 1 || !strings.Contains(errs, "use --global") {
+		t.Errorf("rm global-only: exit %d %q", code, errs)
+	}
+	for _, args := range [][]string{
+		{"config", "link", "add", "--url", "ftp://x.example/", "--endpoint", "drop"},
+		{"config", "link", "add", "--url", "https://x.example/", "--endpoint", "nope"},
+		{"config", "link", "add", "--url", "https://x.example/"},
+		{"config", "link", "rm", "--host", "nope.example"},
+		{"config", "link", "rm"},
+	} {
+		if code, _, _ := runLuk(t, args...); code != 1 {
+			t.Errorf("%v: exit %d, want 1", args, code)
+		}
+	}
+	mustRun(t, "config", "link", "rm", "--host", "drop.example")
+	if out := mustRun(t, "config", "link", "ls"); !strings.Contains(out, "drop.example  drop") {
+		t.Errorf("global back after the user rm:\n%s", out)
+	}
+	mustRun(t, "config", "check")
+	writeCfg(t, user, "link:\n  x.example: gone\n")
+	if code, _, errs := runLuk(t, "config", "check"); code != 1 || !strings.Contains(errs, `link x.example: endpoint "gone" is not a defined endpoint`) {
+		t.Errorf("check: exit %d %q", code, errs)
+	}
+	f := namedFile(t, "c.yaml", "endpoint:\n  drop: {url: https://lukd.vm/drop}\nlink:\n  Bad.Example: drop\n  ok.example: nope\n")
+	if code, _, errs := runLuk(t, "config", "check", "--file", f); code != 1 || !strings.Contains(errs, "not a lowercase host name") || !strings.Contains(errs, `"nope" is not a defined endpoint`) {
+		t.Errorf("check --file: exit %d %q", code, errs)
+	}
+}
+
+func TestLinkCompletion(t *testing.T) {
+	tempConfig(t)
+	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", "https://u.example/drop")
+	mustRun(t, "config", "link", "add", "--url", "https://d.example/d/", "--endpoint", "drop")
+	wantCompletion(t, []string{"config", "link", "rm", "--host", ""}, []string{"d.example\tdrop"}, ":4")
+	wantCompletion(t, []string{"config", "link", "add", "--endpoint", ""}, []string{"drop\thttps://u.example/drop"}, ":4")
+	wantCompletion(t, []string{"link", "--endpoint", ""}, []string{"drop\thttps://u.example/drop"}, ":4")
+	wantCompletion(t, []string{"link", "--ttl", ""}, []string{"max", "1h", "1d", "7d"}, ":4")
+	wantCompletion(t, []string{"link", ""}, []string{"ls\tList your links on an endpoint"}, ":4")
+	wantCompletion(t, []string{"link", "https://d.example/d/x", ""}, nil, ":4")
+	wantCompletion(t, []string{"get", ""}, nil, ":4")
+	wantCompletion(t, []string{"get", "-o", ""}, nil, ":0")
+	mustRun(t, "alias", "add", "--alias", "lrm", "--", "link", "--rm", "-e", "drop")
+	wantCompletion(t, []string{"lrm", "-e", ""}, []string{"drop\thttps://u.example/drop"}, ":4")
+}
+
+func TestLinkAlias(t *testing.T) {
+	tempConfig(t)
+	var got string
+	s := newHTTPServer(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r.Method + " " + r.Header.Get("Luk-Link-Action") + " " + r.Header.Get("Luk-Link")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"url":"x","expires":"2026-10-09T00:00:00Z","ttl":"7d"}`)
+	})
+	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", s+"/drop")
+	key, _ := newKeyFile(t)
+	mustRun(t, "alias", "add", "--alias", "keep", "--", "link", "--ttl", "7d", "-e", "drop", "-k", key)
+	code, out, errs := runLuk(t, "keep", "https://d.example/d/x")
+	if code != 0 || out != "2026-10-09T00:00:00Z\n" || got != "PATCH ttl https://d.example/d/x" {
+		t.Fatalf("exit %d %q %q, request %q", code, out, errs, got)
+	}
+}
+
+func TestSendMutable(t *testing.T) {
+	e := newLukdEnv(t)
+	out := mustRun(t, "send", "-e", "drop", "-k", e.key, "--mutable", "--dry-run", "--file", namedFile(t, "a.txt", "x"))
+	if !strings.Contains(out, `"mutable": true`) {
+		t.Fatalf("dry run:\n%s", out)
+	}
+	out = mustRun(t, "send", "-e", "drop", "-k", e.key, "--dry-run", "--file", namedFile(t, "a.txt", "x"))
+	if strings.Contains(out, `"mutable"`) {
+		t.Fatalf("dry run without --mutable:\n%s", out)
+	}
+}
+
+// expiresIn fails unless the RFC 3339 expiry s is about d from now.
+func expiresIn(t *testing.T, what, s string, d time.Duration) {
+	t.Helper()
+	exp, err := time.Parse(time.RFC3339, strings.TrimSpace(s))
+	if err != nil || exp.Before(time.Now().Add(d-time.Minute)) || exp.After(time.Now().Add(d)) {
+		t.Fatalf("%s: expires %q, want about %v", what, s, d)
+	}
+}
+
+func TestTTLMaxWithMax(t *testing.T) {
+	e := newLukdEnv(t)
+	code, out, errs := runLuk(t, "send", "-e", "drop", "-k", e.key, "--ttl", "max", "--json", "--file", namedFile(t, "a.txt", "a"))
+	if code != 0 || errs != "" || !strings.Contains(out, `"ttl": "7d"`) || !strings.Contains(out, `"ttl_min": "1h"`) || !strings.Contains(out, `"ttl_max": "7d"`) {
+		t.Fatalf("send: exit %d %q %s", code, errs, out)
+	}
+
+	mustRun(t, "alias", "add", "--alias", "keep", "--", "send", "-e", "drop", "-k", e.key, "--ttl", "2d")
+	link := strings.TrimSpace(mustRun(t, "keep", "--file", namedFile(t, "b.txt", "b")))
+	code, out, errs = runLuk(t, "keep", "--file", namedFile(t, "c.txt", "c"), "--ttl", "max", "--json")
+	if code != 0 || errs != "" || !strings.Contains(out, `"ttl": "7d"`) {
+		t.Fatalf("alias override: exit %d %q %s", code, errs, out)
+	}
+
+	waitContent(t, link, "b")
+	code, out, errs = runLuk(t, "link", link, "--ttl", "max", "-k", e.key)
+	if code != 0 || errs != "" {
+		t.Fatalf("link --ttl max: exit %d %q", code, errs)
+	}
+	expiresIn(t, "link --ttl max", out, 7*24*time.Hour)
+}
+
+func TestTTLMaxWithoutMax(t *testing.T) {
+	e := newLukdEnvTTL(t, "{user: true, min: 1h}")
+	code, out, errs := runLuk(t, "send", "-e", "drop", "-k", e.key, "--ttl", "max", "--json", "--file", namedFile(t, "a.txt", "a"))
+	if code != 0 || errs != "" || strings.Contains(out, `"expires"`) || strings.Contains(out, `"ttl":`) || !strings.Contains(out, `"ttl_min": "1h"`) || strings.Contains(out, `"ttl_max"`) {
+		t.Fatalf("send: exit %d %q %s", code, errs, out)
+	}
+
+	link := strings.TrimSpace(mustRun(t, "send", "-e", "drop", "-k", e.key, "--ttl", "1d", "--file", namedFile(t, "b.txt", "b")))
+	waitContent(t, link, "b")
+	code, out, errs = runLuk(t, "link", link, "--ttl", "max", "-k", e.key)
+	if code != 0 || out != "" || errs != "" {
+		t.Fatalf("link --ttl max: exit %d %q %q", code, out, errs)
+	}
+	code, out, errs = runLuk(t, "link", link, "--ttl", "10m", "-k", e.key)
+	if code != 0 || errs != "luk: ttl 10m raised to 1h by the server (allowed from 1h)\n" {
+		t.Fatalf("link --ttl 10m: exit %d %q", code, errs)
+	}
+	expiresIn(t, "link --ttl 10m", out, time.Hour)
+}
+
+func TestTTLMaxUserFalse(t *testing.T) {
+	e := newLukdEnvTTL(t, "{max: 7d}")
+	code, out, errs := runLuk(t, "send", "-e", "drop", "-k", e.key, "--ttl", "max", "--json", "--file", namedFile(t, "a.txt", "a"))
+	if code != 0 || errs != "luk: ttl ignored by the server\n" || !strings.Contains(out, `"ttl": "7d"`) || !strings.Contains(out, `"ttl_max": "7d"`) {
+		t.Fatalf("send: exit %d %q %s", code, errs, out)
+	}
+}
+
+func TestLinkLs(t *testing.T) {
+	e := newLukdEnv(t)
+	if code, _, errs := runLuk(t, "link", "ls", "-k", e.key); code != 1 || !strings.Contains(errs, "no endpoint") {
+		t.Fatalf("no default: exit %d %q", code, errs)
+	}
+	if out := mustRun(t, "link", "ls", "-e", "drop", "-k", e.key); out != "" {
+		t.Fatalf("empty: %q", out)
+	}
+	a := strings.TrimSpace(mustRun(t, "send", "-e", "drop", "-k", e.key, "--mutable", "--file", namedFile(t, "a.txt", "hello")))
+	waitContent(t, a, "hello")
+	b := strings.TrimSpace(mustRun(t, "send", "-e", "drop", "-k", e.key, "--once", "--file", namedFile(t, "b.txt", "x")))
+	mustRun(t, "send", "-e", "drop", "-k", e.other, "--file", namedFile(t, "c.txt", "other"))
+	waitUntil(t, "two links listed", func() bool {
+		return strings.Count(mustRun(t, "link", "ls", "-e", "drop", "-k", e.key), "\n") == 3
+	})
+	mustRun(t, "config", "default", "-e", "drop")
+	out := mustRun(t, "link", "ls", "-k", e.key)
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if !strings.HasPrefix(lines[0], "NAME") || !strings.Contains(lines[0], "SIZE") || !strings.Contains(lines[0], "SENT") ||
+		!strings.Contains(lines[0], "EXPIRES") || !strings.Contains(lines[0], "FLAGS") || !strings.HasSuffix(lines[0], "URL") {
+		t.Fatalf("header %q", lines[0])
+	}
+	got := map[string]string{}
+	for _, l := range lines[1:] {
+		f := strings.Fields(l)
+		got[f[len(f)-1]] = f[len(f)-2]
+		if f[1]+" "+f[2] != "5 B" && f[1]+" "+f[2] != "1 B" {
+			t.Errorf("size in %q", l)
+		}
+	}
+	if got[a] != "mutable" || got[b] != "once" || len(got) != 2 {
+		t.Fatalf("links:\n%s", out)
+	}
+	out = mustRun(t, "link", "ls", "-k", e.key, "--json")
+	var ans wire.LinkListAnswer
+	if err := json.Unmarshal([]byte(out), &ans); err != nil || len(ans.Links) != 2 || ans.Truncated {
+		t.Fatalf("json %q %v", out, err)
+	}
+	if code, _, _ := runLuk(t, "link", "ls", "extra"); code != 1 {
+		t.Fatalf("positional: exit %d", code)
+	}
+}
+
+func TestPrintLinks(t *testing.T) {
+	cest := time.FixedZone("CEST", 2*3600)
+	var b strings.Builder
+	if err := printLinks(&b, nil, cest); err != nil || b.String() != "" {
+		t.Fatalf("empty: %q %v", b.String(), err)
+	}
+	err := printLinks(&b, []wire.LinkEntry{
+		{URL: "https://d.example/d/long-name", File: "notes.txt", Size: 1536, Received: "2026-10-01T10:00:00Z", Expires: "2026-10-08T10:00:00Z", Once: true, Mutable: true, Portal: wire.PortalReveal},
+		{URL: "https://d.example/d/b", Size: 7, Received: "2026-09-30T22:30:00Z", Portal: wire.PortalDirect},
+	}, cest)
+	want := "NAME       SIZE     SENT              EXPIRES           FLAGS                URL\n" +
+		"notes.txt  1.5 KiB  2026-10-01 12:00  2026-10-08 12:00  once,mutable,reveal  https://d.example/d/long-name\n" +
+		"-          7 B      2026-10-01 00:30  never             -                    https://d.example/d/b\n"
+	if err != nil || b.String() != want {
+		t.Fatalf("%v\n%s", err, b.String())
+	}
+}
+
+// The columns of luk link ls escape the control characters a server sends.
+func TestPrintLinksEscapes(t *testing.T) {
+	var b strings.Builder
+	err := printLinks(&b, []wire.LinkEntry{
+		{URL: "https://d.example/d/a\x1b[2J", File: "a\tb\nc", Size: 1, Received: "now\r", Expires: "x\x07"},
+	}, time.UTC)
+	want := "NAME     SIZE  SENT   EXPIRES  FLAGS  URL\n" +
+		`a\tb\nc` + "  1 B   " + `now\r` + "  " + `x\a` + "      -      " + `https://d.example/d/a\x1b[2J` + "\n"
+	if err != nil || b.String() != want {
+		t.Fatalf("%v\n%q\nwant %q", err, b.String(), want)
+	}
+}

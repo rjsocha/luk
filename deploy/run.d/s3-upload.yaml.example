@@ -1,0 +1,38 @@
+# /etc/site/lukd/run.d/s3-upload.yaml: the job "s3-upload" (the file base
+# name; [a-z0-9][a-z0-9._-]*). Owned by root, not writable by group or
+# others. Read per request: adding or removing a file needs no reload.
+
+# User of the job, optional: without user the job runs as a systemd
+# dynamic user, one per job and pipeline (lukd-<job>-<pipeline>-<hash>),
+# that writes only its own /tmp, /var/tmp and the state directory. The job always gets the
+# group of the work directory (luk) as a supplementary group, which gives
+# read access to the work directory; groups adds more and keeps the
+# user's own. group (needs user) would replace the primary group.
+user: luk-s3
+# groups: [backup]
+# group: luk-s3
+
+# Absolute path; receives the work directory as its only argument (also
+# in LUK_WORK).
+command: /opt/luk/s3-upload
+
+# systemd LoadCredential= entries, name: path. The job reads them from
+# $CREDENTIALS_DIRECTORY/<name>; the files stay root-only.
+credentials:
+  s3: /etc/site/lukd/s3.credentials
+
+# RuntimeMaxSec of the job. Default: 1h.
+timeout: 1h
+
+# State directory kept between runs, one per job and pipeline:
+# /var/lib/lukd-run/<job>/<pipeline>, in LUK_STATE (absent without state).
+# locked: lukd run lets only one run of the job per pipeline use it at a
+# time; a second request waits. shared: no lock, the job handles
+# concurrent runs itself. Scratch space removed after each run is always
+# in LUK_TMP (/var/tmp, private to the run).
+# state: locked
+
+# Fixed environment of the job. LUK_* names are reserved: lukd run sets
+# LUK_WORK, LUK_JOB, LUK_PIPELINE, LUK_TMP and LUK_STATE.
+env:
+  BUCKET: example-backup

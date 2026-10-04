@@ -1,0 +1,9 @@
+# /etc/site/lukd/ssh.d/ca/host/hosts.pub: the keys of the host CA
+# "hosts" (the file base name; ssh.d/ca/user/ for user CAs), for
+# `allow` entries like "hosts:*". Not writable by group or others.
+# One public key per line in authorized_keys form, without options (no
+# cert-authority); text after the key is a comment. Several lines are a
+# rotation: certificates signed by any of the keys are accepted.
+# Revocations stay in YAML: an auth.ca entry with name hosts and
+# revoked, without key.
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl CA/SSH 2026

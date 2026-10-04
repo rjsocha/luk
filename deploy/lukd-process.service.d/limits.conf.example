@@ -1,0 +1,8 @@
+# Caps lukd process and all its run programs together, so heavy pipelines
+# do not starve uploads and downloads of lukd receive: install as
+# /etc/systemd/system/lukd-process.service.d/limits.conf, then:
+#   systemctl daemon-reload && systemctl restart lukd-process
+[Service]
+MemoryMax=4G
+CPUQuota=200%
+TasksMax=512

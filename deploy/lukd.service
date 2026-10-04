@@ -1,0 +1,20 @@
+[Unit]
+Description=luk server (receive and process roles)
+# Groups lukd-receive.service and lukd-process.service: start, stop,
+# restart and reload of lukd act on both roles; each role can still be
+# restarted or reloaded alone.
+Wants=lukd-receive.service lukd-process.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+# systemctl reload lukd: the configuration is checked first, so an
+# invalid one or a change of root, listen, limits.conn/header or
+# auth.nonces (they need a restart) fails the reload visibly; the reload
+# then reaches both roles (ReloadPropagatedFrom= in their units), each
+# checks again and sends itself SIGHUP.
+ExecReload=/usr/bin/lukd check
+
+[Install]
+WantedBy=multi-user.target

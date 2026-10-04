@@ -1,0 +1,14 @@
+default: drop
+key: ~/.ssh/id_ed25519.pub
+endpoint:
+  drop:
+    url: https://lukd.vm:8443/drop
+    pin: sha256//REPLACE-WITH-lukd-tls-pin
+  backup:
+    url: http://lukd.vm:8080/backup
+    key: SHA256:REPLACE-WITH-ssh-add-l-fingerprint
+link:                         # endpoint of luk link by the host of the link
+  drop.lukd.vm: drop
+alias:
+  drop: [send, --endpoint, drop]
+  nightly: [send, --endpoint, backup, --tag, nightly, --ttl, 7d]

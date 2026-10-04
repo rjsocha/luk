@@ -1,0 +1,13 @@
+# /etc/site/lukd/run.yaml: global settings of lukd run, optional; a
+# missing file means the defaults below. Owned root:root, mode 0600. Read
+# per connection: a change needs no reload. Jobs live in
+# /etc/site/lukd/run.d/, one <job>.yaml per job
+# (deploy/run.d/s3-upload.yaml.example).
+
+# The lukd root: a job runs only on a work directory strictly under
+# <root>/work, owned by the peer. Default: /var/lib/luk.
+# root: /var/lib/luk
+
+# The only user allowed to connect to the socket (SO_PEERCRED); any other
+# connection is closed without an answer. Default: the owner of root.
+# peer: luk

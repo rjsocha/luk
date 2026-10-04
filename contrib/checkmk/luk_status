@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""check_mk local check for lukd: one service per (pipeline, sender)."""
+import configparser
+import fnmatch
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+
+DEFAULT_STATUS = "/var/lib/luk/status.json"
+DEFAULT_CONF = "/etc/site/luk/check.conf"
+OK, WARN, CRIT, UNKNOWN = 0, 1, 2, 3
+DUR_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+SIZE_UNITS = {"k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+KEYS = {"warn_age", "crit_age", "min_size"}
+
+
+class ConfError(Exception):
+    pass
+
+
+def parse_duration(text):
+    m = re.fullmatch(r"\s*(\d+)\s*([smhd])\s*", text, re.I)
+    if not m:
+        raise ValueError("bad duration %r" % text)
+    return int(m.group(1)) * DUR_UNITS[m.group(2).lower()]
+
+
+def parse_size(text):
+    m = re.fullmatch(r"\s*(\d+)\s*([kmgt]?)\s*", text, re.I)
+    if not m:
+        raise ValueError("bad size %r" % text)
+    return int(m.group(1)) * SIZE_UNITS.get(m.group(2).lower(), 1)
+
+
+def parse_time(text):
+    if not isinstance(text, str) or not text.strip():
+        return None
+    t = text.strip()
+    if t.endswith(("Z", "z")):
+        t = t[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(t)
+    except ValueError:
+        raise ValueError("bad timestamp %r" % text)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def fmt_age(sec):
+    sec = int(sec)
+    if sec >= 86400:
+        return "%dd %dh" % (sec // 86400, sec % 86400 // 3600)
+    if sec >= 3600:
+        return "%dh %dm" % (sec // 3600, sec % 3600 // 60)
+    if sec >= 60:
+        return "%dm" % (sec // 60)
+    return "%ds" % sec
+
+
+def fmt_size(n):
+    for unit in ("B", "K", "M", "G"):
+        if n < 1024:
+            return "%d%s" % (n, unit)
+        n //= 1024
+    return "%dT" % n
+
+
+def clean_name(s):
+    s = "".join("_" if (not c.isprintable() or c.isspace() or c == '"') else c
+                for c in str(s))
+    return s or "_"
+
+
+def clean_text(s, limit=None):
+    s = "".join(" " if (not c.isprintable() or c == "|") else c for c in str(s))
+    return s[:limit] if limit else s
+
+
+def load_conf(path):
+    """Return list of (pipeline, pattern, warn, crit, min_size) in file order."""
+    if not os.path.exists(path):
+        return []
+    cp = configparser.ConfigParser(interpolation=None, strict=True,
+                                   inline_comment_prefixes=("#",))
+    try:
+        with open(path, encoding="utf-8") as f:
+            cp.read_file(f)
+        defaults = {}
+        if cp.has_section("defaults"):
+            defaults = dict(cp.items("defaults"))
+        out = []
+        for sec in cp.sections():
+            opts = dict(cp.items(sec))
+            bad = set(opts) - KEYS
+            if bad:
+                raise ConfError("[%s]: unknown key %s" % (sec, sorted(bad)[0]))
+            if sec == "defaults":
+                continue
+            parts = sec.split(None, 1)
+            if len(parts) != 2:
+                raise ConfError("[%s]: section must be '<pipeline> <sender>'" % sec)
+            merged = dict(defaults)
+            merged.update(opts)
+            try:
+                warn = parse_duration(merged["warn_age"]) if "warn_age" in merged else None
+                crit = parse_duration(merged["crit_age"]) if "crit_age" in merged else None
+                msize = parse_size(merged["min_size"]) if "min_size" in merged else None
+            except ValueError as e:
+                raise ConfError("[%s]: %s" % (sec, e))
+            out.append((parts[0], parts[1], warn, crit, msize))
+        return out
+    except ConfError:
+        raise
+    except (configparser.Error, OSError, UnicodeDecodeError) as e:
+        raise ConfError(str(e).replace("\n", " "))
+
+
+def line(state, name, metrics, text):
+    return '%d "luk %s" %s %s' % (state, name, metrics or "-", text)
+
+
+def check_entry(e, exp, now):
+    name = "%s %s" % (clean_name(e.get("pipeline", "")), clean_name(e.get("sender", "")))
+    metrics = []
+    texts = []
+    state = OK
+    warn = crit = msize = None
+    if exp:
+        _, _, warn, crit, msize = exp
+    try:
+        succ = parse_time(e.get("last_success"))
+    except ValueError as ex:
+        return line(UNKNOWN, name, "", "last_success: %s" % clean_text(ex, 100))
+    age = None
+    if succ is not None:
+        age = max(0, int((now - succ).total_seconds()))
+        m = "age=%d;%s;%s" % (age, "" if warn is None else warn, "" if crit is None else crit)
+        metrics.append(m.rstrip(";") if warn is None and crit is None else m)
+        texts.append("last success %s ago" % fmt_age(age))
+    else:
+        texts.append("no success yet")
+    size = e.get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        size = None
+    if size is not None:
+        metrics.append("size=%d%s" % (size, "" if msize is None else ";%d" % msize))
+    failed = e.get("failed")
+    if isinstance(failed, bool) or not isinstance(failed, int) or failed < 0:
+        failed = None
+    if failed is not None:
+        metrics.append("failed=%d;;1" % failed)
+
+    if failed:
+        err = clean_text(e.get("error") or "no error recorded", 200)
+        state = CRIT
+        texts.append("%d failed upload(s) in queue, last error: %s; "
+                     "see lukd queue ls / rm / retry" % (failed, err))
+    if exp:
+        if age is None:
+            state = CRIT
+            texts.append("never succeeded")
+        elif crit is not None and age > crit:
+            state = CRIT
+            texts.append("older than crit_age %s" % fmt_age(crit))
+        elif warn is not None and age > warn:
+            state = max(state, WARN)
+            texts.append("older than warn_age %s" % fmt_age(warn))
+        if msize is not None and size is not None and size < msize:
+            state = max(state, WARN)
+            texts.append("last size %s below min_size %s" % (fmt_size(size), fmt_size(msize)))
+    return line(state, name, "|".join(metrics), "; ".join(texts))
+
+
+def run(env):
+    status_path = env.get("LUK_STATUS", DEFAULT_STATUS)
+    conf_path = env.get("LUK_CHECK_CONF", DEFAULT_CONF)
+    now = datetime.now(timezone.utc)
+    if env.get("LUK_CHECK_NOW"):
+        now = parse_time(env["LUK_CHECK_NOW"])
+
+    def unknown(text):
+        return [line(UNKNOWN, "status", "", text)]
+
+    try:
+        exps = load_conf(conf_path)
+    except ConfError as ex:
+        return unknown("check.conf: %s" % clean_text(ex, 200))
+    if not os.path.exists(status_path):
+        return unknown("status.json missing")
+    try:
+        with open(status_path, encoding="utf-8") as f:
+            entries = json.load(f)
+    except (OSError, ValueError) as ex:
+        return unknown("status.json unreadable: %s" % clean_text(ex, 200))
+    if not isinstance(entries, list) or not all(isinstance(x, dict) for x in entries):
+        return unknown("status.json invalid: expected an array of objects")
+
+    out = []
+    used = set()
+    for e in entries:
+        pipeline, sender = str(e.get("pipeline", "")), str(e.get("sender", ""))
+        exp = None
+        for i, x in enumerate(exps):
+            if x[0] == pipeline and fnmatch.fnmatchcase(sender, x[1]):
+                used.add(i)
+                exp = exp or x
+        out.append(check_entry(e, exp, now))
+    for i, x in enumerate(exps):
+        if i not in used:
+            out.append(line(CRIT, "%s %s" % (clean_name(x[0]), clean_name(x[1])), "",
+                            "never received"))
+    return out
+
+
+def main():
+    print("\n".join(run(os.environ)))
+
+
+if __name__ == "__main__":
+    main()

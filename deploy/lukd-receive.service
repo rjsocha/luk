@@ -1,0 +1,44 @@
+[Unit]
+Description=luk server, receive role (listeners, queue writes, downloads)
+After=network-online.target
+Wants=network-online.target
+# Started, stopped, restarted and reloaded with lukd.service, which also
+# runs lukd-process.service.
+PartOf=lukd.service
+ReloadPropagatedFrom=lukd.service
+
+[Service]
+User=luk
+Group=luk
+ExecStart=/usr/bin/lukd receive
+# systemctl reload lukd-receive: the configuration is checked first, so an
+# invalid one or a change of root, listen, limits.conn/header or
+# auth.nonces (they need a restart) fails the reload visibly; lukd then
+# reloads it on SIGHUP and re-reads the TLS certificates and keys.
+ExecReload=/usr/bin/lukd check
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+# Ports 80 and 443 of tls mode acme and acme: true listeners. Acme also
+# needs outbound HTTPS to the CA directory: keep IPAddressDeny= and
+# RestrictAddressFamilies= out of this unit (or allow AF_INET/AF_INET6).
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+# /var/lib/luk is shared with lukd-process.service and created by
+# tmpfiles.d (deploy/luk.tmpfiles.conf), not by StateDirectory.
+# Storage bases outside /var/lib/luk need their base directory owned by luk
+# and an extra ReadWritePaths in a drop-in of both units
+# (systemctl edit lukd-receive, systemctl edit lukd-process).
+ReadWritePaths=/var/lib/luk
+# Volatile secrets (endpoint secret) on the tmpfs; "-": absent is fine.
+ReadWritePaths=-/run/luk/volatile
+# Nonce cache (auth.nonces) on the tmpfs; absent keeps it in memory only.
+ReadWritePaths=-/run/luk/nonces
+# The receive role never runs jobs: no access to the lukd run socket.
+InaccessiblePaths=-/run/luk/run.sock
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=lukd.service

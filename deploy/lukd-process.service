@@ -1,0 +1,70 @@
+[Unit]
+Description=luk server, process role (pipelines, status, storage maintenance)
+After=network-online.target
+Wants=network-online.target
+# Started, stopped, restarted and reloaded with lukd.service, which also
+# runs lukd-receive.service.
+PartOf=lukd.service
+ReloadPropagatedFrom=lukd.service
+
+[Service]
+User=luk
+Group=luk
+ExecStart=/usr/bin/lukd process
+# systemctl reload lukd-process: the configuration is checked first, so an
+# invalid one or a change of root, listen, limits.conn/header or
+# auth.nonces (they need a restart) fails the reload visibly; lukd then
+# reloads it on SIGHUP.
+ExecReload=/usr/bin/lukd check
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+# SIGTERM to lukd only: it kills its run step process groups and leaves
+# their uploads queued; systemd kills what is left after the stop timeout.
+KillMode=mixed
+# No listener and no capability.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+# /var/lib/luk is shared with lukd-receive.service and created by
+# tmpfiles.d (deploy/luk.tmpfiles.conf), not by StateDirectory.
+ReadWritePaths=/var/lib/luk
+# Volatile secrets (endpoint secret) on the tmpfs; "-": absent is fine.
+ReadWritePaths=-/run/luk/volatile
+ProtectHome=read-only
+PrivateTmp=yes
+# The keys of the receive role stay out of reach of this role and of its
+# run programs, which share the user luk: the TLS and ACME keys and the
+# nonce cache are hidden ("-": absent is fine). A root other than
+# /var/lib/luk or tls files elsewhere need their paths in a drop-in.
+InaccessiblePaths=-/var/lib/luk/tls -/var/lib/luk/acme -/run/luk/nonces
+# No ptrace or process_vm_readv, and an own PID namespace: the memory of
+# lukd receive cannot be read from here.
+SystemCallFilter=~@debug
+PrivatePIDs=yes
+# Drop-ins (systemctl edit lukd-process) grant run programs more:
+#
+#   # docker.conf: a run program that starts a container
+#   [Service]
+#   SupplementaryGroups=docker
+#
+#   # storage.conf: a storage base (also in lukd-receive) or a place a run
+#   # program writes to, outside /var/lib/luk
+#   [Service]
+#   ReadWritePaths=/storage
+#
+#   # gpg.conf: a GPG home a run program encrypts or signs with; gpg writes
+#   # lock files and the trustdb there
+#   [Service]
+#   ReadWritePaths=/home/backup/.gnupg
+#
+#   # lukd run: a run program runs an admin-allowlisted job as another user
+#   # with luk-job run. Nothing to grant: ProtectSystem=strict keeps
+#   # /run/luk/run.sock reachable (a connect is not a write to the file
+#   # system); the socket mode (root:luk 0660) is the gate.
+#
+#   # read.conf: read-only access to a path hidden from the service
+#   [Service]
+#   BindReadOnlyPaths=/etc/site/backup/keys
+
+[Install]
+WantedBy=lukd.service

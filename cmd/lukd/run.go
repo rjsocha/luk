@@ -1,0 +1,118 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"net"
+	"os"
+	"slices"
+	"strings"
+	"syscall"
+
+	"github.com/spf13/cobra"
+
+	"luk/internal/config"
+	"luk/internal/rund"
+)
+
+// runJobs is the run.d of lukd run that lukd check compares relay steps
+// with.
+var runJobs = rund.DefaultJobs
+
+func runCmd() *cobra.Command {
+	var jobs string
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Run one allowlisted job as its user (lukd-run@.service)",
+		Long: "Serve one connection of lukd-run.socket on stdin: check that the peer is\n" +
+			"the luk user, read the request, run the job of " + rund.DefaultJobs + "/<job>.yaml\n" +
+			"on the peer's work directory with systemd-run and stream its output back.\n" +
+			"Runs as root. --config defaults to " + rund.DefaultConfig + " here.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg := rund.DefaultConfig
+			if f := cmd.Flags().Lookup("config"); f != nil && f.Changed {
+				cfg = f.Value.String()
+			}
+			return serveRun(cfg, jobs)
+		},
+	}
+	cmd.Flags().StringVar(&jobs, "jobs", rund.DefaultJobs, "directory of the job files")
+	return cmd
+}
+
+func serveRun(cfg, jobs string) error {
+	if os.Geteuid() != 0 {
+		return errors.New("lukd run must run as root")
+	}
+	c, err := net.FileConn(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("stdin is not a socket: %w", err)
+	}
+	defer c.Close()
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return errors.New("stdin is not a unix socket")
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	srv := &rund.Server{
+		Config:  cfg,
+		Jobs:    jobs,
+		Locks:   rund.DefaultLocks,
+		Owner:   0,
+		PeerUID: func() (uint32, error) { return peerUID(uc) },
+		Runner:  rund.Systemd{},
+		Log:     log,
+	}
+	if err := srv.Serve(uc); err != nil {
+		log.Error("lukd run", "err", err)
+		return err
+	}
+	return nil
+}
+
+func peerUID(c *net.UnixConn) (uint32, error) {
+	raw, err := c.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var cred *syscall.Ucred
+	var cerr error
+	err = raw.Control(func(fd uintptr) {
+		cred, cerr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	})
+	if err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return 0, err
+	}
+	return cred.Uid, nil
+}
+
+// relayWarnings names the relay steps of cfg whose job has no file in dir,
+// the run.d of lukd run. dir is root's and changes without a reload, so it
+// is never required: an unreadable dir gives no warning.
+func relayWarnings(cfg *config.Config, dir string) []string {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, e := range ents {
+		if !rund.Ignored(e.Name()) {
+			have[strings.TrimSuffix(e.Name(), rund.JobExt)] = true
+		}
+	}
+	var w []string
+	for _, pn := range slices.Sorted(maps.Keys(cfg.Pipeline)) {
+		for i, s := range cfg.Pipeline[pn].Steps {
+			if s.Relay != "" && !have[s.Relay] {
+				w = append(w, fmt.Sprintf("pipeline %s: step %d: relay job %s has no file in %s", pn, i+1, s.Relay, dir))
+			}
+		}
+	}
+	return w
+}

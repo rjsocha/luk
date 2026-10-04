@@ -1,0 +1,253 @@
+root: /var/lib/luk
+
+listen:
+  intake:                       # uploads, pinned luk clients
+    addr: 0.0.0.0:8443
+    host: [lukd.vm]
+    tls:
+      mode: self
+      cert: tls/tls.crt
+      key: tls/tls.key
+      host: lukd.vm
+      algorithm: ed25519        # the default
+  download:                     # browsers: ecdsa-p256
+    addr: 0.0.0.0:443
+    host: [drop.lukd.vm, publish.lukd.vm]
+    tls:
+      mode: self
+      algorithm: ecdsa-p256
+      cert: tls/download.crt
+      key: tls/download.key
+      host: drop.lukd.vm
+  # secure:                     # private files (luk send --private), fetched by luk get
+  #   addr: 0.0.0.0:8444
+  #   host: [secure.lukd.vm]
+  #   tls:                        # self or files: the luk:// URLs carry the pin
+  #     mode: self
+  #     cert: tls/secure.crt
+  #     key: tls/secure.key
+  #     host: secure.lukd.vm
+  # proxied:                    # plain HTTP behind a reverse proxy
+  #   addr: 127.0.0.1:8081
+  #   host: [drop.example.com]
+  #   public: https://drop.example.com
+  # web:                        # browsers: a Let's Encrypt certificate (HTTP-01)
+  #   addr: 0.0.0.0:443
+  #   host: [drop.example.com]    # the certificate names; no wildcard, no IP
+  #   tls:
+  #     mode: acme
+  #     email: ops@example.com    # optional
+  #     # Tests: https://acme-staging-v02.api.letsencrypt.org/directory
+  #     directory: https://acme-v02.api.letsencrypt.org/directory   # the default
+  #     # eab: {kid: KEY_ID, key_file: /etc/site/lukd/eab.key}       # CAs that need it; or key: inline
+  # http:                         # needed by acme: challenges, 308 to https
+  #   addr: 0.0.0.0:80
+  #   acme: true
+
+# Defaults, shown for reference.
+limits:
+  conn:
+    max: 1024
+    idle: 60s
+  header:
+    timeout: 10s
+  queue:
+    reserve: 1G
+  failed:
+    age: 3d
+
+log:
+  level: info                   # debug, info, warn, error; SIGHUP applies a change
+
+# Any part of this file can also live in config.d/*.yaml next to it:
+# named entries (listen, endpoint, pipeline, storage, expose, auth.keys,
+# auth.ca) merge by name, other values are set in one file only.
+#
+# Plain keys can also live in ssh.d/<name>.pub next to it, one key per
+# line (deploy/ssh.d/robert.socha.pub.example); a name is defined either
+# here or in ssh.d. CA keys can live in ssh.d/ca/host/<name>.pub and
+# ssh.d/ca/user/<name>.pub, one key per line (rotation)
+# (deploy/ssh.d/ca/host/hosts.pub.example); an auth.ca entry with
+# name and revoked but no key holds the revocations of such a CA.
+auth:
+  clock_skew: 1m                 # default 1m, at most 1h
+  nonces: /run/luk/nonces        # nonce cache directory on a tmpfs (default)
+  keys:
+    - name: robert.socha
+      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
+  ca:
+    - name: hosts
+      type: host
+      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n example-ca"
+
+endpoint:
+  backup:
+    listen: intake
+    endpoint: /backup
+    path: queue/backup
+    allow: [robert.socha, "hosts:*"]
+    respond: accept
+    limits:
+      body:
+        size: 50G
+        idle: 2m
+    # quota:                    # a token bucket per identity (key, or CA + Key ID); lukd quota ls / explain
+    #   mode: passive           # enforce (default) or passive: account and log, never refuse
+    #   rate: 10G/1d            # refill rate of the catch-all: <size>/<duration>
+    #   burst: 50G              # capacity, the largest single upload; default the size of rate
+    #   class:                  # optional; of several matching classes the lowest applies
+    #     - name: large
+    #       members: ["hosts#db*.example.org", robert.socha]   # allow syntax; <ca>#<glob> matches the Key ID
+    #       rate: 50G/1d
+    #       burst: 100G
+  drop:
+    listen: intake
+    endpoint: /drop
+    path: queue/drop
+    allow: [robert.socha]
+    respond: url
+    storage: drop
+    limits:
+      body:
+        size: 2G
+    # pretty:                   # allow luk send --pretty-url (proquint .Random)
+    #   bits: 64                # 64 to 128, rounded up to a multiple of 16; default 64
+    link:                       # what the owner may do with a link (luk link); respond url only
+      remove: true              # luk link --rm
+      ttl: true                 # luk link --ttl (the storage needs ttl.user)
+      replace: false            # luk link --file/--stdin, for uploads sent with --mutable
+      list: true                # luk link ls: the links of the caller on this endpoint
+    # private:                  # private uploads; the storage needs protect
+    #   owner: true             # luk send --private: only the uploader downloads it
+    #   any: true               # luk send --private --any: every identity the protect expose allows
+    # secret:                   # luk send --secret kept in RAM: its own queue and storage,
+    #                           # no pipeline of the endpoint runs for it
+    #   path: /run/luk/volatile/queue
+    #   storage: volatile
+    #   reserve: 16M            # free space kept on the tmpfs (default 16M), in place of limits.queue.reserve
+
+pipeline:
+  archive:
+    endpoint: [backup]
+    tags: [prod]
+    queue:
+      group: backup             # pipelines of one upload in the same group run in order
+      order: 1
+    steps:
+      - store: archive
+  devdb:
+    endpoint: [backup]
+    tags: [prod, devdump]
+    timeout: 2h
+    queue:
+      group: backup
+      order: 2                  # starts once archive succeeded for the upload
+      concurrency: 1            # at most this many devdb runs at once (all uploads; default 1)
+    steps:
+      - store: archive
+      - run: /opt/luk/dbdump
+      - store: publish
+  secure:
+    endpoint: [backup]
+    tags: [secure]
+    steps:
+      - run: /opt/luk/gpg-encrypt
+        env:
+          RECIPIENTS: "robert@example.net"
+      - store: archive
+  # s3copy:
+  #   endpoint: [backup]
+  #   steps:
+  #     - run: /opt/luk/s3copy
+  #       tee: true             # only consumes the set: out/ stays empty, the next step gets the same files
+  #     - store: archive
+  # s3upload:
+  #   endpoint: [backup]
+  #   steps:
+  #     - relay: s3-upload        # lukd run runs job s3-upload (/etc/site/lukd/run.d/s3-upload.yaml) on the set; the next step gets the same files
+  #     - store: archive
+  # sealed:                     # the built-in encrypt step (needs gpg below)
+  #   endpoint: [backup]
+  #   steps:
+  #     - encrypt:
+  #         wkd: [robert@example.net]     # keys from the Web Key Directory
+  #         key: [matt@example.com]       # keys from gpg.keys
+  #         strict: false                 # true: any unusable recipient fails
+  #     - store: archive
+  drop:
+    endpoint: [drop]
+    steps:
+      - store: drop
+
+storage:
+  archive:
+    type: local
+    base: storage/archive
+    path: "{{ .Sender }}/{{ .Year }}/{{ .Month }}/{{ .Day }}/{{ .File }}"
+    ttl:
+      max: 21d                  # fixed lifetime: the client ttl is ignored
+  publish:
+    type: local
+    base: storage/publish
+    path: "{{ .File }}"
+    expose: publish
+    cleanup:
+      age: 14d                  # files without an expiry go after 14 days
+  drop:
+    type: local
+    base: storage/drop
+    path: "{{ .Random }}"
+    expose: drop
+    # protect: secure           # the expose (auth.ssh) of the private files
+    shard: 2
+    # hardlink: true            # one copy per content: uploads with the same sha256
+    #                           # are hardlinks of one object (default); false
+    #                           # stores separate files
+    # links:
+    #   max: 100                # most names with one content per identity
+    #                           # (default 100; with hardlink only), 429 above it
+    ttl:
+      user: true                # the client ttl counts, clamped to min and max
+      min: 1h
+      max: 7d                   # also the lifetime without a client ttl
+    # random:                   # .Random characters (default 32 characters, no look-alikes)
+    #   alphabet: "abcdefghjkmnpqrstuvwxyz23456789"
+    #   length: 26              # default: the shortest with 128 bits
+  # volatile:                   # the secrets of endpoint drop, on the tmpfs /run
+  #   type: local
+  #   base: /run/luk/volatile/storage
+  #   path: "{{ .Random }}"
+  #   expose: volatile
+  #   ttl: {user: true, min: 1h, max: 7d}
+
+expose:
+  drop:
+    listen: download            # [download, proxied] with the proxied listener
+    path: /d/
+    # plain: true               # no auth on purpose: silences the catalog and index warnings
+    # index: true               # HTML listing of the directory URLs (public files only;
+    #                           # not with shard on the storage)
+  publish:
+    listen: download
+    path: /magento/
+    auth:
+      basic:
+        # Example only (user dev, password dev); generate your own with
+        # htpasswd -nbB <user> <password>.
+        - 'dev:$2y$05$TpFzQdt1oY6UgSKCZGgt8eCbBXDAuiQxNl13XDuDnYKUSuIC9O79W'
+  # volatile:                   # nested in /d/ of drop: the longest path wins, and
+  #   listen: download          # drop never stores a name under volatile/
+  #   path: /d/volatile/
+  # secure:                     # the private files of drop: signed luk get requests only
+  #   listen: secure
+  #   path: /
+  #   auth:
+  #     ssh:
+  #       allow: ["*"]          # who gets "any" files: * is every identity lukd knows;
+  #                             # names and <ca>:<glob> as in an endpoint allow
+
+# Keys of encrypt steps.
+# gpg:
+#   keys: /etc/site/lukd/gpg.d   # the default; *.asc, *.gpg, *.pgp, *.key public keys of `key` recipients
+#   wkd:
+#     cache: 1d                 # WKD keys cached in <root>/gpg-cache (default 1d)

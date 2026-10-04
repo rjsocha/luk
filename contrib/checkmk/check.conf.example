@@ -1,0 +1,13 @@
+# /etc/site/luk/check.conf - thresholds for the luk_status local check.
+# Durations: s/m/h/d. Sizes: K/M/G/T (1024), case-insensitive.
+
+[defaults]
+# applied to every expectation section
+warn_age = 26h
+crit_age = 50h
+
+# section = "<pipeline> <sender pattern>", pattern is fnmatch on the sender
+[devdb replica.aws.example.net]
+warn_age = 26h
+crit_age = 50h
+min_size = 300M
