@@ -37,7 +37,8 @@ luk PUT --> lukd ingest --> queue --> pipeline(s) --> storage --> expose --> GET
   the files (TTL, retention). Optionally exposed.
 - **expose** - HTTP download of a storage, optional auth, `--once`,
   portal mode; an expose with `auth.ssh` serves the private files of a
-  storage to signed requests (see Private files).
+  storage to signed requests (see Private files), or, as the `expose` of
+  a storage, its public files and a signed listing (see Signed expose).
 
 ## Authentication
 
@@ -484,7 +485,9 @@ Set per endpoint:
   pipeline finishes; `GET` answers 404 until the file is
   published. `storage` names the exposed storage the URL points to. A
   private upload (`access`) gets the `luk://` URL of the protect expose
-  of that storage instead (see Private files).
+  of that storage instead (see Private files); a public upload to a
+  storage whose `expose` has `auth.ssh` the `luk://` URL of that expose
+  (see Signed expose).
 
 Both answers carry `"deduplicated": true` when the server took the
 content from what it holds for the sender instead of reading the body
@@ -922,7 +925,8 @@ expose:
   (private.owner|any)`), also when the list names others.
 - `storage.<n>.protect` (local storages only): the expose that serves the
   private files of the storage. That expose must have `auth.ssh`, must
-  differ from the storage `expose`, and serves no other storage (an
+  differ from the storage `expose` (which may have `auth.ssh` too, see
+  Signed expose), and serves no other storage (an
   expose belongs to one storage, as `expose` or as `protect`). The
   public URL of its first listener must be `https` (`luk://` means
   https).
@@ -932,7 +936,8 @@ expose:
   expose without auth.
 - `expose.<n>.index: true`: the directory URLs of the expose answer an
   HTML listing (see Expose). It excludes `auth.ssh` (that expose serves
-  only signed GETs); with `auth.basic` the listing is behind the
+  only signed GETs; as a storage `expose` it answers the signed listing
+  instead, see Signed expose); with `auth.basic` the listing is behind the
   password. Its storage has no `shard` (`storage <s>: shard on expose
   <n> with index` is a config error): the URLs of a sharded storage are
   flat while its files lie in hash directories, so a listing would read
@@ -940,11 +945,12 @@ expose:
   every link. Without `auth` and without `plain` `lukd check` warns
   `expose <n>: index without auth lists every stored name`.
 - `expose.<n>.auth.ssh.allow`: the expose serves only signed `luk-get@v1`
-  requests (below), and only private files. `allow` takes the entries of
+  requests (below): named in `protect`, only private files; as the
+  `expose` of a storage, only its public files (see Signed expose).
+  `allow` takes the entries of
   an endpoint `allow` (key names, `<ca>:<glob>`, `*`, see Identities) and
   may be empty. `auth.ssh` and `auth.basic` exclude each other on one
-  expose. An expose with `auth.ssh` cannot be the `expose` of a storage
-  (it would serve nothing): it is named in `protect`.
+  expose.
 - Who gets a file: a file of access `private` its owner only (the
   identity whose `owner_key` the sidecar holds: any key of a plain-key
   identity, or a certificate of the same CA and Key ID, as for Links);
@@ -954,8 +960,8 @@ expose:
   arrives (a reload applies to the next request).
 - A public expose (without `auth.ssh`) never serves a private file: 404,
   even with the exact name, and also through an alias (an alias has the
-  sidecar of its target). An expose with `auth.ssh` never serves a public
-  file (404), nor the catalog. Private files are never listed in the
+  sidecar of its target). A protect expose never serves a public file
+  (404), and no expose with `auth.ssh` serves the catalog. Private files are never listed in the
   catalog, never the target of an alias and never deduplicated by
   `dedup` (their space is shared through `hardlink` like any file's).
 - The storage keeps the mode for every copy: a private upload stored into
@@ -998,8 +1004,12 @@ luk-get@v1
 ```
 
 `<METHOD>` is `GET` or `HEAD` as sent. `<request path>` is the path as
-requested, escaped as on the request line (`/a%20b/x7Kq`, without the
-query). Byte for byte, a `GET` of `/x7Kq` on `secure.vm:8443` is (`\n`
+requested, escaped as on the request line (`/a%20b/x7Kq`), followed,
+when the request has a query, by `?` and the query as sent
+(`/v/2026/?recursive=1`); a request without a query signs its path
+alone, so the text of a file download is the same as before queries
+were covered. The query is part of what is signed: a captured signature
+of `/v/` never verifies for `/v/?recursive=1`. Byte for byte, a `GET` of `/x7Kq` on `secure.vm:8443` is (`\n`
 being the byte 0x0a):
 
 ```
@@ -1033,6 +1043,91 @@ Answers on an expose with `auth.ssh`:
 
 `GET` and `HEAD` are the only methods (`405` with `Allow: GET, HEAD`
 otherwise, decided by the path as on every listener without endpoints).
+
+### Signed expose
+
+An expose with `auth.ssh` may also be the `expose` of a storage: it then
+serves the public files of that storage to signed `luk-get@v1` requests
+of the identities its `allow` admits, and answers a signed listing of
+its directories. The private files of the storage stay with its
+`protect` (an expose with `auth.ssh` of its own, or none); the same
+expose is never both.
+
+```yaml
+storage:
+  backups:
+    type: local
+    base: /storage/backups
+    path: "{{ .Sender }}/{{ .Year }}/{{ .File }}"
+    expose: vault                      # every file, to signed requests
+    # protect: secure                  # private files, as before
+
+expose:
+  vault:
+    listen: secure                     # its first listener has an https public URL
+    path: /v/
+    auth:
+      ssh:
+        allow: [robert.socha, "hosts:*"]
+```
+
+- Configuration: the first listener of the expose needs an `https`
+  public URL, as for `protect` (`luk://` URLs mean https); `index` stays
+  refused (`expose <n>: index excludes auth.ssh`): the signed listing
+  below is the listing of such an expose. A `catalog` on its storage is
+  not served (no `lukd check` warning either).
+- Files: the expose serves exactly what a public expose of the storage
+  would serve (not expired, not claimed, not private, not a reserved
+  name, not under a nested expose), to an identity its `allow` admits.
+  Private files (`access`) are 404 there; they belong to `protect`.
+- Answers: as for a private file (Wire format): no signature 404; a bad
+  signature or an unknown key 401; an identity not in `allow`, or a
+  missing, expired, claimed or private file 404, the same answer in
+  every case. Downloads carry the headers of a direct download plus
+  `Luk-Expires` and `Luk-Once`, and are logged as `signed download`.
+- Portal uploads (`reveal`, `download`) have no landing page there: the
+  file URL answers the stored content as a direct download (download
+  headers, `Range`), and the action URLs (`<name>/reveal`,
+  `<name>/download`, `<name>/get`) do not exist (404; `POST` is 405).
+- `once` files are claimed by the signed `GET` as by a direct download
+  on any expose (`HEAD` never claims); the signed listing never lists
+  them, so a directory download never claims one.
+- URLs: the upload answer, `luk link ls` and `lukd storage ls` give a
+  public file of such a storage the `luk://` URL of the expose (with the
+  pin of a `self` or `files` certificate), as for a private file.
+
+Signed listing: a signed `GET` (or `HEAD`) of a directory URL (the
+expose path, or `<path><dir>/`, ending with a slash) answers the
+directory as JSON (`Content-Type: application/json`, `Cache-Control:
+no-store`), logged as `signed listing` with the sender and the count:
+
+```json
+[{"name":"2026/","dir":true},{"name":"db.sql.gz","size":1048576,"received":"2026-10-03T10:00:00Z","sha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}]
+```
+
+- One level by default: the directories (`name` ending with `/`,
+  `"dir": true`), then the files (`size` in bytes, `received` RFC 3339
+  in UTC, `sha256`), each sorted by name ignoring case as the HTML index
+  (Expose).
+- `?recursive=1` answers every file below the directory instead, with
+  names relative to it (`2026/10/db.sql.gz`), no directory entries,
+  sorted by that name ignoring case. Any other query is 400. The query
+  is signed (Wire format).
+- Listed: the files of the HTML index the expose serves to the signer:
+  never `once`, portal or private uploads, expired or claimed files,
+  files without a sidecar, symlinks, the catalog or the directories of
+  nested exposes. A directory is listed when it holds a listed file at
+  any depth.
+- 404: a directory with nothing listed (missing, empty, only unlisted
+  files), every listing for an identity not in `allow`, and every
+  listing of a storage with `shard` (its names are flat while its files
+  lie in hash directories); the expose root answers `[]` when it holds
+  nothing. A directory URL without its slash is a file name (404 for a
+  directory). The protect expose has no listing.
+- Cost: a one-level listing reads the sidecars of the files of the
+  directory and walks each subdirectory until a listed file is found; a
+  recursive listing reads every sidecar below the directory. Each is
+  built from the disk on every request.
 
 ## Endpoint listing
 
@@ -1508,8 +1603,9 @@ and `ssh.d/ca/`):
 - a non-empty `private.*` list requires `respond: url` and a respond
   storage with `protect`;
   `protect` names an expose with `auth.ssh` other than the storage
-  `expose`, on a local storage, whose first listener has an `https`
-  public URL; an expose with `auth.ssh` is no storage `expose`;
+  `expose`, on a local storage; every expose with `auth.ssh` that serves
+  a storage (as `protect` or as `expose`) has a first listener with an
+  `https` public URL;
   `auth.ssh` and `auth.basic` exclude each other; `auth.ssh.allow`
   entries are those of an endpoint `allow`;
 - `pretty` requires `respond: url` and a respond storage `path` (and a
@@ -2203,7 +2299,8 @@ pipeline:
   content objects, crash leftovers, empty directories) in the process
   role (see Service).
 - `protect` (local only) - the expose with `auth.ssh` that serves the
-  private files of the storage (see Private files).
+  private files of the storage (see Private files). The `expose` itself
+  may have `auth.ssh` too (see Signed expose).
 - `s3` - bucket + prefix template. Not implemented yet: the type is
   accepted, but a `store` step to an s3 storage is a config error
   (`pipeline <p>: step <n>: storage <s>: s3 storage is not implemented
@@ -2397,8 +2494,9 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   `shared` when other names hold the same content as hardlinks: other
   uploads through `hardlink`, versions, aliases, claimed copies), and
   `URL` (the expose URL of the name; for a private file the `luk://` URL
-  of the protect expose, with the pin when the certificate file is
-  readable) when the storage has an `expose` or a `protect`; `-` for an
+  of the protect expose, and for a file of an `expose` with `auth.ssh`
+  the `luk://` URL of that expose, with the pin when the certificate
+  file is readable) when the storage has an `expose` or a `protect`; `-` for an
   empty value. Aliases
   and claimed files are not listed. `--owner` keeps the files whose
   `owner_key` is the identity: a key name (`robert.socha` for
@@ -3470,11 +3568,17 @@ luk send [flags]      (aliases: put, push)
                             URL); the upload id is in --json
 
 luk get URL (-o|--output FILE [--force] [--inplace] | -c|--stdout | --head [--json])
-        [-k|--key PATH|SHA256:FP] [--progress] [--bwlimit RATE]
+        [-k|--key PATH|SHA256:FP] [--progress] [--bwlimit RATE] [-q]
                                  download a private file (see Private
-                                 files) with a signed request (luk-get@v1);
+                                 files), or a file of a signed expose,
+                                 with a signed request (luk-get@v1);
                                  --head prints what the server announces
                                  without downloading
+luk get URL/ [-r] [--json] | URL/ -o DIR/ [--force] [-q]
+        [-k|--key PATH|SHA256:FP] [--progress] [--bwlimit RATE]
+                                 list a directory of a signed expose (see
+                                 Signed expose), or download every file
+                                 below it into DIR
 
 luk link URL (--rm | --ttl DURATION|max | -f|--file PATH | --stdin)
          [-e|--endpoint NAME|URL] [-k|--key PATH|SHA256:FP] [--json]
@@ -3628,6 +3732,73 @@ sent.
 
 Exit codes those of `send`: a file that is not there or not the signer's
 is a 404 (exit 2), an unknown key or a bad signature a 401 (exit 2).
+`-q`/`--quiet` leaves out the FILE line of a download.
+
+A URL whose path ends with a slash names a directory (the rsync
+convention), served by a signed expose (see Signed expose); a URL
+without it is a file, as above. `luk get URL/` without `-o` sends a
+signed listing and prints it as columns `NAME`, `SIZE` (`512 B`,
+`1.5 MiB`), `RECEIVED` (local time, to the minute) and `SHA256` (the
+first 12 characters), `-` for what a directory has not; nothing for an
+empty directory. `-r` asks for the recursive listing (every file below,
+relative names); `--json` prints the entries as a JSON array (`name`,
+`dir`, `size`, `received`, `sha256` in full), as the server sent them.
+Names are escaped as every server text is (see Client).
+
+```
+$ luk get luk://secure.box.example.com/v/
+NAME       SIZE     RECEIVED          SHA256
+2026/      -        -                 -
+db.sql.gz  1.0 MiB  2026-10-03 12:00  9f86d081884c
+```
+
+`luk get URL/ -o DIR/` downloads every file of the recursive listing
+into DIR, which must end with a slash or be an existing directory (an
+existing non-directory, or a missing path without the slash, is a usage
+error); a missing DIR is created (mode 0777 less the umask, as are its
+subdirectories). Before anything is written every name of the listing
+is checked: relative, valid UTF-8, without empty, `.` or `..` elements
+and without the characters the text output escapes (control characters
+among them), and no name twice; one unsafe name stops the run (`unsafe
+name "../x" in the listing: path element ..; nothing downloaded`, exit
+3). Then, per file, in the order of the listing:
+
+- the subdirectories are created inside DIR; an element that exists as
+  anything but a directory (a symlink to a directory too) fails the
+  file: no symlink inside DIR is ever followed (DIR itself may be one);
+- a regular file already there is hashed: the same sha256 as the
+  listing is `skip NAME`; a different one fails the file (`exists and
+  differs; pass --force to overwrite it`) unless `--force`; a symlink,
+  directory, device or FIFO there fails the file even with `--force`;
+- the file is fetched with its own signed `GET` (the directory URL plus
+  the name, each element escaped) through the safe path of a single
+  download: a temporary file `.<name>.luk-*` next to it, sha256 checked
+  against the `ETag`, synced, then renamed over the old file with
+  `--force` or hard-linked without; `get NAME` on success. `--progress`
+  and `--bwlimit` apply to each file.
+
+A failed file is reported on stderr (`luk: NAME: <error>`) and the run
+goes on with the others; Ctrl-C ends it at once (exit 130). At the end
+a summary goes to stdout: `3 downloaded, 2 skipped, 1.2 MiB` (with `, N
+failed` before the size when any failed). `-q` prints only errors. When
+any file failed, the last line on stderr is `luk: N of M files failed`
+and the exit code is that of the first failure (2 for a 404, 3 for a
+transfer, 4 for a sha256 mismatch, 1 for a local conflict). `-c`/`-o -`,
+`--inplace` and `--head` with a directory URL are usage errors, as are
+`--json` with `-o`, `--force`, `--progress` or `--bwlimit` without
+`-o`, and `-r` with a file URL. A second run of the same command
+downloads only what changed.
+
+```
+$ luk get luk://secure.box.example.com/v/ -o backups/
+get 2026/10/db.sql.gz
+get db.sql.gz
+2 downloaded, 0 skipped, 2.0 MiB
+$ luk get luk://secure.box.example.com/v/ -o backups/
+skip 2026/10/db.sql.gz
+skip db.sql.gz
+0 downloaded, 2 skipped, 0 B
+```
 
 `luk link ls` sends a link `list` request to `--endpoint`, else to the
 default endpoint (none: `no endpoint: pass --endpoint or set default in
@@ -3944,7 +4115,8 @@ alias:
   body byte). `luk get` counts the bytes received of the Content-Length.
 - Text from the server that `luk` prints as text (error messages after
   `rejected (...)`, the lines of `luk get --head`, the columns of `luk
-  link ls` and `luk scan`, URLs and expiry times printed on stdout, the
+  link ls`, `luk get URL/` and `luk scan`, the names of a directory
+  download, URLs and expiry times printed on stdout, the
   certificate subject of `luk scan`) has every control character (C0,
   DEL, C1), line and paragraph separator (U+2028, U+2029) and
   bidirectional formatting character replaced by its Go escape (`\n`,

@@ -243,6 +243,12 @@ storage:
     # random:                   # .Random characters (default 32 characters, no look-alikes)
     #   alphabet: "abcdefghjkmnpqrstuvwxyz23456789"
     #   length: 26              # default: the shortest with 128 bits
+  # vault:                      # backups downloaded with luk get (files and directories),
+  #   type: local               # signed by the identities vault allows
+  #   base: storage/vault
+  #   path: "{{ .Sender }}/{{ .Year }}/{{ .File }}"
+  #   expose: vault             # an expose with auth.ssh: every file, signed requests only
+  #   # protect: secure-vault   # private files keep their own auth.ssh expose
   # volatile:                   # the secrets of endpoint drop, on the tmpfs /run
   #   type: local
   #   base: /run/luk/volatile/storage
@@ -275,6 +281,12 @@ expose:
   #     ssh:
   #       allow: ["*"]          # who gets "any" files: * is every identity lukd knows;
   #                             # names and <ca>:<glob> as in an endpoint allow
+  # vault:                      # the storage expose of vault: every public file and a
+  #   listen: secure            # signed JSON listing of the directories (luk get URL/);
+  #   path: /v/                 # no index; the first listener needs an https public URL
+  #   auth:
+  #     ssh:
+  #       allow: [robert.socha, "hosts:*"]
 
 # Keys of encrypt steps.
 # gpg:
