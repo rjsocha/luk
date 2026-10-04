@@ -1471,6 +1471,11 @@ and `ssh.d/ca/`):
   error naming the new place (`expose <n>: ttl moved to
   storage.<storage>.ttl.max`, `cleanup moved to
   storage.<storage>.cleanup.age`);
+- `storage.<n>.retention` needs a local storage; every `origin` glob is
+  non-empty and valid for path.Match; the `keep` counts are not negative
+  and at least one is above 0; a rule without `origin` (every origin) is
+  the last (`storage <n>: retention rule <i> matches every origin and
+  must be the last: the rules after it are unreachable`);
 - `respond: url` requires `storage`, and that storage must be exposed;
 - a storage with `shard` is not the `expose` of an expose with `index`;
 - the capability lists (`link.remove`, `link.ttl`, `link.replace`,
@@ -1559,7 +1564,8 @@ In-flight work keeps the configuration it started with:
   receipt, so a reload of `ttl` applies to new uploads only; stored
   expiries are never recomputed).
 - `cleanup.age` applies from the next expiry pass of the janitor, to the
-  files already stored too.
+  files already stored too; `retention` from the next maintenance pass
+  of the process role, to the files already stored too.
 - A pipeline takes the configuration when it gets its concurrency slot
   and keeps it until it ends, so a running pipeline finishes even when
   the reload removed it, its storage or its endpoint. Queue entries not
@@ -2063,11 +2069,65 @@ pipeline:
 - `cleanup.age` (local only, e.g. `14d`) - the retention of files without
   an expiry: they are removed once their `received` time is older,
   exposed or not (an archive too). Files with an expiry are left to it.
+- `retention` (local only) - rules that keep a number of files per series
+  (grandfather-father-son) and prune the rest:
+
+  ```yaml
+  storage:
+    archive:
+      type: local
+      base: storage/archive
+      path: "{{ .Origin }}/{{ .Year }}/{{ .Month }}/{{ .Day }}/{{ .File }}"
+      retention:
+        - origin: ["db1-prod", "*-prod"]          # globs (path.Match) on the origin
+          keep: {last: 3, daily: 14, weekly: 8, monthly: 12, yearly: 2}
+        - origin: ["*-stage"]
+          keep: {daily: 7}
+        - keep: {daily: 7, weekly: 4}               # no origin: every other origin
+  ```
+
+  - A series is the stored files of one pipeline, origin and file name:
+    the sidecar `pipeline` (the pipeline whose store step stored the
+    file), the sidecar `origin` (the `.Origin` of the upload: its backup
+    hostname when sent with `--backup`, else the sender) and the file name
+    (the name a run step produced, else the client `file`). A sidecar
+    written before these fields has no `pipeline` (an empty one) and
+    takes the backup hostname of its client meta, else the sender, as its
+    origin. Aliases are not files of a series.
+  - The first rule whose `origin` globs match the origin of the series
+    applies; a rule without `origin` matches every origin. A series no
+    rule matches is never pruned by retention.
+  - The time of a file is its sidecar `received` (server time); the
+    buckets are in UTC: the day, the ISO week (`2026-W40`), the month and
+    the year. A file whose `received` cannot be read is kept and takes no
+    place in the counts.
+  - Selection, per series, newest first (by `received`, then by name):
+    `last` keeps the newest `last` files; `daily`, `weekly`, `monthly`
+    and `yearly` each walk the files from the newest and keep the newest
+    file of each distinct bucket until that many buckets are kept (a
+    bucket without files counts for nothing, so gaps reach further
+    back). The kept set is the union; every other file of the series is
+    pruned. Each count is 0 or more and a rule has at least one above 0.
+    The selection depends on the files and the rules only, not on the
+    current time.
+  - Retention works next to `ttl` and `cleanup.age`: a file goes when any
+    of them removes it.
+  - The maintenance of the process role applies the rules (see Service)
+    whenever the base or the rules changed since its last pass: each
+    pruned file is removed as `lukd storage rm` removes it (base lock,
+    sidecar, the alias moved to the next newest declarer, content
+    objects, emptied directories), only while its sidecar still has the
+    id of the plan, so a file replaced meanwhile is kept; claimed `once`
+    files and files being written are not in the data tree and are never
+    pruned. The catalog is rebuilt once after the pass. Each removal is
+    logged at INFO: `retention removed` with `storage`, `name`, `id`,
+    `pipeline`, `origin`, `file` and `rule` (1-based).
+  - `lukd storage retention` shows the plan without changing anything.
 - The janitor covers every local storage, exposed or not: the expiry
   pass (expired files, `cleanup.age`, stale claimed files, every minute)
-  runs in the receive role, the maintenance (aliases, catalog, content
-  objects, crash leftovers, empty directories) in the process role (see
-  Service).
+  runs in the receive role, the maintenance (retention, aliases, catalog,
+  content objects, crash leftovers, empty directories) in the process
+  role (see Service).
 - `protect` (local only) - the expose with `auth.ssh` that serves the
   private files of the storage (see Private files).
 - `s3` - bucket + prefix template. Not implemented yet: the type is
@@ -2127,7 +2187,8 @@ pipeline:
   `<base>/.db/meta/<stored path>.json` - client meta (original `file` name,
   `type`, `ttl`, `once`, `portal`, tags) and server meta (id, sender,
   size, sha256, received, expires, `owner` unless `no_owner`, `owner_key`,
-  `updated` after a replace). Keeping sidecars out of the data tree
+  `pipeline` and `origin` of the store (see `retention`), `updated` after
+  a replace). Keeping sidecars out of the data tree
   means an uploaded `x.json` can never collide with the sidecar of `x`,
   and expose never serves anything under `.db/`. A drop stores the blob
   as `<base>/file/<random>`; two uploads with the same `--name` get two
@@ -2182,7 +2243,7 @@ pipeline:
     `access`, portal and file name of each upload are its own. Unlike
     `dedup`, every upload keeps its own name and sidecar: the space is
     shared, the names are not.
-  - Removal of a name (expiry, `cleanup.age`, `lukd storage rm`, `luk link
+  - Removal of a name (expiry, `cleanup.age`, `retention`, `lukd storage rm`, `luk link
     --rm`, the end of a `once` claim) only unlinks that name and drops it
     from the index; a version rotation moves the old content's name in the
     index to the version. The maintenance removes an object whose only
@@ -2287,6 +2348,33 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   terminal (`[y/N]`), and refuses when stdin is not one. A file replaced
   between the check and the removal is kept. Prints `<name>: removed`
   per file.
+- `lukd storage retention --storage NAME [--json]`: the retention plan
+  (see `retention`), read only. Per series, in order of pipeline, origin
+  and file name, a line naming the series and the rule that applies,
+  then its files newest first as aligned columns `NAME`, `RECEIVED`,
+  `ACTION` (`KEEP` or `PRUNE`) and `REASONS` (`last`, `daily
+  2026-10-04`, `weekly 2026-W40`, `monthly 2026-10`, `yearly 2026`;
+  `no rule` for every file of a series no rule matches, `received
+  unreadable`; `-` for a pruned file). An empty pipeline or origin shows
+  as `-`.
+
+  ```
+  series pipeline=nightly origin=db1-prod file=db.sql: rule 1 (origin db1-prod,*-prod; keep last 1, daily 2)
+    NAME                        RECEIVED              ACTION  REASONS
+    db1-prod/db.sql             2026-10-04T18:00:00Z  KEEP    last, daily 2026-10-04
+    db1-prod/db.sql.1759550400  2026-10-04T06:00:00Z  PRUNE   -
+    db1-prod/db.sql.1759464000  2026-10-03T06:00:00Z  KEEP    daily 2026-10-03
+
+  series pipeline=nightly origin=db1-stage file=db.sql: no rule
+    NAME              RECEIVED              ACTION  REASONS
+    db1-stage/db.sql  2026-10-04T06:00:00Z  KEEP    no rule
+  ```
+
+  `--json` prints an array of the series: `pipeline`, `origin`, `file`,
+  `rule` (1-based, omitted for none), `keep` (the counts of the rule) and
+  `files`, each with `name`, `id`, `received`, `keep` (true or false) and
+  `reasons`. Sidecars that cannot be read are reported after the plan
+  (exit 1).
 
 ## Expose
 
@@ -2755,8 +2843,8 @@ systemctl enable --now lukd
   available); an entry already running is skipped. It runs the pipelines
   (run and store steps), keeps `failed/` and `status.json` (loaded at
   start, results, failed counts) and does the storage maintenance of the
-  janitor (aliases, catalog rebuild, content objects, crash leftovers, old
-  work directories). `SIGHUP` reloads the configuration (see Reload); the
+  janitor (retention, aliases, catalog rebuild, content objects, crash
+  leftovers, old work directories). `SIGHUP` reloads the configuration (see Reload); the
   queue directories of new endpoints are watched from then on.
 
 Each role runs once per `root`: `lukd receive` holds a `flock` on

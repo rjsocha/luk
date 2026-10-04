@@ -111,8 +111,94 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	rm.MarkFlagRequired("name")
 	completeFlags(rm, map[string]cobra.CompletionFunc{"storage": completeStorage, "name": completeStored})
 
-	cmd.AddCommand(ls, rm)
+	var retStorage string
+	var retJSON bool
+	ret := &cobra.Command{
+		Use:   "retention",
+		Short: "Show what the retention rules keep and prune",
+		Long: "Show the retention plan of a local storage without changing anything: per\n" +
+			"series (pipeline, origin, file name) the rule that applies and every file,\n" +
+			"newest first, with KEEP and the reasons (last, daily 2026-10-04, weekly\n" +
+			"2026-W40, monthly 2026-10, yearly 2026) or PRUNE. Files of a series no rule\n" +
+			"matches are kept (no rule). The maintenance of the process role removes the\n" +
+			"pruned files.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, st, l, err := openStorage(*cfgPath, retStorage)
+			if err != nil {
+				return err
+			}
+			plans, werr := l.RetentionPlan(st)
+			if err := printRetention(cmd.OutOrStdout(), st, plans, retJSON); err != nil {
+				return err
+			}
+			return werr
+		},
+	}
+	ret.Flags().StringVar(&retStorage, "storage", "", "storage name")
+	ret.Flags().BoolVar(&retJSON, "json", false, "print JSON")
+	ret.MarkFlagRequired("storage")
+	completeFlags(ret, map[string]cobra.CompletionFunc{"storage": completeStorage})
+
+	cmd.AddCommand(ls, rm, ret)
 	return cmd
+}
+
+// printRetention prints the retention plans of the storage st: per series
+// a line naming it and its rule, then its files as aligned columns.
+func printRetention(w io.Writer, st *config.Storage, plans []store.SeriesPlan, asJSON bool) error {
+	if asJSON {
+		b, err := json.MarshalIndent(plans, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(append(b, '\n'))
+		return err
+	}
+	for i, p := range plans {
+		if i > 0 {
+			fmt.Fprintln(w)
+		}
+		rule := "no rule"
+		if p.Rule > 0 {
+			r := st.Retention[p.Rule-1]
+			origin := "any origin"
+			if len(r.Origin) > 0 {
+				origin = "origin " + strings.Join(r.Origin, ",")
+			}
+			rule = fmt.Sprintf("rule %d (%s; keep %s)", p.Rule, status.Clean(origin), keepText(*p.Keep))
+		}
+		fmt.Fprintf(w, "series pipeline=%s origin=%s file=%s: %s\n", dash(status.Clean(p.Pipeline)),
+			dash(status.Clean(p.Origin)), dash(status.Clean(p.File)), rule)
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "  NAME\tRECEIVED\tACTION\tREASONS")
+		for _, f := range p.Files {
+			action := "PRUNE"
+			if f.Keep {
+				action = "KEEP"
+			}
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", status.Clean(f.Name), dash(status.Clean(f.Received)), action,
+				dash(strings.Join(f.Reasons, ", ")))
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// keepText is the counts of k above 0: "last 3, daily 14".
+func keepText(k config.Keep) string {
+	var out []string
+	for _, c := range []struct {
+		name string
+		n    int
+	}{{"last", k.Last}, {"daily", k.Daily}, {"weekly", k.Weekly}, {"monthly", k.Monthly}, {"yearly", k.Yearly}} {
+		if c.n > 0 {
+			out = append(out, c.name+" "+strconv.Itoa(c.n))
+		}
+	}
+	return strings.Join(out, ", ")
 }
 
 // openStorage loads the configuration and the local storage name, and runs

@@ -29,7 +29,9 @@ const (
 	// Expire removes expired files, files past cleanup.age (those without
 	// an expiry) and stale claimed files of every local storage.
 	Expire Janitor = 1 << iota
-	// Maintain repairs aliases and the catalog (see store.Local.Reconcile),
+	// Maintain removes the files the retention rules prune (see
+	// store.Local.Retain), repairs aliases and the catalog (see
+	// store.Local.Reconcile),
 	// reconciles the content objects (see store.Local.MaintainObjects)
 	// and removes store crash leftovers and empty directories of every
 	// local storage, and work directories older than 7 days whose id has
@@ -131,6 +133,15 @@ func maintain(cfg *config.Config, log *slog.Logger, now time.Time) {
 			continue
 		}
 		st := store.FromConfig(s)
+		// Retention removals only mark the catalog stale; Reconcile
+		// rebuilds it once.
+		err := st.Batch().Retain(s, func(p store.SeriesPlan, f store.RetainedFile) {
+			log.Info("retention removed", "storage", name, "name", f.Name, "id", f.ID,
+				"pipeline", p.Pipeline, "origin", p.Origin, "file", p.File, "rule", p.Rule)
+		})
+		if err != nil {
+			log.Warn("storage: retention", "storage", name, "err", err)
+		}
 		if err := st.Reconcile(); err != nil {
 			log.Warn("storage: aliases and catalog", "storage", name, "err", err)
 		}

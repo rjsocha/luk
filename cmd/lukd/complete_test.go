@@ -38,6 +38,7 @@ func TestCompleteFlags(t *testing.T) {
 	}{
 		{[]string{"storage", "ls", "-c", cfgPath, "--storage", ""}, "drop,plain"},
 		{[]string{"storage", "rm", "-c", cfgPath, "--storage", "p"}, "plain"},
+		{[]string{"storage", "retention", "-c", cfgPath, "--storage", ""}, "drop,plain"},
 		{[]string{"storage", "ls", "-c", cfgPath, "--owner", ""}, "robert.socha"},
 		{[]string{"quota", "ls", "-c", cfgPath, "--endpoint", ""}, "drop"},
 		{[]string{"queue", "retry", "-c", cfgPath, "--pipeline", ""}, "drop"},

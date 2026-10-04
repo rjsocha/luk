@@ -720,3 +720,24 @@ func TestRunTeeWritesOut(t *testing.T) {
 		})
 	}
 }
+
+func TestStoreRecordsSeries(t *testing.T) {
+	e := newRunEnv(t, "    steps:\n      - store: a\n")
+	d := e.dispatcher()
+	for id, host := range map[string]string{"id9": "db1-prod", "id10": ""} {
+		j := e.enqueueWith(t, id, "up", func(j *Job) {
+			j.Vars.Hostname = host
+			j.Vars.File = id
+		}, "p")
+		if err := d.Submit(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.Wait()
+	for id, origin := range map[string]string{"id9": "db1-prod", "id10": "robert.socha"} {
+		sc := e.sidecar(t, "a/.db/meta/robert.socha/"+id+".json")
+		if sc.Pipeline != "p" || sc.Origin != origin {
+			t.Errorf("%s: pipeline %q origin %q, want p %q", id, sc.Pipeline, sc.Origin, origin)
+		}
+	}
+}

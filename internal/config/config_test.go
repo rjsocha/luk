@@ -1977,3 +1977,46 @@ func TestKeyIDAllowAndNames(t *testing.T) {
 		}
 	}
 }
+
+func TestRetention(t *testing.T) {
+	const rules = `retention: [{origin: [db1-prod, "*-prod"], keep: {last: 3, daily: 14, weekly: 8, monthly: 12, yearly: 2}}, {origin: "*-stage", keep: {daily: 7}}, {keep: {daily: 7, weekly: 4}}]`
+	src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", `+rules+`}`, 1)
+	c, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := c.Storage["archive"]
+	if k := st.Retention[0].Keep; k != (Keep{Last: 3, Daily: 14, Weekly: 8, Monthly: 12, Yearly: 2}) {
+		t.Fatalf("keep %+v", k)
+	}
+	for origin, want := range map[string]int{"db1-prod": 0, "web1-prod": 0, "db1-stage": 1, "db1-dev": 2, "": 2} {
+		if got := st.RetentionRule(origin); got != want {
+			t.Errorf("%q: rule %d, want %d", origin, got, want)
+		}
+	}
+	st.Retention = st.Retention[:2]
+	if got := st.RetentionRule("db1-dev"); got != -1 {
+		t.Errorf("without a catch-all: rule %d", got)
+	}
+}
+
+func TestRetentionErrors(t *testing.T) {
+	for rules, want := range map[string]string{
+		`[{keep: {daily: 7}}, {origin: x, keep: {daily: 1}}]`: "storage archive: retention rule 1 matches every origin and must be the last: the rules after it are unreachable",
+		`[{origin: "[x", keep: {daily: 7}}]`:                  `storage archive: retention rule 1: origin "[x": syntax error in pattern`,
+		`[{origin: [""], keep: {daily: 7}}]`:                  "storage archive: retention rule 1: empty origin glob",
+		`[{origin: x, keep: {daily: -1}}]`:                    "storage archive: retention rule 1: keep counts must not be negative",
+		`[{origin: x, keep: {}}]`:                             "storage archive: retention rule 1: keep needs a count above 0",
+		`[{origin: x}]`:                                       "storage archive: retention rule 1: keep needs a count above 0",
+		`[{origin: x, keep: {hourly: 1}}]`:                    "field hourly not found",
+	} {
+		src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", retention: `+rules+`}`, 1)
+		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v", rules, err)
+		}
+	}
+	src := strings.Replace(good, "storage:\n", "storage:\n  off: {type: s3, bucket: b, retention: [{keep: {daily: 1}}]}\n", 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage off: retention needs a local storage") {
+		t.Errorf("s3: %v", err)
+	}
+}

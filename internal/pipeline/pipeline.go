@@ -727,7 +727,7 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, *Failure) {
 					return i + 1, fmt.Errorf("store %s: replacing %s needs one file, the set has %d", sn, j.Replace.Name, len(set))
 				}
 				for _, f := range set {
-					res, err := d.store(j, cfg, sn, f)
+					res, err := d.store(j, cfg, name, sn, f)
 					if err != nil {
 						return i + 1, fmt.Errorf("store %s: %w", sn, err)
 					}
@@ -874,7 +874,7 @@ func (d *Dispatcher) runReplace(j Job, names []string) (bool, []Failure) {
 			if j.replaces(t.storage) != last {
 				continue
 			}
-			res, err := d.storeStaged(j, cfg, t.storage, f, t.staged)
+			res, err := d.storeStaged(j, cfg, t.pipeline, t.storage, f, t.staged)
 			if err != nil {
 				undo()
 				return false, fail(t.pipeline, t.step, fmt.Errorf("store %s: %w", t.storage, err))
@@ -906,15 +906,17 @@ func localStorage(cfg *config.Config, name string) (*config.Storage, error) {
 	return st, nil
 }
 
-// store writes one file of the set; a file produced by a run step is stored
-// under its own name with its size, sha256 and meta in the sidecar.
-func (d *Dispatcher) store(j Job, cfg *config.Config, name string, f file) (store.Stored, error) {
-	return d.storeStaged(j, cfg, name, f, nil)
+// store writes one file of the set into the storage name for the pipeline
+// pipe; a file produced by a run step is stored under its own name with its
+// size, sha256 and meta in the sidecar. The sidecar records the pipeline
+// and the origin of the upload (its retention series).
+func (d *Dispatcher) store(j Job, cfg *config.Config, pipe, name string, f file) (store.Stored, error) {
+	return d.storeStaged(j, cfg, pipe, name, f, nil)
 }
 
 // storeStaged is store placing the copy of f staged in the storage when
 // staged is set.
-func (d *Dispatcher) storeStaged(j Job, cfg *config.Config, name string, f file, staged *store.Staged) (store.Stored, error) {
+func (d *Dispatcher) storeStaged(j Job, cfg *config.Config, pipe, name string, f file, staged *store.Staged) (store.Stored, error) {
 	st, err := localStorage(cfg, name)
 	if err != nil {
 		return store.Stored{}, err
@@ -930,6 +932,7 @@ func (d *Dispatcher) storeStaged(j Job, cfg *config.Config, name string, f file,
 		return d.replace(j, l, staged)
 	}
 	vars, sc := j.Vars.For(name), j.Sidecar
+	sc.Pipeline, sc.Origin = pipe, cmp.Or(vars.Hostname, vars.Sender)
 	if j.Expires != nil {
 		sc.Expires = j.Expires[name]
 	}

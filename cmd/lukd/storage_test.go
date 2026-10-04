@@ -335,3 +335,80 @@ func TestStorageOldLayout(t *testing.T) {
 		t.Fatalf("check: %q %q %v", out, errOut, err)
 	}
 }
+
+func TestStorageRetention(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	text := `root: ` + root + `
+listen: {main: {addr: "127.0.0.1:0"}}
+auth:
+  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+endpoint:
+  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [robert.socha]}
+pipeline:
+  nightly: {endpoint: [backup], steps: [{store: archive}]}
+storage:
+  archive:
+    type: local
+    base: s/archive
+    path: "{{ .Origin }}/{{ .File }}"
+    retention:
+      - origin: ["*-prod"]
+        keep: {last: 1, daily: 2}
+`
+	if err := os.WriteFile(cfgPath, []byte(text), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := store.FromConfig(cfg.Storage["archive"])
+	if err := os.MkdirAll(l.Base, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []struct{ name, origin, at string }{
+		{"db1-prod/db.sql", "db1-prod", "2026-10-04T18:00:00Z"},
+		{"db1-prod/db.sql.1759550400", "db1-prod", "2026-10-04T06:00:00Z"},
+		{"db1-prod/db.sql.1759464000", "db1-prod", "2026-10-03T06:00:00Z"},
+		{"db1-stage/db.sql", "db1-stage", "2026-10-04T06:00:00Z"},
+	} {
+		src := filepath.Join(t.TempDir(), "src")
+		if err := os.WriteFile(src, []byte(f.name), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		sc := store.Sidecar{ID: "id-" + f.name, Sender: "robert.socha", Endpoint: "backup", Received: f.at, Size: int64(len(f.name)),
+			Pipeline: "nightly", Origin: f.origin, Client: wire.Meta{File: "db.sql"}}
+		if _, err := l.Put(src, f.name, sc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := runLukd(t, "storage", "retention", "--storage", "archive", "-c", cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `series pipeline=nightly origin=db1-prod file=db.sql: rule 1 (origin *-prod; keep last 1, daily 2)
+  NAME                        RECEIVED              ACTION  REASONS
+  db1-prod/db.sql             2026-10-04T18:00:00Z  KEEP    last, daily 2026-10-04
+  db1-prod/db.sql.1759550400  2026-10-04T06:00:00Z  PRUNE   -
+  db1-prod/db.sql.1759464000  2026-10-03T06:00:00Z  KEEP    daily 2026-10-03
+
+series pipeline=nightly origin=db1-stage file=db.sql: no rule
+  NAME              RECEIVED              ACTION  REASONS
+  db1-stage/db.sql  2026-10-04T06:00:00Z  KEEP    no rule
+`
+	if out != want {
+		t.Fatalf("plan:\n%s\nwant:\n%s", out, want)
+	}
+	out, err = runLukd(t, "storage", "retention", "--storage", "archive", "--json", "-c", cfgPath)
+	var plans []store.SeriesPlan
+	if err != nil || json.Unmarshal([]byte(out), &plans) != nil || len(plans) != 2 || plans[0].Rule != 1 || plans[0].Keep.Daily != 2 ||
+		plans[0].Files[1].Keep || plans[1].Rule != 0 || plans[1].Files[0].Reasons[0] != "no rule" {
+		t.Fatalf("json: %v\n%s", err, out)
+	}
+	for _, f := range []string{"db1-prod/db.sql", "db1-prod/db.sql.1759550400", "db1-prod/db.sql.1759464000", "db1-stage/db.sql"} {
+		if _, err := os.Stat(filepath.Join(l.Base, store.DataDir, f)); err != nil {
+			t.Errorf("plan removed %s: %v", f, err)
+		}
+	}
+}

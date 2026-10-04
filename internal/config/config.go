@@ -712,9 +712,57 @@ type Storage struct {
 	Cleanup struct {
 		Age Duration `yaml:"age"`
 	} `yaml:"cleanup"`
+	// Retention prunes the stored files of each series (local only): the
+	// first rule whose origin globs match the origin of a file applies
+	// (see RetentionRule).
+	Retention []Retention `yaml:"retention"`
 
 	pathTmpl *template.Template
 	nested   []string
+}
+
+// Retention is one retention rule of a storage: Origin holds globs
+// (path.Match) on the origin of a file, none for every origin; Keep holds
+// the counts of files kept per series.
+type Retention struct {
+	Origin StringList `yaml:"origin"`
+	Keep   Keep       `yaml:"keep"`
+}
+
+// Keep holds the counts of a retention rule: the Last newest files, and
+// the newest file of each of the newest Daily days, Weekly ISO weeks,
+// Monthly months and Yearly years (UTC).
+type Keep struct {
+	Last    int `yaml:"last" json:"last,omitempty"`
+	Daily   int `yaml:"daily" json:"daily,omitempty"`
+	Weekly  int `yaml:"weekly" json:"weekly,omitempty"`
+	Monthly int `yaml:"monthly" json:"monthly,omitempty"`
+	Yearly  int `yaml:"yearly" json:"yearly,omitempty"`
+}
+
+// Matches reports whether the rule applies to origin: it has no globs, or
+// one of them matches.
+func (r Retention) Matches(origin string) bool {
+	if len(r.Origin) == 0 {
+		return true
+	}
+	for _, g := range r.Origin {
+		if ok, _ := path.Match(g, origin); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// RetentionRule is the index of the first retention rule matching origin,
+// -1 when none does.
+func (s *Storage) RetentionRule(origin string) int {
+	for i, r := range s.Retention {
+		if r.Matches(origin) {
+			return i
+		}
+	}
+	return -1
 }
 
 type Random struct {
@@ -1386,6 +1434,28 @@ func (c *Config) validate() []error {
 		}
 		if (s.TTL.Max != 0 || s.TTL.Min != 0 || s.TTL.User || s.Cleanup.Age != 0) && s.Type != "local" {
 			bad("storage %s: ttl and cleanup.age need a local storage", name)
+		}
+		if len(s.Retention) > 0 && s.Type != "local" {
+			bad("storage %s: retention needs a local storage", name)
+		}
+		for i, r := range s.Retention {
+			for _, g := range r.Origin {
+				if g == "" {
+					bad("storage %s: retention rule %d: empty origin glob", name, i+1)
+				} else if _, err := path.Match(g, ""); err != nil {
+					bad("storage %s: retention rule %d: origin %q: %v", name, i+1, g, err)
+				}
+			}
+			k := r.Keep
+			switch {
+			case k.Last < 0 || k.Daily < 0 || k.Weekly < 0 || k.Monthly < 0 || k.Yearly < 0:
+				bad("storage %s: retention rule %d: keep counts must not be negative", name, i+1)
+			case k == Keep{}:
+				bad("storage %s: retention rule %d: keep needs a count above 0 (last, daily, weekly, monthly, yearly)", name, i+1)
+			}
+			if len(r.Origin) == 0 && i < len(s.Retention)-1 {
+				bad("storage %s: retention rule %d matches every origin and must be the last: the rules after it are unreachable", name, i+1)
+			}
 		}
 		if s.Random != (Random{}) {
 			if s.Type != "local" {

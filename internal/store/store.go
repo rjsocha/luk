@@ -532,6 +532,12 @@ type Sidecar struct {
 	OwnerKey string `json:"owner_key,omitempty"`
 	// Updated is when the content was last replaced through its link.
 	Updated string `json:"updated,omitempty"`
+	// Pipeline is the pipeline that stored the file and Origin the .Origin
+	// of its upload (the backup hostname, else the sender); with the file
+	// name they make the retention series of the file (see SeriesOf).
+	// Files stored before these fields have neither.
+	Pipeline string `json:"pipeline,omitempty"`
+	Origin   string `json:"origin,omitempty"`
 	// Produced is the name of a file written by a run step; empty for the
 	// uploaded payload.
 	Produced string `json:"produced,omitempty"`
