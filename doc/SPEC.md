@@ -271,6 +271,7 @@ list of entries in the `allow` syntax (key names, `<ca>:<glob>`,
 | `private.owner`, `private.any` | `--private` and `--private --any` uploads (see Private files) |
 | `secret.allow` | `--secret` uploads into the volatile storage (see Volatile secrets) |
 | `pretty.allow` | `--pretty-url` (see `endpoint.<n>.pretty`) |
+| `backup.hostname.any`, `backup.hostname.principal` | which `backup.hostname` (`--backup`) the signer may send (below) |
 
 ```yaml
 endpoint:
@@ -306,6 +307,35 @@ endpoint:
   identities, e.g. ["*"]`).
 - The lists are evaluated on the configuration current when the request
   arrives; a reload applies to the next request.
+
+`backup.hostname` restricts the client `backup.hostname` (set by
+`--backup`, see Client meta), so `.Hostname` and `.Origin` of a path
+template name the host that sent the upload:
+
+```yaml
+endpoint:
+  backup:
+    backup:
+      hostname:
+        any: [robert.socha]        # may send any --backup hostname
+        principal: ["hosts:*"]     # only one of the principals of its own certificate
+```
+
+- Without `backup.hostname` every identity the endpoint admits sends any
+  hostname.
+- With it, an upload carrying a non-empty `backup.hostname` is accepted
+  when the signer matches `any`; else when it matches `principal` and is
+  a certificate one of whose principals equals the hostname (compared
+  case-insensitively); else it is refused with 403 before the body:
+  `backup hostname "<h>" not allowed for this key`. The answer names
+  neither list. A signer in both lists is treated as `any`. A plain key
+  has no principals, so a plain key matched by `principal` alone never
+  sends a hostname. An empty `backup.hostname: {}` lets no one send one.
+- An upload without `backup.hostname` is not affected.
+- Both lists are checked as `allow` entries, as every capability list;
+  `backup` and `backup.hostname` take no other keys, and a
+  `backup.hostname` that is not a mapping is an error
+  (`backup.hostname: a mapping of any and principal`).
 
 ## Client meta
 
@@ -390,6 +420,8 @@ it is true is not):
   sidecar with the rest of the client meta.
 - `backup` - set by `--backup`; `hostname` is a single path element (no
   `/` or control character, not starting with `.`, at most 255 bytes).
+  An endpoint with `backup.hostname` refuses a hostname the signer may
+  not send with 403 before the body (see Capabilities).
 - `dry_run` - set by `--dry-run`; the server runs every check up to the
   body (verification, matching, the signed size against the limits, the
   storage names) and answers the debug JSON (200) with `"dry_run": true` in
@@ -1053,7 +1085,8 @@ Answers:
    "link": {"remove": true, "ttl": true, "replace": true, "list": true},
    "ttl": {"user": true, "min": "1h", "max": "7d", "default": "7d"},
    "secret_ttl": {"user": true, "max": "1d", "default": "1d"},
-   "quota": {"mode": "enforce", "rate": "10G/1d", "burst": 53687091200, "tokens": 13421772800}}
+   "quota": {"mode": "enforce", "rate": "10G/1d", "burst": 53687091200, "tokens": 13421772800},
+   "backup_hostname": "principal"}
 ]}
 ```
 
@@ -1089,6 +1122,10 @@ Answers:
   `burst` and `tokens` (what the bucket holds now) in bytes; omitted when
   no class applies to the signer. It names no class and nothing of the
   other classes.
+- `backup_hostname` - with `backup.hostname` on the endpoint, which
+  `--backup` hostname the signer may send: `any`, `principal` (one of
+  the principals of its certificate) or `none`; omitted without the
+  block (any hostname).
 
 Nothing else of the configuration is in the answer: no pipelines, tags,
 storages, exposes, paths on disk, limits or quotas of others. A lukd without the listing
@@ -1290,6 +1327,10 @@ endpoint:
     path: queue/backup
     allow: [robert.socha, "hosts:*"]
     respond: accept
+    backup:                           # optional: who may send which --backup hostname (see Capabilities)
+      hostname:
+        any: [robert.socha]
+        principal: ["hosts:*"]
     limits:                           # request level, per endpoint; optional
       body:
         size: 50G                     # max body size, 413 above it; 0 or absent = unlimited
@@ -1434,7 +1475,7 @@ and `ssh.d/ca/`):
 - a storage with `shard` is not the `expose` of an expose with `index`;
 - the capability lists (`link.remove`, `link.ttl`, `link.replace`,
   `link.list`, `private.owner`, `private.any`, `secret.allow`,
-  `pretty.allow`) are lists whose entries are those of an endpoint
+  `pretty.allow`, `backup.hostname.any`, `backup.hostname.principal`) are lists whose entries are those of an endpoint
   `allow` (known key names and CAs, valid globs); a boolean or other
   scalar is an error naming the key; `secret.allow` and `pretty.allow`
   are required in their blocks (see Capabilities);
@@ -1961,6 +2002,10 @@ pipeline:
   `.File` (the client `file`, or the id when empty), `.Tags` (joined with `-`),
   `.Hostname` (the client `backup.hostname`, set by `--backup`; empty
   without it) and `.Origin` (`.Hostname` when set, else `.Sender`).
+  Without `backup.hostname` on the endpoint the hostname is only what
+  the signer asserts. With it (see Capabilities) a signer of `principal`
+  sends only a principal of its own certificate, so `.Hostname` and
+  `.Origin` are trustworthy: the host the CA certified, or the sender.
   The result must be a relative path (not absolute, no NUL byte) whose
   elements are names: `.` and `..` are refused, while a leading dot is a
   name like any other (`.bashrc`, `.env`, even `.db` or `.luk`: the data
@@ -3457,6 +3502,8 @@ client ttl when the policy takes one: `(1h..7d)`, `(..7d)`, `(1h..)`,
 `(any)`; `-` without a policy) and `FLAGS` (the capabilities granted to
 the signing key, see Capabilities: `secret`, `pretty-url`, `private`,
 `any`, `mutable` for `link.replace`, `link-rm`, `link-ttl`, `link-ls`,
+and `backup-host:any`, `backup-host:principal` or `backup-host:none`
+when the endpoint restricts the `--backup` hostname (`backup_hostname`),
 comma separated; `-` for none), and when an endpoint has a
 quota for the signer `QUOTA` (`10G/1d 50G (12.5G left)`: the rate, the
 burst and what the bucket holds now, `, passive` added in passive mode;

@@ -229,6 +229,23 @@ func TestPrintEndpointsEscapes(t *testing.T) {
 	}
 }
 
+// The backup hostname mode is a flag of its own, absent without one.
+func TestPrintEndpointsBackupHost(t *testing.T) {
+	var b strings.Builder
+	err := printEndpoints(&b, []wire.EndpointInfo{
+		{Name: "a", URL: "u", Respond: "accept", BackupHostname: wire.BackupHostPrincipal},
+		{Name: "b", URL: "u", Respond: "url", Pretty: true, BackupHostname: "none\x1b"},
+		{Name: "c", URL: "u", Respond: "url"},
+	})
+	want := "NAME  URL  RESPOND  TTL  FLAGS\n" +
+		"a     u    accept   -    backup-host:principal\n" +
+		"b     u    url      -    pretty-url,backup-host:none\\x1b\n" +
+		"c     u    url      -    -\n"
+	if err != nil || b.String() != want {
+		t.Fatalf("%v\n%q\nwant %q", err, b.String(), want)
+	}
+}
+
 // --print pins only a chain that does not verify (or with --pin): an acme
 // certificate verifies against the system CAs and changes its key at
 // every renewal.

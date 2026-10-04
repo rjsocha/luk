@@ -666,7 +666,19 @@ type EndpointInfo struct {
 	// Quota is the upload quota of the signer on the endpoint; absent
 	// without one.
 	Quota *QuotaInfo `json:"quota,omitempty"`
+	// BackupHostname is which backup.hostname the signer may send:
+	// BackupHostAny, BackupHostPrincipal or BackupHostNone; absent when the
+	// endpoint does not restrict it (any).
+	BackupHostname string `json:"backup_hostname,omitempty"`
 }
+
+// What backup.hostname a signer may send to an endpoint: any, one of
+// the principals of its certificate, or none.
+const (
+	BackupHostAny       = "any"
+	BackupHostPrincipal = "principal"
+	BackupHostNone      = "none"
+)
 
 // QuotaInfo is the quota of one identity on an endpoint: Mode enforce or
 // passive, Rate the refill (<size>/<duration>), Burst the capacity of the

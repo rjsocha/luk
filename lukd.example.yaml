@@ -91,6 +91,10 @@ endpoint:
       body:
         size: 50G
         idle: 2m
+    # backup:                   # who may set the luk send --backup hostname; absent = anyone, any
+    #   hostname:
+    #     any: [robert.socha]   # may send any hostname
+    #     principal: ["hosts:*"]   # only one of the principals of its own certificate
     # quota:                    # a token bucket per identity (key, or CA + Key ID); lukd quota ls / explain
     #   mode: passive           # enforce (default) or passive: account and log, never refuse
     #   rate: 10G/1d            # refill rate of the catch-all: <size>/<duration>

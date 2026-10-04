@@ -91,6 +91,9 @@ func endpointList(cfg *config.Config, l *listener, host string, id *wire.Identit
 				}
 			}
 		}
+		if ep.Backup.Hostname != nil {
+			info.BackupHostname = backupHostMode(id, ep.Backup.Hostname)
+		}
 		if lim, ok := quota.Resolve(ep.Quota, id); ok {
 			info.Quota = &wire.QuotaInfo{Mode: lim.Mode, Rate: lim.Rate.String(), Burst: lim.Burst,
 				Tokens: book.Tokens(ep.Name, auth.OwnerKey(id), lim)}
@@ -99,6 +102,36 @@ func endpointList(cfg *config.Config, l *listener, host string, id *wire.Identit
 	}
 	slices.SortFunc(out.Endpoints, func(a, b wire.EndpointInfo) int { return strings.Compare(a.Name, b.Name) })
 	return out
+}
+
+// backupHostMode is which backup.hostname id may send under h: any when
+// it matches h.Any (also when in both lists), principal when it matches
+// h.Principal, else none.
+func backupHostMode(id *wire.Identity, h *config.BackupHostname) string {
+	switch {
+	case auth.Allowed(id, h.Any):
+		return wire.BackupHostAny
+	case auth.Allowed(id, h.Principal):
+		return wire.BackupHostPrincipal
+	}
+	return wire.BackupHostNone
+}
+
+// backupHostAllowed reports whether id may send the backup hostname to
+// ep: always without a backup.hostname block, else by backupHostMode,
+// where principal takes only a principal of the certificate of id.
+func backupHostAllowed(id *wire.Identity, ep *config.Endpoint, hostname string) bool {
+	h := ep.Backup.Hostname
+	if h == nil {
+		return true
+	}
+	switch backupHostMode(id, h) {
+	case wire.BackupHostAny:
+		return true
+	case wire.BackupHostPrincipal:
+		return id.Type == "certificate" && slices.ContainsFunc(id.Principals, func(p string) bool { return strings.EqualFold(p, hostname) })
+	}
+	return false
 }
 
 // ttlPolicy is the ttl policy of a local storage; nil for any other.

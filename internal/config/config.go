@@ -333,6 +333,8 @@ type Endpoint struct {
 	// Private is who may send which private modes; only with respond url,
 	// and the respond storage needs protect.
 	Private Private `yaml:"private"`
+	// Backup is who may set which backup.hostname (luk send --backup).
+	Backup Backup `yaml:"backup"`
 	// Secret, when set, takes the reveal uploads of the identities of
 	// secret.allow (respond url only): into its own queue directory and
 	// only into its storage, without the pipelines of the endpoint.
@@ -530,6 +532,38 @@ func (p Private) Of(access string) (who Identities, ok bool) {
 		return p.Any, true
 	}
 	return nil, false
+}
+
+// Backup is the backup capabilities of an endpoint: without Hostname
+// every identity the endpoint admits sends any backup.hostname.
+type Backup struct {
+	Hostname *BackupHostname `yaml:"hostname"`
+}
+
+func (b *Backup) UnmarshalYAML(n *yaml.Node) error {
+	type raw Backup
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if k, v := n.Content[i], n.Content[i+1]; k.Value == "hostname" && v.Kind != yaml.MappingNode {
+				return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: backup.hostname: a mapping of any and principal, e.g. {any: [\"*\"]}", k.Line)}}
+			}
+		}
+	}
+	return decodeCapabilities(n, "backup", []string{"hostname"}, nil, (*raw)(b))
+}
+
+// BackupHostname is who may send which backup.hostname: Any every one,
+// Principal only one of the principals of its own certificate. An
+// identity in neither list sends none.
+type BackupHostname struct {
+	Any       Identities `yaml:"any"`
+	Principal Identities `yaml:"principal"`
+}
+
+func (h *BackupHostname) UnmarshalYAML(n *yaml.Node) error {
+	type raw BackupHostname
+	keys := []string{"any", "principal"}
+	return decodeCapabilities(n, "backup.hostname", keys, keys, (*raw)(h))
 }
 
 // Link is who may do what with the links they own on an endpoint: remove
@@ -1077,12 +1111,14 @@ func (c *Config) validate() []error {
 		default:
 			bad("endpoint %s: respond must be accept or url", name)
 		}
+		bh := cmp.Or(e.Backup.Hostname, &BackupHostname{})
 		for _, c := range []struct {
 			key string
 			who Identities
 		}{
 			{"link.remove", e.Link.Remove}, {"link.ttl", e.Link.TTL}, {"link.replace", e.Link.Replace}, {"link.list", e.Link.List},
 			{"private.owner", e.Private.Owner}, {"private.any", e.Private.Any},
+			{"backup.hostname.any", bh.Any}, {"backup.hostname.principal", bh.Principal},
 		} {
 			checkAllow(bad, "endpoint "+name+": "+c.key, c.who, names, cas)
 		}

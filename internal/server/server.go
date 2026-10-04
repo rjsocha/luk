@@ -373,6 +373,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 	if err != nil {
 		return 0, nil, err
 	}
+	// The answer names the hostname only, never who may send what.
+	if b := meta.Backup; b != nil && b.Hostname != "" && !backupHostAllowed(id, ep, b.Hostname) {
+		return 0, nil, fail(http.StatusForbidden, "backup hostname %q not allowed for this key", b.Hostname)
+	}
 	// A secret upload goes to the secret storage alone, whatever the tags.
 	secret := ""
 	pipes := []string{pipeline.SecretPipeline}

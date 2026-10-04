@@ -47,7 +47,9 @@ NAME, URL, RESPOND (url: the upload answers its URL; accept), TTL (the
 lifetime without --ttl, never without one, then the range --ttl may ask
 for when the storage takes it), FLAGS (secret, pretty-url, private,
 any, mutable, link-rm, link-ttl, link-ls: the options the endpoint takes
-from your key)
+from your key; backup-host:any, backup-host:principal or backup-host:none
+when the endpoint restricts the --backup hostname: any, one of the
+principals of your certificate, or no --backup at all)
 and, when an endpoint has one, QUOTA (your upload quota: the rate, the
 largest upload and what you may send now).
 The key is --key, else the key of the config endpoint the URL names, else
@@ -354,6 +356,9 @@ func printEndpoints(w io.Writer, eps []wire.EndpointInfo) error {
 			if f.on {
 				flags = append(flags, f.name)
 			}
+		}
+		if e.BackupHostname != "" {
+			flags = append(flags, "backup-host:"+client.Printable(e.BackupHostname))
 		}
 		p := client.Printable
 		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s", p(e.Name), p(e.URL), p(e.Respond), p(ttlText(e.TTL)), cmp.Or(strings.Join(flags, ","), "-"))

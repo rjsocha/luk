@@ -1659,6 +1659,13 @@ func TestCapabilityLists(t *testing.T) {
 		"pretty without allow":        {"    pretty: {bits: 64}\n", `endpoint drop: pretty.allow is required: a list of identities, e.g. ["*"]`},
 		"secret without allow":        {"    secret: {path: /run/luk/volatile/queue, storage: volatile}\n", `endpoint drop: secret.allow is required`},
 		"secret unknown key in allow": {"    secret: {path: /run/luk/volatile/queue, storage: volatile, allow: [nobody]}\n", `endpoint drop: secret.allow: allow "nobody" is not a known key`},
+		"backup hostname any bool":    {"    backup: {hostname: {any: true}}\n", `backup.hostname.any: a list of identities, e.g. ["*"]`},
+		"backup hostname scalar":      {"    backup: {hostname: robert.socha}\n", `backup.hostname: a mapping of any and principal`},
+		"backup hostname null":        {"    backup: {hostname: }\n", `backup.hostname: a mapping of any and principal`},
+		"backup unknown key":          {"    backup: {path: [robert.socha]}\n", "field path not found in backup"},
+		"backup hostname unknown key": {"    backup: {hostname: {all: ['*']}}\n", "field all not found in backup.hostname"},
+		"backup hostname unknown id":  {"    backup: {hostname: {principal: [nobody]}}\n", `endpoint drop: backup.hostname.principal: allow "nobody" is not a known key`},
+		"backup hostname bad pattern": {"    backup: {hostname: {any: ['hosts:[']}}\n", `endpoint drop: backup.hostname.any: allow "hosts:[" has a bad pattern`},
 	}
 	for name, tc := range cases {
 		src := strings.Replace(secretGood, "    secret: {allow: ['*'], path: /run/luk/volatile/queue, storage: volatile}\n", "", 1)
@@ -1675,6 +1682,28 @@ func TestCapabilityLists(t *testing.T) {
 	}
 	if e := c.Endpoint["drop"]; e.Secret.Allow == nil || len(e.Secret.Allow) != 0 || !slices.Equal(e.Pretty.Allow, []string{"robert.socha"}) || e.Private.Offered() {
 		t.Fatalf("%+v %+v %+v", e.Secret, e.Pretty, e.Private)
+	}
+}
+
+// TestBackupHostnameConfig: backup.hostname takes two lists of
+// identities; without it there is no restriction (nil).
+func TestBackupHostnameConfig(t *testing.T) {
+	c, err := Parse([]byte(good))
+	if err != nil || c.Endpoint["backup"].Backup.Hostname != nil {
+		t.Fatalf("default: %v %+v", err, c.Endpoint["backup"].Backup)
+	}
+	src := strings.Replace(good, `allow: [robert.socha, "hosts:*"]`+"\n", `allow: [robert.socha, "hosts:*"]`+"\n    backup:\n      hostname:\n        any: [robert.socha]\n        principal: [\"hosts:*\"]\n", 1)
+	if c, err = Parse([]byte(src)); err != nil {
+		t.Fatal(err)
+	}
+	if h := c.Endpoint["backup"].Backup.Hostname; h == nil || !slices.Equal(h.Any, []string{"robert.socha"}) || !slices.Equal(h.Principal, []string{"hosts:*"}) {
+		t.Fatalf("lists: %+v", h)
+	}
+	if c, err = Parse([]byte(strings.Replace(src, "        any: [robert.socha]\n        principal: [\"hosts:*\"]\n", "        {}\n", 1))); err != nil {
+		t.Fatal(err)
+	}
+	if h := c.Endpoint["backup"].Backup.Hostname; h == nil || h.Any != nil || h.Principal != nil {
+		t.Fatalf("empty block: %+v", h)
 	}
 }
 
