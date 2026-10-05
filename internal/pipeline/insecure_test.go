@@ -335,36 +335,22 @@ func TestOpenSSLWriterSizes(t *testing.T) {
 }
 
 // gpgDecryptPassword checks msg with the gpg binary and a password when
-// there is one; the home is a fresh temporary one.
+// there is one.
 func gpgDecryptPassword(t *testing.T, msg []byte, password, want string) {
 	t.Helper()
-	bin, err := exec.LookPath("gpg")
-	if err != nil {
-		t.Log("no gpg binary, interop not checked")
+	gpg := isolatedGPG(t)
+	if gpg == nil {
 		return
 	}
-	home, err := os.MkdirTemp("", "gnupg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		exec.Command("gpgconf", "--homedir", home, "--kill", "all").Run()
-		os.RemoveAll(home)
-	})
-	if err := os.Chmod(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	pw := filepath.Join(home, "pw")
+	pw := filepath.Join(t.TempDir(), "pw")
 	if err := os.WriteFile(pw, []byte(password), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	dec := exec.Command(bin, "--batch", "--pinentry-mode", "loopback", "--passphrase-file", pw, "--decrypt")
-	var stdout, stderr bytes.Buffer
-	dec.Env, dec.Stdin, dec.Stdout, dec.Stderr = append(os.Environ(), "GNUPGHOME="+home), bytes.NewReader(msg), &stdout, &stderr
-	if err := dec.Run(); err != nil {
-		t.Fatalf("gpg --decrypt with a password: %v\n%s", err, stderr.String())
+	out, errOut, err := gpg(msg, "--passphrase-file", pw, "--decrypt")
+	if err != nil {
+		t.Fatalf("gpg --decrypt with a password: %v\n%s", err, errOut)
 	}
-	if stdout.String() != want {
-		t.Fatalf("gpg decrypted %q", stdout.String())
+	if out != want {
+		t.Fatalf("gpg decrypted %q", out)
 	}
 }

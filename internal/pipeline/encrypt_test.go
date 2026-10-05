@@ -136,36 +136,66 @@ func TestEncryptRoundTrip(t *testing.T) {
 	gpgDecrypt(t, msg, robert, "data-id1")
 }
 
-// gpgDecrypt checks msg with the gpg binary when there is one.
-func gpgDecrypt(t *testing.T, msg []byte, key *openpgp.Entity, want string) {
+// isolatedGPG returns a runner of the gpg binary on a fresh home, or nil
+// unless LUK_TEST_GPG=1 asks for the interop checks and there is a
+// binary: gpg may start an agent and ask for passphrases, which a
+// developer machine must not see. The environment is built from scratch: no inherited
+// GNUPGHOME or agent, no display or session bus, so no pinentry of the
+// desktop ever opens; passphrases go through loopback only. The agent
+// started for the home is killed when the test ends.
+func isolatedGPG(t *testing.T) func(stdin []byte, args ...string) (string, string, error) {
 	t.Helper()
+	if os.Getenv("LUK_TEST_GPG") != "1" {
+		t.Log("LUK_TEST_GPG=1 not set, gpg interop not checked")
+		return nil
+	}
 	bin, err := exec.LookPath("gpg")
 	if err != nil {
 		t.Log("no gpg binary, interop not checked")
-		return
+		return nil
 	}
-	home, err := os.MkdirTemp("", "gnupg")
+	// A short path under the system temp directory keeps the agent
+	// socket path within its limit.
+	home, err := os.MkdirTemp("", "g")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "GNUPGHOME=" + home, "LC_ALL=C"}
 	t.Cleanup(func() {
-		exec.Command("gpgconf", "--homedir", home, "--kill", "all").Run()
+		kill := exec.Command("gpgconf", "--homedir", home, "--kill", "all")
+		kill.Env = env
+		kill.Run()
 		os.RemoveAll(home)
 	})
-	env := append(os.Environ(), "GNUPGHOME="+home)
-	imp := exec.Command(bin, "--batch", "--import")
-	imp.Env, imp.Stdin = env, bytes.NewReader(gpgtest.ArmoredPrivate(t, key))
-	if out, err := imp.CombinedOutput(); err != nil {
-		t.Fatalf("gpg --import: %v\n%s", err, out)
+	return func(stdin []byte, args ...string) (string, string, error) {
+		cmd := exec.Command(bin, append([]string{"--homedir", home, "--batch", "--no-tty", "--pinentry-mode", "loopback"}, args...)...)
+		var stdout, stderr bytes.Buffer
+		cmd.Env, cmd.Stdin, cmd.Stdout, cmd.Stderr = env, bytes.NewReader(stdin), &stdout, &stderr
+		err := cmd.Run()
+		return stdout.String(), stderr.String(), err
 	}
-	dec := exec.Command(bin, "--batch", "--decrypt")
-	var stdout, stderr bytes.Buffer
-	dec.Env, dec.Stdin, dec.Stdout, dec.Stderr = env, bytes.NewReader(msg), &stdout, &stderr
-	if err := dec.Run(); err != nil {
-		t.Fatalf("gpg --decrypt: %v\n%s", err, stderr.String())
+}
+
+// gpgDecrypt checks msg with the gpg binary and the secret key when there
+// is one.
+func gpgDecrypt(t *testing.T, msg []byte, key *openpgp.Entity, want string) {
+	t.Helper()
+	gpg := isolatedGPG(t)
+	if gpg == nil {
+		return
 	}
-	if stdout.String() != want {
-		t.Fatalf("gpg decrypted %q", stdout.String())
+	if _, errOut, err := gpg(gpgtest.ArmoredPrivate(t, key), "--import"); err != nil {
+		t.Fatalf("gpg --import: %v\n%s", err, errOut)
+	}
+	out, errOut, err := gpg(msg, "--decrypt")
+	if err != nil {
+		t.Fatalf("gpg --decrypt: %v\n%s", err, errOut)
+	}
+	if out != want {
+		t.Fatalf("gpg decrypted %q", out)
 	}
 }
 
