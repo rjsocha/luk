@@ -67,7 +67,7 @@ func linkOp(ctx context.Context, o Options, method, link, action, metaS string) 
 		return nil, err
 	}
 	header := map[string]string{wire.HeaderLink: link, wire.HeaderLinkAction: action}
-	c, resp, err := opSession(ctx, u, o.Pins, func(c *Channel) (channel.Request, error) {
+	c, resp, err := opSession(ctx, u, o.Pins, o.Quiet, func(c *Channel) (channel.Request, error) {
 		return signedOp(o, c, method, metaS, header, func(host, path, ts, nonce string) (string, []byte) {
 			return wire.LinkNamespace, wire.LinkCanonicalText(method, host, path, link, action, ts, nonce, metaS, c.H())
 		})

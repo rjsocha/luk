@@ -83,7 +83,7 @@ func Scan(ctx context.Context, u *url.URL) ([]byte, error) {
 // signer may use on that listener (luk-list@v2).
 func ListEndpoints(ctx context.Context, u *url.URL, pins []channel.Pin, signer ssh.Signer) (*wire.EndpointList, error) {
 	lu := listingURL(u)
-	c, resp, err := opSession(ctx, lu, pins, func(c *Channel) (channel.Request, error) {
+	c, resp, err := opSession(ctx, lu, pins, false, func(c *Channel) (channel.Request, error) {
 		return signedOp(Options{URL: lu.String(), Signer: signer}, c, http.MethodGet, "", nil, func(host, path, ts, nonce string) (string, []byte) {
 			return wire.ListNamespace, wire.ListCanonicalText(http.MethodGet, host, path, ts, nonce, c.H())
 		})

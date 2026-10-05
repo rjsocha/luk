@@ -142,17 +142,18 @@ func uploadParts(ctx context.Context, o Options, op opFunc) (*partsResult, error
 	}
 }
 
-// opSession dials u and sends the OP that op signs for the channel. A
+// opSession dials u and sends the OP that op signs for the channel, with
+// the notice of a slow signature unless quiet (see signOp). A
 // 404 unknown session to the OP is a session lukd dropped before its OP
 // came (under a burst of handshakes the oldest pending ones go): it is
 // dialed once more, with a new handshake and a new signature.
-func opSession(ctx context.Context, u *url.URL, pins []channel.Pin, op opFunc) (*Channel, *InnerResponse, error) {
+func opSession(ctx context.Context, u *url.URL, pins []channel.Pin, quiet bool, op opFunc) (*Channel, *InnerResponse, error) {
 	for again := true; ; again = false {
 		c, err := Dial(ctx, DialOptions{URL: u, Pins: pins})
 		if err != nil {
 			return nil, nil, err
 		}
-		req, err := signOp(c, op)
+		req, err := signOp(c, quiet, op)
 		if err != nil {
 			c.Close()
 			return nil, nil, err
@@ -170,12 +171,13 @@ func opSession(ctx context.Context, u *url.URL, pins []channel.Pin, op opFunc) (
 
 // signOp is the OP that op signs for c, which just finished its
 // handshake. A signature still pending after signNotice (a hardware key
-// waiting for a touch) is announced once on a terminal. One that took
-// longer than signLimit is not sent: lukd drops a session without its OP
-// after limits.channel.auth (60s), and the OP would come too late.
-func signOp(c *Channel, op opFunc) (channel.Request, error) {
+// waiting for a touch) is announced once on a terminal, unless quiet.
+// One that took longer than signLimit is not sent: lukd drops a session
+// without its OP after limits.channel.auth (60s), and the OP would come
+// too late.
+func signOp(c *Channel, quiet bool, op opFunc) (channel.Request, error) {
 	start := time.Now()
-	if w := signNoticeOut(); w != nil {
+	if w := signNoticeOut(); w != nil && !quiet {
 		t := time.AfterFunc(signNotice, func() { fmt.Fprintln(w, "waiting for the signature (touch the key)") })
 		defer t.Stop()
 	}
@@ -188,7 +190,7 @@ func signOp(c *Channel, op opFunc) (channel.Request, error) {
 
 // uploadOnce is one session of an upload.
 func uploadOnce(ctx context.Context, o Options, u *url.URL, op opFunc, meter *partsMeter) (*partsResult, error) {
-	c, resp, err := opSession(ctx, u, o.Pins, op)
+	c, resp, err := opSession(ctx, u, o.Pins, o.Quiet, op)
 	if err != nil {
 		return nil, err
 	}

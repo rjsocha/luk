@@ -96,3 +96,24 @@ func TestSignTooLate(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// With Quiet (luk send --quiet) a slow signature says nothing; one too
+// late is still an error.
+func TestSignQuiet(t *testing.T) {
+	buf := signWaits(t, 50*time.Millisecond, 5*time.Second)
+	srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+	o := fakeOpts(t, srv, patterned(3<<16))
+	o.Signer, o.Quiet = slowSigner{o.Signer, 300 * time.Millisecond}, true
+	if _, err := Upload(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != "" {
+		t.Fatalf("notice with quiet: %q", buf.String())
+	}
+	signLimit = 100 * time.Millisecond
+	o = fakeOpts(t, srv, patterned(3<<16+1))
+	o.Signer, o.Quiet = slowSigner{o.Signer, 300 * time.Millisecond}, true
+	if _, err := Upload(context.Background(), o); err == nil || !strings.HasPrefix(err.Error(), "the signature took longer than 100ms") {
+		t.Fatalf("%v", err)
+	}
+}

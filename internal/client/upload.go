@@ -46,6 +46,9 @@ type Options struct {
 	// NoBody marks a content that cannot be sent (a stream already
 	// read): an upload lukd wants the content of ends with ErrBodyWanted.
 	NoBody bool
+	// Quiet keeps the notice of a slow signature off (luk send --quiet);
+	// errors still come.
+	Quiet bool
 }
 
 type RejectedError struct {

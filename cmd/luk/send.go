@@ -176,7 +176,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 			}
 			ctx, stop := interruptContext()
 			defer stop()
-			opts := client.Options{URL: url, Pins: pins, Signer: signer, Meta: meta, BWLimit: limit, Parallel: parallel}
+			opts := client.Options{URL: url, Pins: pins, Signer: signer, Meta: meta, BWLimit: limit, Parallel: parallel, Quiet: quiet}
 			src.apply(&opts)
 			if progress && term.IsTerminal(int(os.Stderr.Fd())) {
 				opts.Progress = os.Stderr

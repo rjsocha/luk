@@ -254,11 +254,12 @@ limits:
   covers a touch of a hardware key or unlocking an agent, which happen
   in exactly this window, as the signature covers `h`. The OP, once its
   clear header arrived, must arrive within it too (408). luk prints
-  `waiting for the signature (touch the key)` on stderr, once and only
-  when it is a terminal, when the signature of the OP takes over 1s; one
-  that took over 55s from the handshake is not sent: luk fails with `the
-  signature took longer than 55s; lukd drops a session that waits longer
-  than 60s (limits.channel.auth): run it again`.
+  `waiting for the signature (touch the key)` on stderr, once, only when
+  it is a terminal and not with `luk send --quiet`, when the signature
+  of the OP takes over 1s; one that took over 55s from the handshake is
+  not sent: luk fails with `the signature took longer than 55s; lukd
+  drops a session that waits longer than 60s (limits.channel.auth): run
+  it again`.
 - `limits.channel.pending`: the sessions that have no OP yet, over all
   listeners. When it is full the oldest of them is dropped for the new
   handshake (as `MaxStartups` in sshd, evicting the oldest rather than
