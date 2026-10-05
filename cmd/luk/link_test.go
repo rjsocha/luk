@@ -499,9 +499,12 @@ func TestLinkLs(t *testing.T) {
 		t.Fatalf("links:\n%s", out)
 	}
 	out = mustRun(t, "link", "ls", "-k", e.key, "--json")
-	var ans wire.LinkListAnswer
-	if err := json.Unmarshal([]byte(out), &ans); err != nil || len(ans.Links) != 2 || ans.Truncated {
+	var ans linkList
+	if err := json.Unmarshal([]byte(out), &ans); err != nil || len(ans.Links) != 2 || ans.Permanent == nil || len(ans.Permanent) != 0 || ans.Truncated {
 		t.Fatalf("json %q %v", out, err)
+	}
+	if !strings.Contains(out, `"permanent": []`) {
+		t.Fatalf("json without an empty permanent array: %s", out)
 	}
 	if code, _, _ := runLuk(t, "link", "ls", "extra"); code != 1 {
 		t.Fatalf("positional: exit %d", code)
@@ -511,13 +514,13 @@ func TestLinkLs(t *testing.T) {
 func TestPrintLinks(t *testing.T) {
 	cest := time.FixedZone("CEST", 2*3600)
 	var b strings.Builder
-	if err := printLinks(&b, nil, cest); err != nil || b.String() != "" {
+	if err := printLinks(&b, newLinkList(&wire.LinkListAnswer{}), cest); err != nil || b.String() != "" {
 		t.Fatalf("empty: %q %v", b.String(), err)
 	}
-	err := printLinks(&b, []wire.LinkEntry{
+	err := printLinks(&b, newLinkList(&wire.LinkListAnswer{Links: []wire.LinkEntry{
 		{URL: "https://d.example/d/long-name", File: "notes.txt", Size: 1536, Received: "2026-10-01T10:00:00Z", Expires: "2026-10-08T10:00:00Z", Once: true, Mutable: true, Portal: wire.PortalReveal},
 		{URL: "https://d.example/d/b", Size: 7, Received: "2026-09-30T22:30:00Z", Portal: wire.PortalDirect},
-	}, cest)
+	}}), cest)
 	want := "NAME       SIZE     SENT              EXPIRES           FLAGS                URL\n" +
 		"notes.txt  1.5 KiB  2026-10-01 12:00  2026-10-08 12:00  once,mutable,reveal  https://d.example/d/long-name\n" +
 		"-          7 B      2026-10-01 00:30  never             -                    https://d.example/d/b\n"
@@ -529,9 +532,9 @@ func TestPrintLinks(t *testing.T) {
 // The columns of luk link ls escape the control characters a server sends.
 func TestPrintLinksEscapes(t *testing.T) {
 	var b strings.Builder
-	err := printLinks(&b, []wire.LinkEntry{
+	err := printLinks(&b, newLinkList(&wire.LinkListAnswer{Links: []wire.LinkEntry{
 		{URL: "https://d.example/d/a\x1b[2J", File: "a\tb\nc", Size: 1, Received: "now\r", Expires: "x\x07"},
-	}, time.UTC)
+	}}), time.UTC)
 	want := "NAME     SIZE  SENT   EXPIRES  FLAGS  URL\n" +
 		`a\tb\nc` + "  1 B   " + `now\r` + "  " + `x\a` + "      -      " + `https://d.example/d/a\x1b[2J` + "\n"
 	if err != nil || b.String() != want {

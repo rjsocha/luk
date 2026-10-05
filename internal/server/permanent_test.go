@@ -93,6 +93,18 @@ func TestPermanentUploadServesLast(t *testing.T) {
 	if len(a.Links) != 1 || a.Links[0].URL != v3.VersionURL || a.Links[0].Permanent != "rev/hosts.krl" || a.Links[0].PermanentURL != perm {
 		t.Fatalf("list %+v", a.Links)
 	}
+	// A version that is not the current one is listed as a plain link.
+	cur := filepath.Join(f.root, "s/drop/.db/permanent/permanent/rev/hosts.krl/current")
+	if err := os.Rename(cur, cur+".away"); err != nil {
+		t.Fatal(err)
+	}
+	a = listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
+	if len(a.Links) != 1 || a.Links[0].URL != v3.VersionURL || a.Links[0].Permanent != "" || a.Links[0].PermanentURL != "" {
+		t.Fatalf("list without current %+v", a.Links)
+	}
+	if err := os.Rename(cur+".away", cur); err != nil {
+		t.Fatal(err)
+	}
 	// A link action takes the version URL; the permanent URL is no link.
 	wantNoLink(t, "permanent url", f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: perm}))
 	linkAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: v3.VersionURL}), http.StatusOK)

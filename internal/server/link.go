@@ -296,7 +296,22 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 		if st == nil || st.Type != "local" || st.Expose == "" {
 			return 0, nil, fail(http.StatusUnprocessableEntity, "storage %s of endpoint %s is not an exposed local storage", sn, ep.Name)
 		}
-		err := store.FromConfig(st).Walk(func(rel string, sc store.Sidecar) error {
+		l := store.FromConfig(st)
+		// The current version of each permanent name, by <path>/<name>:
+		// only that version of a name is listed as one.
+		current := map[string]store.PermanentInfo{}
+		if ep.Permanent != nil && sn == ep.Storage {
+			names, err := l.PermanentList()
+			if err != nil {
+				s.log.Warn("link list: permanent names", "storage", sn, "error", err)
+			}
+			for _, pi := range names {
+				if pi.Current != "" {
+					current[pi.Key] = pi
+				}
+			}
+		}
+		err := l.Walk(func(rel string, sc store.Sidecar) error {
 			if sc.AliasOf != "" || sc.Endpoint != ep.Name || sc.OwnerKey == "" || sc.OwnerKey != key || expiredAt(sc.Expires, now) {
 				return nil
 			}
@@ -309,7 +324,8 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 				Once: sc.Client.Once, Mutable: sc.Client.Mutable, Portal: sc.Client.Portal, Access: sc.Client.Access, Updated: sc.Updated,
 			}
 			if p := ep.Permanent; p != nil && sn == ep.Storage && sc.Client.Permanent != "" && sc.PermanentPath == p.Path {
-				if _, _, ok := p.Entry(sc.Client.Permanent); ok {
+				cur := current[p.Path+"/"+sc.Client.Permanent]
+				if _, _, ok := p.Entry(sc.Client.Permanent); ok && cur.Current == rel && cur.ID == sc.ID {
 					e.Permanent = sc.Client.Permanent
 					e.PermanentURL, _ = s.fileURL(cfg, sn, p.Path+"/"+sc.Client.Permanent, "")
 				}

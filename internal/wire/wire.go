@@ -723,8 +723,8 @@ type LinkEntry struct {
 	Portal   string `json:"portal"`
 	Access   string `json:"access,omitempty"`
 	Updated  string `json:"updated,omitempty"`
-	// Permanent is the permanent name the file is a version of, and
-	// PermanentURL its permanent URL; empty for any other file.
+	// Permanent is the permanent name the file is the current version of,
+	// and PermanentURL its permanent URL; empty for any other file.
 	Permanent    string `json:"permanent,omitempty"`
 	PermanentURL string `json:"permanent_url,omitempty"`
 }

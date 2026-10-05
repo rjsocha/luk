@@ -173,14 +173,21 @@ in lukd). The request goes to --endpoint, else to the default endpoint.
 
 Columns: NAME (the file name sent, - without one), SIZE, SENT and EXPIRES in
 local time (never: no expiry), FLAGS (once, mutable, reveal or download,
-private or any, permanent) and URL (luk:// for a private file); newest first. Nothing is printed when
-there is no link. The version of a permanent name (luk send --permanent) is a
-link of its own; a second table lists the permanent names they belong to:
-PERMANENT (the name), SENT (sent time of its version, the one published last)
-and URL (the permanent URL). --json prints the server answer instead; a list cut at
-10000 links has "truncated": true, noted on stderr otherwise.`,
+private or any, permanent) and URL (luk:// for a private file); newest
+first. Nothing is printed when there is no link. The current version of a
+permanent name (luk send --permanent) is a link of its own with the flag
+permanent; after the table a block per permanent name, by name:
+"permanent NAME", its permanent URL ("url") and the URL of its current
+version ("version", as in the table).
+
+--json prints one object: "links" (name, size, sent, expires, updated,
+flags, url, and permanent: the name a link is the current version of) and
+"permanent" (name, url, version_url: the url of its link), both always
+present; a list cut at 10000 links has "truncated": true, noted on stderr
+otherwise.`,
 		Example: `  luk link ls
-  luk link ls -e drop --json`,
+  luk link ls -e drop --json
+  luk link ls --json | jq -r '.permanent[] | "\(.name) \(.url)"'`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, _, err := client.LoadMerged()
@@ -201,15 +208,16 @@ and URL (the permanent URL). --json prints the server answer instead; a list cut
 			if err != nil {
 				return unknownKeyHint(err, agentKeys)
 			}
+			ls := newLinkList(a)
 			if asJSON {
 				enc := json.NewEncoder(out)
 				enc.SetIndent("", "  ")
-				return enc.Encode(a)
+				return enc.Encode(ls)
 			}
 			if a.Truncated {
 				fmt.Fprintf(cmd.ErrOrStderr(), "luk: the server lists the newest %d links only\n", len(a.Links))
 			}
-			return printLinks(out, a.Links, time.Local)
+			return printLinks(out, ls, time.Local)
 		},
 	}
 	f := cmd.Flags()
@@ -220,73 +228,93 @@ and URL (the permanent URL). --json prints the server answer instead; a list cut
 	return cmd
 }
 
-// printLinks writes the links as aligned columns, times in loc; nothing
-// for none.
-func printLinks(w io.Writer, links []wire.LinkEntry, loc *time.Location) error {
-	if len(links) == 0 {
-		return nil
-	}
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSIZE\tSENT\tEXPIRES\tFLAGS\tURL")
-	for _, l := range links {
-		var flags []string
+// linkList is the output of luk link ls --json: the links, newest first,
+// and the permanent names published by the signer, by name; a permanent
+// name joins the link of its current version by VersionURL == URL.
+type linkList struct {
+	Links     []linkItem      `json:"links"`
+	Permanent []permanentItem `json:"permanent"`
+	Truncated bool            `json:"truncated,omitempty"`
+}
+
+type linkItem struct {
+	Name    string   `json:"name,omitempty"`
+	Size    int64    `json:"size"`
+	Sent    string   `json:"sent"`
+	Expires string   `json:"expires,omitempty"`
+	Updated string   `json:"updated,omitempty"`
+	Flags   []string `json:"flags"`
+	URL     string   `json:"url"`
+	// Permanent is the permanent name the link is the current version of.
+	Permanent string `json:"permanent,omitempty"`
+}
+
+type permanentItem struct {
+	Name       string `json:"name"`
+	URL        string `json:"url"`
+	VersionURL string `json:"version_url"`
+}
+
+// newLinkList is the output of the answer a. The newest link listed for
+// a permanent name is its current version; an older one listed as a
+// version of the same name is a plain link.
+func newLinkList(a *wire.LinkListAnswer) linkList {
+	out := linkList{Links: []linkItem{}, Permanent: []permanentItem{}, Truncated: a.Truncated}
+	seen := map[[2]string]bool{}
+	for _, l := range a.Links {
+		it := linkItem{Name: l.File, Size: l.Size, Sent: l.Received, Expires: l.Expires, Updated: l.Updated, Flags: []string{}, URL: l.URL}
 		if l.Once {
-			flags = append(flags, "once")
+			it.Flags = append(it.Flags, "once")
 		}
 		if l.Mutable {
-			flags = append(flags, "mutable")
+			it.Flags = append(it.Flags, "mutable")
 		}
 		if l.Portal == wire.PortalReveal || l.Portal == wire.PortalDownload {
-			flags = append(flags, l.Portal)
+			it.Flags = append(it.Flags, l.Portal)
 		}
 		if l.Access != "" {
-			flags = append(flags, l.Access)
+			it.Flags = append(it.Flags, l.Access)
 		}
-		if l.Permanent != "" {
-			flags = append(flags, "permanent")
+		if k := [2]string{l.Permanent, l.PermanentURL}; l.Permanent != "" && !seen[k] {
+			// The links come newest first.
+			seen[k] = true
+			it.Flags = append(it.Flags, "permanent")
+			it.Permanent = l.Permanent
+			out.Permanent = append(out.Permanent, permanentItem{Name: l.Permanent, URL: l.PermanentURL, VersionURL: l.URL})
 		}
+		out.Links = append(out.Links, it)
+	}
+	slices.SortFunc(out.Permanent, func(a, b permanentItem) int {
+		return cmp.Or(strings.Compare(a.Name, b.Name), strings.Compare(a.URL, b.URL))
+	})
+	return out
+}
+
+// printLinks writes the links as aligned columns, times in loc, then a
+// block per permanent name; nothing for no links.
+func printLinks(w io.Writer, ls linkList, loc *time.Location) error {
+	if len(ls.Links) == 0 {
+		return nil
+	}
+	p := client.Printable
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tSIZE\tSENT\tEXPIRES\tFLAGS\tURL")
+	for _, l := range ls.Links {
 		exp := "never"
 		if l.Expires != "" {
 			exp = localTime(l.Expires, loc)
 		}
-		p := client.Printable
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", p(cmp.Or(l.File, "-")), client.HumanBytes(l.Size), p(localTime(l.Received, loc)), p(exp), p(cmp.Or(strings.Join(flags, ","), "-")), p(l.URL))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", p(cmp.Or(l.Name, "-")), client.HumanBytes(l.Size), p(localTime(l.Sent, loc)), p(exp), p(cmp.Or(strings.Join(l.Flags, ","), "-")), p(l.URL))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	return printPermanentLinks(w, links, loc)
-}
-
-// printPermanentLinks writes, after the links, the permanent names their
-// versions belong to: the name, the sent time of its newest version listed
-// (the current one once the server has published it) and the permanent
-// URL, by name; nothing without one.
-func printPermanentLinks(w io.Writer, links []wire.LinkEntry, loc *time.Location) error {
-	type perm struct{ name, url, sent string }
-	var perms []*perm
-	byURL := map[string]*perm{}
-	for _, l := range links {
-		if l.Permanent == "" || byURL[l.PermanentURL] != nil {
-			// The links come newest first.
-			continue
+	for _, pm := range ls.Permanent {
+		if _, err := fmt.Fprintf(w, "\npermanent %s\n  url      %s\n  version  %s\n", p(pm.Name), p(cmp.Or(pm.URL, "-")), p(pm.VersionURL)); err != nil {
+			return err
 		}
-		pm := &perm{name: l.Permanent, url: l.PermanentURL, sent: l.Received}
-		byURL[l.PermanentURL] = pm
-		perms = append(perms, pm)
 	}
-	if len(perms) == 0 {
-		return nil
-	}
-	slices.SortFunc(perms, func(a, b *perm) int { return cmp.Or(strings.Compare(a.name, b.name), strings.Compare(a.url, b.url)) })
-	fmt.Fprintln(w)
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "PERMANENT\tSENT\tURL")
-	p := client.Printable
-	for _, pm := range perms {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", p(pm.name), p(localTime(pm.sent, loc)), p(cmp.Or(pm.url, "-")))
-	}
-	return tw.Flush()
+	return nil
 }
 
 // localTime is an RFC 3339 time in loc, to the minute; as given when it

@@ -876,9 +876,10 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   "file", "size", "received", "expires", "once", "mutable", "portal",
   "access", "updated", "permanent", "permanent_url"}, ...]}`, newest first (by acceptance order, see Acceptance order; `file`,
   `expires`, `access` and `updated` omitted when empty, `links` is `[]`
-  for none). A version of a permanent name the endpoint allocates has
-  `permanent` (the name) and `permanent_url` (its permanent URL); both
-  are omitted for any other file. The `url` of a private file is its `luk://` URL, as the
+  for none). The current version of a permanent name the endpoint
+  allocates (the one `current/meta.json` names) has `permanent` (the
+  name) and `permanent_url` (its permanent URL); both are omitted for
+  any other file, an older version not removed yet included. The `url` of a private file is its `luk://` URL, as the
   upload answered it (see Private files). At most 10000
   entries: the newest, with `"truncated": true`. Sidecars that cannot be
   read are left out and logged. Logged as `link list`.
@@ -1065,8 +1066,9 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   names keeps the directory they live in).
 - Listing: the endpoint listing shows `permanent: true` when an entry
   grants the signer, never the names or patterns. `luk link ls` lists
-  the version of a name as a link with the flag `permanent`, and then the
-  permanent names those versions belong to (see Client).
+  the current version of a name as a link with the flag `permanent`, and
+  then a block per permanent name with its permanent URL and the URL of
+  that version (see Client).
 - Cost: a store, a removal and every maintenance pass of a storage with
   permanent names read every sidecar of the base (O(files)), as aliases
   do; the gate of an upload reads them once.
@@ -3994,7 +3996,8 @@ luk link URL (--rm | --ttl DURATION|max | -f|--file PATH | --stdin)
 luk link ls [-e|--endpoint NAME|URL] [-k|--key PATH|SHA256:FP] [--json]
                                  list your links on the endpoint (see
                                  Links, list): NAME, SIZE, SENT, EXPIRES,
-                                 FLAGS, URL
+                                 FLAGS, URL, then a block per permanent
+                                 name; --json: {"links", "permanent"}
 
 luk config show [--layer global|user]   merged config with the source of
                                  each value and both layer paths; --layer
@@ -4231,16 +4234,65 @@ skip db.sql.gz
 `luk link ls` sends a link `list` request to `--endpoint`, else to the
 default endpoint (none: `no endpoint: pass --endpoint or set default in
 the config`, exit 1), signed with the key chosen as for `send`. Output:
-aligned columns `URL` (the `luk://` URL of a private file), `SIZE`
+aligned columns `NAME` (the file name sent, `-` without one), `SIZE`
 (binary units: `512 B`, `1.5 KiB`), `SENT` and `EXPIRES` (local time
 `2006-01-02 15:04`; `never` without an expiry), `FLAGS` (`once`, `mutable`,
 then `reveal` or `download`, then `private` or `any`, then `permanent`,
-comma separated; `-` for none), newest first, under a header line;
-nothing at all for no links (exit 0). When versions of permanent names
-are among the links, a blank line and a second table follow, by name:
-`PERMANENT` (the name), `SENT` (the sent time of its newest version
-listed, the current one) and `URL` (the permanent URL). A truncated answer adds `luk: the server lists the newest
-<n> links only` on stderr. `--json` prints the server answer instead.
+comma separated; `-` for none) and `URL` (the `luk://` URL of a private
+file), newest first, under a header line; nothing at all for no links
+(exit 0). The current version of a permanent name is a row of its own
+with the flag `permanent` and its version URL, which is unique. After
+the table, one block per permanent name the signer published, by name,
+each after a blank line: `permanent <name>`, then `  url      <permanent
+URL>` and `  version  <version URL>` (exactly the `URL` of its row, the
+join key); no block when there is none. The texts are escaped as every
+server text is (see Client). A truncated answer adds `luk: the server
+lists the newest <n> links only` on stderr.
+
+```
+$ luk link ls
+NAME       SIZE      SENT              EXPIRES  FLAGS      URL
+README.md  160 B     2026-10-05 14:04  never    permanent  https://drop.example.com/d/raFvNMX3MD4AVzybvdaHe5N6wBbstByy
+data.bin   20.0 MiB  2026-10-05 14:04  never    -          https://drop.example.com/d/Knpa3tPvfh6SDH9suyN93yXP79F7Yzha
+
+permanent example.txt
+  url      https://drop.example.com/d/permanent/example.txt
+  version  https://drop.example.com/d/raFvNMX3MD4AVzybvdaHe5N6wBbstByy
+```
+
+`--json` prints one object, built by the client from the server answer:
+
+```json
+{
+  "links": [
+    {"name": "README.md", "size": 160, "sent": "2026-10-05T12:04:00Z",
+     "flags": ["permanent"], "url": "https://drop.example.com/d/raFv...",
+     "permanent": "example.txt"},
+    {"name": "data.bin", "size": 20971520, "sent": "2026-10-05T12:04:00Z",
+     "flags": [], "url": "https://drop.example.com/d/Knpa..."}
+  ],
+  "permanent": [
+    {"name": "example.txt", "url": "https://drop.example.com/d/permanent/example.txt",
+     "version_url": "https://drop.example.com/d/raFv..."}
+  ]
+}
+```
+
+`links` (newest first): `name` (omitted without one), `size`, `sent`
+and `expires` (RFC 3339 as the server sends them; `expires` omitted
+without an expiry), `updated` (the last replace, omitted when none),
+`flags` (as the `FLAGS` column, `[]` for none), `url`, and `permanent`
+(the name the link is the current version of; omitted otherwise).
+`permanent` (by name): `name`, `url` (the permanent URL) and
+`version_url` (the `url` of its link). Both arrays are always present,
+`[]` when empty; `"truncated": true` marks a list cut at 10000 links. A
+permanent name joins its link by `version_url == url`:
+
+```
+luk link ls --json | jq -r '.permanent[] | "\(.name) \(.url)"'
+luk link ls --json | jq -r '.permanent as $p | .links[] | select(.permanent) | .url as $u | "\(.name) \($p[] | select(.version_url == $u) | .url)"'
+```
+
 Exit codes as for `send`.
 
 `luk send` output on stdout: for `respond: url` (201) the URL and a
