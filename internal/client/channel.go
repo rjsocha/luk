@@ -33,6 +33,10 @@ const (
 	maxAttempt = 1<<12 - 1
 )
 
+// opWait bounds the answer to the OP of a session, as the decision
+// timeout of luk get does; tests shorten it.
+var opWait = defaultDecision
+
 // ErrNoPin is a Dial without a pin outside discovery: luk never trusts an
 // endpoint it has no key for.
 var ErrNoPin = errors.New("no pin for this endpoint: run luk scan URL")
@@ -202,7 +206,9 @@ func Dial(ctx context.Context, o DialOptions) (*Channel, error) {
 	}
 	sess, peer, err := hs.Finish(body)
 	if err != nil {
-		return nil, err
+		// The prologue binds the handshake to the Host and path luk sent;
+		// a proxy that rewrote either makes lukd sign another one.
+		return nil, fmt.Errorf("the handshake failed: was the Host or path changed on the way (a proxy)? %w", err)
 	}
 	if !o.Discover && !matchesAny(o.Pins, peer) {
 		return nil, &PinMismatchError{Got: peer}
@@ -257,7 +263,8 @@ func (c *Channel) Close() {
 }
 
 // Do sends the OP of the session (kind OP, attempt 0) and returns the
-// inner response; body may be nil. A session takes one OP.
+// inner response; body may be nil. A session takes one OP. An answer that
+// does not come within opWait is a NoAnswer TransferError.
 func (c *Channel) Do(ctx context.Context, req channel.Request, body io.Reader) (*InnerResponse, error) {
 	var head bytes.Buffer
 	if err := channel.WriteHead(&head, req); err != nil {
@@ -274,7 +281,13 @@ func (c *Channel) Do(ctx context.Context, req channel.Request, body io.Reader) (
 	if body != nil {
 		plain = io.MultiReader(&head, body)
 	}
-	return c.message(ctx, channel.Nonce{Kind: channel.KindOp}, plain)
+	octx, cancel := context.WithTimeout(ctx, opWait)
+	defer cancel()
+	resp, err := c.message(octx, channel.Nonce{Kind: channel.KindOp}, plain)
+	if err != nil && ctx.Err() == nil && errors.Is(octx.Err(), context.DeadlineExceeded) {
+		return nil, &TransferError{Reason: NoAnswer, Host: c.host, Total: -1, Wait: opWait, Err: context.DeadlineExceeded}
+	}
+	return resp, err
 }
 
 // Send sends one PART, COMPLETE, ABORT or KEEPALIVE message under n; body

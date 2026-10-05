@@ -66,19 +66,17 @@ func linkOp(ctx context.Context, o Options, method, link, action, metaS string) 
 	if err != nil {
 		return nil, err
 	}
-	c, err := Dial(ctx, DialOptions{URL: u, Pins: o.Pins})
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
 	header := map[string]string{wire.HeaderLink: link, wire.HeaderLinkAction: action}
-	req, err := signedOp(o, c, method, metaS, header, func(host, path, ts, nonce string) (string, []byte) {
-		return wire.LinkNamespace, wire.LinkCanonicalText(method, host, path, link, action, ts, nonce, metaS, c.H())
+	c, resp, err := opSession(ctx, u, o.Pins, func(c *Channel) (channel.Request, error) {
+		return signedOp(o, c, method, metaS, header, func(host, path, ts, nonce string) (string, []byte) {
+			return wire.LinkNamespace, wire.LinkCanonicalText(method, host, path, link, action, ts, nonce, metaS, c.H())
+		})
 	})
 	if err != nil {
 		return nil, err
 	}
-	return c.Do(ctx, req, nil)
+	c.Close()
+	return resp, nil
 }
 
 // linkReplace replaces the content of o.Link through the channel.

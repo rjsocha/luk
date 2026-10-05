@@ -33,6 +33,9 @@ var (
 	partBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
 	// abortTimeout bounds the ABORT of an upload that failed.
 	abortTimeout = 5 * time.Second
+	// completeWait bounds each attempt of a COMPLETE: lukd answers one
+	// sent again from the answer it kept, or once the first one is done.
+	completeWait = 2 * time.Minute
 )
 
 const (
@@ -95,21 +98,40 @@ func uploadParts(ctx context.Context, o Options, op opFunc) (*partsResult, error
 	}
 }
 
+// opSession dials u and sends the OP that op signs for the channel. A
+// 404 unknown session to the OP is a session lukd dropped before its OP
+// came (under a burst of handshakes the oldest pending ones go): it is
+// dialed once more, with a new handshake and a new signature.
+func opSession(ctx context.Context, u *url.URL, pins []channel.Pin, op opFunc) (*Channel, *InnerResponse, error) {
+	for again := true; ; again = false {
+		c, err := Dial(ctx, DialOptions{URL: u, Pins: pins})
+		if err != nil {
+			return nil, nil, err
+		}
+		req, err := op(c)
+		if err != nil {
+			c.Close()
+			return nil, nil, err
+		}
+		resp, err := c.Do(ctx, req, nil)
+		if err == nil {
+			return c, resp, nil
+		}
+		c.Close()
+		var te *TransportError
+		if !again || !errors.As(err, &te) || te.Status != http.StatusNotFound || te.Message != "unknown session" {
+			return nil, nil, err
+		}
+	}
+}
+
 // uploadOnce is one session of an upload.
 func uploadOnce(ctx context.Context, o Options, u *url.URL, op opFunc, meter *partsMeter) (*partsResult, error) {
-	c, err := Dial(ctx, DialOptions{URL: u, Pins: o.Pins})
+	c, resp, err := opSession(ctx, u, o.Pins, op)
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
-	req, err := op(c)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.Do(ctx, req, nil)
-	if err != nil {
-		return nil, err
-	}
 	if resp.Status != http.StatusOK || o.Meta.DryRun {
 		return &partsResult{resp: resp}, nil
 	}
@@ -519,6 +541,10 @@ func (r *partsRun) sendPart(ctx context.Context, j partJob) error {
 			return err
 		case errors.As(err, &te) && te.Status == http.StatusNotFound:
 			return errSessionGone
+		case errors.As(err, &te) && te.Status == http.StatusRequestEntityTooLarge:
+			// lukd answers a part too large inside the channel: a 413 in
+			// the clear is a proxy on the way, and every attempt gets it.
+			return fmt.Errorf("the part size (%s) exceeds what a proxy on the way accepts: HTTP 413", HumanBytes(r.partSize))
 		case err != nil:
 			last = err
 		case resp.Status == http.StatusOK:
@@ -533,6 +559,10 @@ func (r *partsRun) sendPart(ctx context.Context, j partJob) error {
 				r.meter.add(-sent)
 			}
 			return nil
+		case resp.Status == http.StatusConflict && errorText(resp.Body) == "older attempt":
+			// lukd has a newer attempt of the part than this one: the next
+			// attempt is newer than every one sent, so it counts no failure.
+			continue
 		case resp.Status == http.StatusTooManyRequests && message(errorText(resp.Body)) != wire.ErrQuotaExceeded:
 			if err := sleep(ctx, retryAfter(resp)); err != nil {
 				return err
@@ -581,14 +611,18 @@ func (r *partsRun) attempt(ctx context.Context, j partJob, n channel.Nonce) (res
 }
 
 // complete sends the COMPLETE of round seq, again when its answer is
-// lost. A session lukd lost by then leaves the result unknown.
+// lost or does not come within completeWait: lukd answers the attempt
+// that follows from the answer it kept, or once the first one is done. A
+// session lukd lost by then leaves the result unknown.
 func (r *partsRun) complete(ctx context.Context, seq uint32) (*InnerResponse, error) {
 	for failed := 0; ; {
 		n, err := r.nonce(channel.Nonce{Kind: channel.KindComplete, Number: seq})
 		if err != nil {
 			return nil, err
 		}
-		resp, err := r.c.Send(ctx, n, nil)
+		actx, cancel := context.WithTimeout(ctx, completeWait)
+		resp, err := r.c.Send(actx, n, nil)
+		cancel()
 		var te *TransportError
 		switch {
 		case err == nil:
@@ -597,6 +631,8 @@ func (r *partsRun) complete(ctx context.Context, seq uint32) (*InnerResponse, er
 			return nil, ctx.Err()
 		case errors.As(err, &te) && te.Status == http.StatusNotFound:
 			return nil, ErrResultUnknown
+		case errors.Is(actx.Err(), context.DeadlineExceeded):
+			err = &TransferError{Reason: NoAnswer, Host: r.host, Total: -1, Wait: completeWait, Err: context.DeadlineExceeded}
 		}
 		if failed++; failed == partAttempts {
 			return nil, err

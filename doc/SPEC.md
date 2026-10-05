@@ -96,6 +96,14 @@ Content-Type: application/vnd.luk.channel
   environment variables are not used. A session lives in the memory of
   one lukd and its requests go on separate connections, so all of them
   must reach that lukd.
+- A proxy on the way must accept a request body of `parts.size` plus
+  about 0.03% (the framing of the channel), keep the `Host` and the path
+  (a rewrite of either fails the handshake: luk then reports `the
+  handshake failed: was the Host or path changed on the way (a
+  proxy)?`), and send each request to the lukd of its session. It needs
+  no request buffering, but may buffer. A `413` of a proxy to a part is
+  not retried: `the part size (<size>) exceeds what a proxy on the way
+  accepts: HTTP 413` (exit 3).
 
 ### Handshake
 
@@ -250,7 +258,9 @@ limits:
   listeners. When it is full the oldest of them is dropped for the new
   handshake (as `MaxStartups` in sshd, evicting the oldest rather than
   refusing the newest). There is no limit per address: behind a proxy
-  every client has the address of the proxy.
+  every client has the address of the proxy. A session dropped so
+  answers its OP 404 `unknown session` in the clear; luk then dials once
+  more (a new handshake and a new signature), not more.
 - `limits.channel.idle`: a session that has its OP and no upload, without
   a request. The session of an upload follows the time of its upload
   (see Uploads in parts).
@@ -972,14 +982,20 @@ luk sends the parts with `--parallel` workers (default 1):
   fails the upload (ABORT). A 429 of the window waits `Retry-After` and
   counts no attempt; a 408 also takes one worker away (down to one); any
   other refusal ends the upload. 404 `unknown session` to a part is the
-  restart above.
+  restart above. A 409 `older attempt` counts no attempt: the part goes
+  again under a newer one. A 413 in the clear is a proxy limit (see
+  Carrier) and is not sent again.
 - Before the COMPLETE luk checks that a file has the size and
   modification time its hash pass saw: else `file changed while sending:
   send it again` (exit 3, after an ABORT). A 422 of a file whose content
   no longer has its signed sha256 is a hash mismatch (exit 4).
 - Missing parts listed by the COMPLETE are sent again, up to 3 rounds; a
   stream cannot send a part again (an error). A COMPLETE whose answer is
-  lost is sent again (5 attempts) and gets the kept answer.
+  lost, or does not come within 2m, is sent again (5 attempts): lukd
+  answers it from the kept answer, or once the first one is done. A
+  COMPLETE without an answer after its attempts fails the upload (`the
+  server gave no answer within 120s`, exit 3); only a 404 `unknown
+  session` to it leaves the result unknown.
 - A stream is read ahead into two buffers of `parts.size` per worker,
   so the next part is read while one goes. While luk waits on the
   source it sends a KEEPALIVE every `idle`/3 of the offer, and not
@@ -5121,11 +5137,13 @@ alias:
   are compared with the signed ones; `--progress` prints nothing for it
   and `--json` shows `"deduplicated": true`.
 - A part attempt that makes no progress for 30s, in the sending or in the
-  wait for its answer, is cut and sent again (see Uploads in parts). luk
-  sets no limit of its own on the answers to the OP and to the COMPLETE,
-  nor on the whole transfer; a slow but progressing one is never cut.
-  Only the server counts: time spent reading a slow source or pacing for
-  `--bwlimit` never does.
+  wait for its answer, is cut and sent again (see Uploads in parts). The
+  answer to the OP (an upload, a link remove, ttl or list, the endpoint
+  listing of `luk scan`) must come within 60s (`the server gave no
+  answer within 60s`, exit 3); each attempt of a COMPLETE gets 2m and is
+  then sent again. There is no limit on the whole transfer; a slow but
+  progressing one is never cut. Only the server counts: time spent
+  reading a slow source or pacing for `--bwlimit` never does.
 - The signed GET and HEAD of `luk get` give up when the headers of the
   answer do not come within 60s (`the server gave no answer within
   60s`); then every wait for the server is limited to 2m without
