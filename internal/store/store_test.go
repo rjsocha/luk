@@ -508,7 +508,9 @@ func TestPutConcurrentVersion(t *testing.T) {
 	}
 	wg.Wait()
 	for i := range n {
-		if errs[i] != nil || stored[i] != "x" {
+		// An upload that is older by order than the file already stored
+		// goes to the history instead of becoming current.
+		if errs[i] != nil || !strings.HasPrefix(stored[i], "x") {
 			t.Fatal(stored[i], errs[i])
 		}
 	}
@@ -1377,11 +1379,12 @@ func TestVersionRotationAlias(t *testing.T) {
 	}
 	mustPut(t, l, "abc", "four", 4, "cur")
 	checkAlias(t, l, "cur", "abc", "four")
-	// An older upload does not take the alias from a newer version.
+	// An older upload is stored as a version and does not take the alias
+	// from the newer current file.
 	l = Local{Base: t.TempDir()}
 	mustPut(t, l, "abc", "new", 5, "cur")
 	mustPut(t, l, "abc", "old", 4, "cur")
-	checkAlias(t, l, "cur", "abc."+at(5), "new")
+	checkAlias(t, l, "cur", "abc", "new")
 }
 
 func TestVersionRotationConcurrentOpenClaim(t *testing.T) {
@@ -1466,5 +1469,65 @@ func mkdirAll(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// accepted is sidecar(id) with the acceptance order ns, received at recv.
+func accepted(id string, ns int64, recv string) Sidecar {
+	sc := sidecar(id)
+	sc.Accepted, sc.Received = ns, recv
+	return sc
+}
+
+func TestReplaceOlderSkipped(t *testing.T) {
+	l := Local{Base: t.TempDir(), Conflict: "replace"}
+	if _, err := l.Store(srcFile(t, t.TempDir(), "newer"), "x", accepted("new", 2000, "2026-09-30T10:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := l.Store(srcFile(t, t.TempDir(), "older"), "x", accepted("old", 1000, "2026-09-30T11:00:00Z"))
+	if err != nil || !res.Older || res.Rel != "x" {
+		t.Fatalf("older: %+v, %v", res, err)
+	}
+	if body, sc := readAll(t, l, "x"); body != "newer" || sc.ID != "new" {
+		t.Fatalf("stored %q %+v", body, sc)
+	}
+	res, err = l.Store(srcFile(t, t.TempDir(), "newest"), "x", accepted("newest", 3000, "2026-09-30T09:00:00Z"))
+	if err != nil || res.Older {
+		t.Fatalf("newer: %+v, %v", res, err)
+	}
+	if body, sc := readAll(t, l, "x"); body != "newest" || sc.ID != "newest" {
+		t.Fatalf("stored %q %+v", body, sc)
+	}
+	if _, err := l.Store(srcFile(t, t.TempDir(), "again"), "x", accepted("newest", 3000, "2026-09-30T09:00:00Z")); err != nil {
+		t.Fatalf("retry of the stored upload: %v", err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(l.Base, DataDir))
+	if len(entries) != 1 {
+		t.Fatalf("leftovers: %v", entries)
+	}
+}
+
+func TestVersionOlderToHistory(t *testing.T) {
+	l := Local{Base: t.TempDir(), Conflict: "version"}
+	if _, err := l.Store(srcFile(t, t.TempDir(), "newer"), "x", accepted("new", 2000, "2026-09-30T10:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := l.Store(srcFile(t, t.TempDir(), "older"), "x", accepted("old", 1000, "2026-09-30T11:00:00Z"))
+	if err != nil || res.Older || res.Rel == "x" {
+		t.Fatalf("older: %+v, %v", res, err)
+	}
+	ts := strconv.FormatInt(time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC).Unix(), 10)
+	if res.Rel != "x."+ts {
+		t.Fatalf("version %q, want x.%s", res.Rel, ts)
+	}
+	if body, sc := readAll(t, l, "x"); body != "newer" || sc.ID != "new" {
+		t.Fatalf("current %q %+v", body, sc)
+	}
+	if body, sc := readAll(t, l, res.Rel); body != "older" || sc.ID != "old" {
+		t.Fatalf("version %q %+v", body, sc)
+	}
+	entries, _ := os.ReadDir(filepath.Join(l.Base, DataDir))
+	if len(entries) != 2 {
+		t.Fatalf("data dir: %v", entries)
 	}
 }

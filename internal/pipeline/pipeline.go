@@ -755,6 +755,11 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, Outcome) {
 					if err != nil {
 						return i + 1, fmt.Errorf("store %s: %w", sn, err)
 					}
+					if res.Older {
+						d.log.Info("store: older upload skipped", "id", j.Entry.ID, "pipeline", name, "storage", sn, "path", res.Rel, "stored", res.Kept)
+						stored = append(stored, sn+":"+res.Rel+" (older)")
+						continue
+					}
 					if res.Dedup {
 						d.log.Info("deduplicated", "id", j.Entry.ID, "pipeline", name, "storage", sn, "path", res.Rel)
 						stored = append(stored, sn+":"+res.Rel+" (dedup)")
@@ -905,7 +910,10 @@ func (d *Dispatcher) runReplace(j Job, names []string) (bool, []Outcome) {
 				undo()
 				return false, fail(t.pipeline, t.step, fmt.Errorf("store %s: %w", t.storage, err))
 			}
-			if !res.Dedup && !last {
+			if res.Older {
+				d.log.Info("store: older upload skipped", "id", j.Entry.ID, "pipeline", t.pipeline, "storage", t.storage, "path", res.Rel, "stored", res.Kept)
+			}
+			if !res.Dedup && !res.Older && !last {
 				st, _ := localStorage(cfg, t.storage)
 				done = append(done, placed{l: store.FromConfig(st), rel: res.Rel, id: j.Sidecar.ID})
 			}

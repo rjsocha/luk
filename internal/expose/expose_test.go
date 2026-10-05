@@ -318,7 +318,7 @@ func TestOnceReplacedBeforeClaim(t *testing.T) {
 		st := store.Local{Base: e.base, Conflict: "replace"}
 		src := filepath.Join(t.TempDir(), "src")
 		os.WriteFile(src, []byte("second"), 0o640)
-		if _, err := st.Put(src, "o", store.Sidecar{ID: "second", Client: wire.Meta{Portal: wire.PortalDirect}}); err != nil {
+		if _, err := st.Put(src, "o", store.Sidecar{ID: "second", Received: t0.Add(time.Minute).Format(time.RFC3339), Client: wire.Meta{Portal: wire.PortalDirect}}); err != nil {
 			t.Fatal(err)
 		}
 	}

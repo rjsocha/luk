@@ -313,8 +313,9 @@ func TestAliasReplaceTarget(t *testing.T) {
 	l := Local{Base: t.TempDir(), Conflict: "replace", Catalog: true}
 	mustPut(t, l, "d1", "one", 1, "cur")
 	mustPut(t, l, "d2", "two", 2, "cur")
+	// An older upload under replace is skipped, the alias stays.
 	mustPut(t, l, "d2", "old", 0, "cur")
-	checkAlias(t, l, "cur", "d1", "one")
+	checkAlias(t, l, "cur", "d2", "two")
 	mustPut(t, l, "d2", "newer", 5, "cur")
 	checkAlias(t, l, "cur", "d2", "newer")
 	mustPut(t, l, "d2", "plain", 6, "")

@@ -873,6 +873,11 @@ type Stored struct {
 	Dedup      bool
 	Replaced   []PermanentVersion
 	Superseded *PermanentVersion
+	// Older reports that, under conflict replace, the file was skipped
+	// because the stored one (Kept, the id of its upload) was accepted
+	// later; nothing was written.
+	Older bool
+	Kept  string
 }
 
 // Store is Put reporting a deduplicated store.
@@ -985,6 +990,13 @@ func (l Local) StoreStaged(s *Staged, rel string, sc Sidecar) (Stored, error) {
 			return Stored{}, fmt.Errorf("%q: an alias: %w", rel, ErrInvalid)
 		}
 		oldAlias, _ = prev.alias()
+		if l.Conflict == "replace" && prev.ID != sc.ID && !Newer(sc, rel, prev, rel) {
+			// An upload accepted before the stored one never replaces it,
+			// however late it finishes.
+			if fi, err := r.Lstat(p); err == nil && fi.Mode().IsRegular() {
+				return Stored{Rel: rel, Older: true, Kept: prev.ID}, nil
+			}
+		}
 	}
 	if err := l.admitPermanent(r, sc); err != nil {
 		return Stored{}, err
@@ -1091,6 +1103,11 @@ func (l Local) put(r *os.Root, src, tmp string, staged fs.FileInfo, rel string, 
 	}
 	if err := l.overLinks(r, sc, skip); err != nil {
 		return "", "", false, err
+	}
+	if l.versioning() {
+		if v, ok, err := l.placeOlder(r, tmp, rel, sc, stmp, vers); ok || err != nil {
+			return v, "", false, err
+		}
 	}
 	old, backup := "", ""
 	if l.versioning() {
@@ -1358,6 +1375,61 @@ func (l Local) rotate(r *os.Root, tmp, rel string, vers []string) (string, error
 	}
 	hookRotate(2)
 	return old, nil
+}
+
+// placeOlder places tmp as a version of rel, named by the received time of
+// sc, when rel holds a file accepted after sc: the current file stays. ok
+// is false when sc is not older and has to be placed by rotate.
+func (l Local) placeOlder(r *os.Root, tmp, rel string, sc Sidecar, stmp string, vers []string) (_ string, ok bool, err error) {
+	p := l.phys(rel)
+	fi, err := r.Lstat(p)
+	if err != nil || !fi.Mode().IsRegular() {
+		return "", false, nil
+	}
+	cur, err := readSidecar(r, p)
+	if err != nil || cur.AliasOf != "" || cur.ID == sc.ID || l.stale(r, cur, fi, vers) || Newer(sc, rel, cur, rel) {
+		return "", false, nil
+	}
+	ts := time.Now().Unix()
+	if t := receivedTime(sc.Received); !t.IsZero() {
+		ts = t.Unix()
+	}
+	for i := 0; i <= maxVer; i++ {
+		v := rel + "." + strconv.FormatInt(ts, 10)
+		if i > 0 {
+			v += fmt.Sprintf(".%06d", i)
+		}
+		vp := l.phys(v)
+		if err := mkdirs(r, path.Dir(vp)); err != nil {
+			return "", true, err
+		}
+		if err := noSymlinks(r, vp); err != nil {
+			return "", true, err
+		}
+		if err := noSymlinks(r, sidecarRel(vp)); err != nil {
+			return "", true, err
+		}
+		err := r.Link(tmp, vp)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err == nil {
+			if err = syncDir(r, path.Dir(vp)); err == nil {
+				if err = mkdirs(r, path.Dir(sidecarRel(vp))); err == nil {
+					err = r.Rename(stmp, sidecarRel(vp))
+				}
+			}
+			if err == nil {
+				err = syncDir(r, path.Dir(sidecarRel(vp)))
+			}
+			if err != nil {
+				r.Remove(vp)
+				r.Remove(sidecarRel(vp))
+			}
+		}
+		return v, true, err
+	}
+	return "", true, fmt.Errorf("%s: too many versions", rel)
 }
 
 // keep makes the version of the file fi at rel.
