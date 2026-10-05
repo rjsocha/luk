@@ -16,14 +16,16 @@ Binaries: `luk` (client), `lukd` (server). Language: Go, static binaries
 
 Stage: phases 1 to 6 are implemented; the Phases section keeps their
 history, and Later lists what is not implemented yet (S3 storage among
-it).
+it). Uploads, link requests and the endpoint listing have since moved
+into the channel (see Channel, Uploads in parts): the signed `PUT` with
+`Expect: 100-continue` the phases describe is gone.
 
 ## Model
 
 ```
-luk PUT --> lukd ingest --> queue --> pipeline(s) --> storage --> expose --> GET
-            (auth, ACL,             (steps: run,     (local)     (optional
-             match, 100-continue)    store)                       HTTP)
+luk --channel--> lukd ingest --> queue --> pipeline(s) --> storage --> expose --> GET
+     (Noise NX,  (auth, ACL,             (steps: run,     (local)     (optional
+      parts)      match, parts)           store)                       HTTP)
 ```
 
 - **endpoint** - an upload entry point (`/backup`, `/drop`). It is the
@@ -40,47 +42,360 @@ luk PUT --> lukd ingest --> queue --> pipeline(s) --> storage --> expose --> GET
   storage to signed requests (see Private files), or, as the `expose` of
   a storage, its public files and a signed listing (see Signed expose).
 
+## Channel
+
+luk reaches the endpoints of lukd (uploads, link requests, the endpoint
+listing) through a channel between the two programs: a Noise handshake
+authenticates lukd by its identity key, then every request and every
+answer travels encrypted and authenticated from luk to lukd and back.
+HTTP, TLS and the proxies in between only carry it. luk does not verify
+TLS for an endpoint (no CA, no SPKI pin): `http://` and `https://`
+endpoint URLs work the same, and a proxy that ends TLS sees neither the
+content nor the answers.
+
+Downloads are not in the channel: `luk get`, signed GETs (`luk-get@v1`),
+directory listings and downloads of a signed expose, portals and `once`
+stay plain HTTP requests, verified by TLS (the system CAs or the SPKI
+pin of the link, see Private files and TLS).
+
+### Carrier
+
+Every channel request is a `POST` of the content type
+`application/vnd.luk.channel`; the answer of the channel is `200` with
+the same content type.
+
+```
+POST /<endpoint>
+Content-Type: application/vnd.luk.channel
+
+<body: a handshake or a transport request>
+```
+
+- The URL is the endpoint URL (`/drop`) for uploads and link requests,
+  and `/.well-known/luk/endpoints` for the endpoint listing. A handshake
+  on any other path is 404 (`no endpoint <path>`); a lukd without its
+  identity key answers every handshake 404 (`no channel`).
+- lukd tells a channel request by its method and content type, before
+  the path. A request to an endpoint path or to the endpoint listing
+  outside the channel (any other method or content type) is 400
+  `endpoint requests go through the channel (update luk)` with
+  `Connection: close`, logged as `endpoint request outside the channel`
+  (INFO when it carries a `Luk-*` signature header, else DEBUG).
+- An answer that is not `200` with the channel content type comes from
+  outside the channel: a proxy, or lukd refusing a request before any of
+  it opened (below). Nothing authenticates it, so luk reports it as a
+  transport error (`channel request refused: HTTP <code>: <message>`;
+  `not answered by lukd: HTTP <code>` to a handshake), never as the
+  result of an operation (exit 3).
+- The HTTP status says nothing about the operation: the refusals of lukd
+  (401, 403, 422, ...) travel inside the channel, in a `200`. Proxy
+  access logs do not show them; the lukd log does.
+- luk resolves the host of the URL once per session and sends every
+  request of the session to that address (an IP literal as given, else
+  the first address of the name), on connections of its own; proxy
+  environment variables are not used. A session lives in the memory of
+  one lukd and its requests go on separate connections, so all of them
+  must reach that lukd.
+
+### Handshake
+
+Suite `Noise_NX_25519_ChaChaPoly_SHA256`. luk is the initiator; lukd
+sends its static key, the identity key (see Identity key), encrypted in
+message 2. Neither message carries application data.
+
+```
+Handshake request body:  0x01 || NX message 1 (32 bytes: e)
+Handshake response body: 0x01 || NX message 2 (e, ee, s, es; empty payload)
+```
+
+The prologue binds the handshake to the URL:
+
+```
+"luk-channel@1\n" + host + "\n" + path
+```
+
+- `host`: the host of the URL as luk has it, lowercase, with `:port`
+  when the URL has one. lukd takes the `Host` of the request, lowercase,
+  the host that routed it to its listener (see Listeners).
+- `path`: the URL path luk posts to, exactly (on lukd the path of the
+  request).
+
+A handshake relayed to another host or path does not finish. A replayed
+message 1 gives a handshake nobody can continue: nothing reaches an
+endpoint. A handshake body over 64 bytes or not a handshake is 400, in
+the clear; the body must arrive within `limits.header.timeout` (408).
+
+After message 2 luk compares the key lukd sent with the pins of the
+endpoint (see Pins). In NX this comparison is a step of luk, not a
+property of the handshake: it is mandatory and comes before anything
+else is sent. A key that matches no pin ends the run with `the lukd key
+<words> matches no pin of this endpoint` (exit 3), and an endpoint
+without a pin is never contacted: `no pin for this endpoint: run luk
+scan URL` (exit 1). Only `luk scan` runs a handshake without a pin, to
+show the key it gets. luk gives the handshake 10s.
+
+Both sides derive the channel id from the final handshake hash `h`; lukd
+never assigns or sends it:
+
+```
+channel id = first 16 bytes of SHA-256("luk channel id" || h)
+```
+
+### Messages
+
+```
+Transport request body:  0x02 || channel id (16) || nonce (8, big-endian) || frames
+Transport response body: 0x02 || counter (8, big-endian) || frames
+
+Request nonce (uint64):
+    bits 63..60 kind     1 OP, 2 PART, 3 COMPLETE, 4 ABORT (5 reserved)
+    bits 59..28 number   part number (PART), sequence (COMPLETE, ABORT), 0 (OP)
+    bits 27..16 attempt  0..4095, incremented by the client on every resend
+    bits 15..1  frame    frame index within the message
+    bit  0      last     1 on the final frame of the message
+Response nonce (uint64): counter << 32 | frame << 1 | last
+    counter: per session on lukd, starts at 1, +1 per response (never reused)
+
+Frames: plaintext chunks of 65536 bytes; the final frame carries 0..65536
+    bytes and has last=1 (data that is an exact multiple of 65536 ends with
+    an empty final frame). Each frame = ChaCha20-Poly1305 ciphertext (+16 tag).
+    Request frames: key client->server, AD = the 25-byte clear header.
+    Response frames: key server->client, AD = 0x02 || channel id ||
+    request nonce (8) || counter (8).
+    A stream that ends after a frame with last=0 is truncated: error.
+```
+
+- The nonce in the clear header is the nonce of the message as a whole:
+  its frame and last bits are 0 (anything else is 400). Each frame is
+  sealed under that nonce with its own frame index and last bit, so
+  every encryption of a session has a nonce of its own, and a frame
+  moved into another message, attempt or place does not open.
+- A session is found by its channel id, and only on the host, path and
+  listener of its handshake: anything else is 404 `unknown session`, in
+  the clear. A request of another session fails on its first frame.
+- lukd acts on a message only once it opened: an OP, a COMPLETE and an
+  ABORT once the whole message opened, a PART once its first frame
+  opened. Nothing is written or cancelled for a message that does not
+  open (400 `bad channel message` in the clear); only the checks of a
+  PART from its clear nonce answer before it opened (see Uploads in
+  parts), and they change nothing.
+- Every message of a session is taken once by its nonce without the
+  frame bits (kind, number, attempt): a message under a nonce taken
+  before is 409 `repeated nonce`, in the clear. luk counts the attempt
+  up on every resend, so it never encrypts twice under one nonce.
+- An answer carries the request nonce in its associated data: it belongs
+  to exactly one request. luk reads an answer whole (at most 64 MiB)
+  and trusts it only once its final frame opened.
+
+Inner messages (the plaintext of the frames):
+
+```
+OP:             uint32 BE n || JSON {"method","target","header"} (n bytes) || body
+Every answer:   uint32 BE n || JSON {"status","header"} (n bytes) || body
+PART:           the raw bytes of the part
+COMPLETE, ABORT: empty
+```
+
+- `header` is a map of lists of strings (HTTP header form); the JSON
+  part is at most 65536 bytes, unknown fields and data after it are
+  refused.
+- The OP is the request the operation would be in HTTP: `method`,
+  `target` (the path of the session; another path is 404 inside) and
+  `header` with the signature headers of an upload, a link request or
+  the endpoint listing (below, Links, Endpoint listing). The inner
+  request has the host of the session. The OP is at most 1 MiB (413 in
+  the clear) and has no body: the content of an upload goes in parts
+  (an upload OP with a body is 400 `an upload inside the channel sends
+  its content in parts`).
+- An answer is the status, the headers (`Retry-After`, `Allow`) and the
+  JSON body described for each operation.
+
+### One operation per session
+
+- A session carries one OP (kind 1, number 0), signed. Inside the
+  channel only `luk-upload@v2`, `luk-link@v2` and `luk-list@v2` verify
+  (any other namespace is 401); their signed texts end with `h`, which
+  binds the signature to this one session.
+- A second OP is 409 `the session has had its operation`, in the clear,
+  and leaves the session alone, whether it opened or not: anybody can
+  name a session by the id in the clear and replay its messages.
+- A bad signature or any other refusal is the answer to the OP. The
+  session ends with that answer, and with every answer to an OP that did
+  not open an upload in parts. An upload (and a link replace) keeps the
+  session for its PART, COMPLETE and ABORT messages, and only for them:
+  a session has exactly one upload, and the messages carry no upload id.
+- luk signs with the one key it was told to use and does not try
+  another one in the session; `luk scan` tries the keys of the agent in
+  sessions of their own.
+
+### Sessions and limits
+
+```yaml
+limits:
+  channel:
+    auth: 60s        # from the handshake to the OP (default)
+    pending: 1024    # sessions without their OP, all listeners (default)
+    idle: 2m         # a session with its OP and no upload, without a request (default)
+  uploads:
+    total: 256       # uploads in parts open at once (default)
+    identity: 8      # uploads in parts open at once per identity (default)
+```
+
+- `limits.channel.auth`: the time from the handshake to the OP. It
+  covers a touch of a hardware key or unlocking an agent, which happen
+  in exactly this window, as the signature covers `h`. The OP, once its
+  clear header arrived, must arrive within it too (408).
+- `limits.channel.pending`: the sessions that have no OP yet, over all
+  listeners. When it is full the oldest of them is dropped for the new
+  handshake (as `MaxStartups` in sshd, evicting the oldest rather than
+  refusing the newest). There is no limit per address: behind a proxy
+  every client has the address of the proxy.
+- `limits.channel.idle`: a session that has its OP and no upload, without
+  a request. The session of an upload follows the time of its upload
+  (see Uploads in parts).
+- `limits.uploads.total` and `limits.uploads.identity` (per owner key,
+  see Quota): uploads in parts open at once. An upload over either is
+  refused at its OP with 429 `too many open uploads` and `Retry-After:
+  1`.
+- Each value is positive; an absent or zero value takes the default, a
+  negative one is an error. A reload applies them to new sessions and
+  uploads.
+- The receive role drops the sessions past their time with its expiry
+  pass, about every minute, so a time limit acts up to a minute late.
+- Sessions live in the memory of the receive role: a restart drops them
+  all (luk then gets 404 `unknown session`); a reload keeps them.
+
+### Identity key
+
+The static X25519 key of lukd, the one the channel authenticates:
+
+```
+/etc/site/lukd/identity.key    (next to the main config file; -c moves it)
+mode 0640, owner root:luk
+
+-----BEGIN LUK IDENTITY KEY-----
+<base64 std of the 32-byte X25519 private key>
+-----END LUK IDENTITY KEY-----
+```
+
+- The receive role reads it at start (a key that is missing or does not
+  load fails the start) and again on every `SIGHUP`; a key that does not
+  load then is logged and the one in use stays. The process role never
+  reads it.
+- A file the group may write or others may read is refused (`identity
+  key <path> has mode <mode>: want 0640 or stricter`); the group exists
+  so that lukd (group `luk`) reads it.
+- `lukd check` loads it: missing (`identity key <path> is missing: run
+  lukd key generate`), not readable by the user running it, or unusable
+  is an error; `--no-identity` skips that (the reload of the process unit
+  runs `lukd check --no-identity`). Run as root it also checks that the
+  service user can read the file.
+- `lukd key [--pin-format words|key]` prints the pin of the key: its six
+  words (the default) or the full key.
+- `lukd key generate` creates the key (atomically, mode 0640; as root
+  with group `luk`) and prints its words. An existing key is kept and
+  the command fails, unless `--if-missing` (then it does nothing) or
+  `--force` (it replaces the key). The `lukd` package runs `lukd key
+  generate --if-missing` at install and on every upgrade, so an upgrade
+  never changes the pin.
+- Rotation: `lukd key generate --force` writes the new key and prints its
+  pin; the receive role keeps the old key until its next reload or
+  restart. Clients get the new pin next to the old one (an endpoint takes
+  several pins), then `systemctl reload lukd` switches the key, then the
+  clients drop the old pin.
+- The key is the identity clients pin: a reinstall without the file
+  means a new pin on every client. Keep it with the configuration.
+
+### Pins
+
+A pin is a lukd key a client trusts. It has two forms, told apart by
+their length:
+
+| form | written as |
+|---|---|
+| full key | exactly 43 characters of base64url without padding, decoding to the 32-byte public key |
+| words, for people | 6 proquint groups of the first 12 bytes of SHA-256 of the key: `lusab-babad-gutih-tugad-hajop-kizof` |
+
+- luk checks the whole pin it is given (all 96 bits of the words).
+- An endpoint takes a list of pins and accepts lukd when its key matches
+  any of them (rotation): comma-separated in the fragment of an endpoint
+  URL (`https://lukd.vm:8443/drop#lusab-...,<key>`), a YAML list `pin`
+  in the luk config, `--pin` repeated on `luk config endpoint add`.
+- Endpoints of one origin are one lukd: an endpoint URL without pins of
+  its own takes those of the first config endpoint (by name) with the
+  same scheme, host and port.
+- An endpoint pin is a channel pin only. `sha256//...` there (config,
+  `--pin`, the fragment of `luk config endpoint add --url`, `luk send -e
+  URL#...`) is an error: `an endpoint pin is the lukd key: run luk scan
+  URL`.
+- Display: words by default, whatever form is stored, so a list of
+  endpoints shows at a glance that no pin was replaced; `--pin-format
+  key` on `luk scan`, `luk config endpoint ls` and `lukd key` shows the
+  full key (a pin stored as words stays words: the key cannot be
+  recovered from them).
+- Downloads keep their own pin: a download URL (`luk get`) takes only
+  `sha256//...`, the SPKI pin of the certificate of its listener (see
+  TLS). The two pins never share a place: the endpoint URL in the luk
+  config carries the lukd key, a download link carries the SPKI pin.
+  Endpoints and exposes may share a listener; such a listener has both,
+  the lukd key for its endpoints and, with `tls.mode: self` or `files`,
+  the certificate pin in its download links.
+
+Several servers (a direction, not implemented): redundancy is a list of
+endpoint URLs, each with its own pin and each lukd with its own key, not
+one key shared behind a load balancer. luk stays on the address it
+resolved for the whole session, and a failed transfer is never resumed
+on another address: a part cannot go to another server, so a retry
+elsewhere is a new session, a new signature and the upload from the
+start.
+
 ## Authentication
 
 ### Signed request
 
-One upload is one HTTP request, signed once by an SSH key (one touch on a
-hardware key). No token, no enrollment, no state on the client.
+One operation is one OP of a channel session, signed once by an SSH key
+(one touch on a hardware key). No token, no enrollment, no state on the
+client. The OP of an upload:
 
 ```
-PUT /<endpoint>
-Expect:         100-continue
+PUT /<endpoint>                 (method and target of the OP)
 Luk-Meta:       <base64url of the client meta JSON, no padding>
 Luk-Timestamp:  <RFC 3339, UTC>
 Luk-Nonce:      <16 random bytes, base64url, no padding>
 Luk-Signature:  <SSHSIG blob, base64 std, one line (no armor)>
-Content-Length: <size>        # file upload; stdin goes chunked
-<body: the file, streamed>
 ```
 
-The signature is SSHSIG (`PROTOCOL.sshsig`, as `ssh-keygen -Y sign`),
-namespace `luk-upload@v1`, over the canonical text (lines joined by `\n`,
-no trailing newline):
+The OP has no body: once lukd accepts it, the content follows in parts
+(see Uploads in parts). The signature is SSHSIG (`PROTOCOL.sshsig`, as
+`ssh-keygen -Y sign`), namespace `luk-upload@v2`, over the canonical text
+(lines joined by `\n`, no trailing newline):
 
 ```
-luk-upload@v1
+luk-upload@v2
 PUT
-<Host header>
-<request path>
+<host of the session>
+<path of the session>
 <Luk-Timestamp>
 <Luk-Nonce>
 <Luk-Meta>
+<h: the final handshake hash, base64url without padding>
 ```
 
-`Luk-Meta` is signed as sent (the base64url string), so there is no JSON
-canonicalization. A reverse proxy in front of lukd must keep the `Host`
-header.
+The host and the path are those of the prologue (see Handshake). The
+last line binds the signature to the session: a signature of one session
+never verifies in another, and the `v2` namespaces never verify as the
+`v1` ones of downloads (`luk-get@v1`). `Luk-Meta` is signed as sent (the
+base64url string), so there is no JSON canonicalization. A reverse proxy
+in front of lukd must keep the `Host` header.
 
 The public key inside the SSHSIG blob identifies the signer. It is either a
 plain key or an OpenSSH certificate (as `ssh-keygen -Y sign` does when a
 `-cert.pub` sits next to the key).
 
-### Server verification (before the body is read)
+### Server verification (before the body)
+
+"Before the body" in this spec means in the answer to the OP, before
+lukd takes any part. On the OP of an upload lukd checks, in order:
 
 1. Headers present and well formed; `Luk-Meta` decodes to valid meta.
 2. Timestamp within `auth.clock_skew` (default 1m, max 1h) of the server
@@ -91,8 +406,9 @@ plain key or an OpenSSH certificate (as `ssh-keygen -Y sign` does when a
    far), a timestamp is also not earlier than the reload minus that
    half (401 `timestamp before the clock skew was raised`): the older
    ones could carry nonces the cache already dropped.
-3. SSHSIG namespace is `luk-upload@v1` and the signature verifies with the
-   key in the blob. The SHA-1 signature formats `ssh-rsa` and `ssh-dss`
+3. SSHSIG namespace is `luk-upload@v2`, the signature verifies with the
+   key in the blob over the text with the host, path and `h` of the
+   session. The SHA-1 signature formats `ssh-rsa` and `ssh-dss`
    are refused (RSA keys sign `rsa-sha2-256` or `rsa-sha2-512`, as
    `ssh-keygen -Y sign` and `luk` do), as are a DSA key and an RSA key
    shorter than 2048 bits, also inside a certificate; a certificate
@@ -115,25 +431,33 @@ plain key or an OpenSSH certificate (as `ssh-keygen -Y sign` does when a
      clock, within `auth.clock_skew`) can be replayed after a reboot if
      lukd is back before that timestamp: the start-time rule refuses
      only timestamps before the start. Keeping `auth.clock_skew` short
-     keeps that window short.
+     keeps that window short. A replay also needs the session of the
+     signature (`h`), which a restart drops.
 6. The identity is in the endpoint's `allow`.
 7. At least one pipeline matches (a secret upload needs none, see
    Volatile secrets).
-8. The signed `size` fits the quota of the sender on the endpoint, when
+8. A place among the open uploads (`limits.uploads`, see Sessions and
+   limits).
+9. The signed `size` fits the quota of the sender on the endpoint, when
    it has one (see Quota).
-9. The queue filesystem has room for the
+10. The queue filesystem has room for the
    signed `size` plus a reserve (`limits.queue.reserve`, default 1G).
    Space is reserved for the upload until it is accepted or dropped, so
    parallel uploads cannot overcommit it.
 
-Any failure answers before `100 Continue`: 401 for 1-5, 403 for 6, 422 for
-7, 429 or 413 for 8, 507 for 9. No byte of the body is accepted. Behind nginx the early answer still
-works, but nginx itself sends `100 Continue`, so the client may push a
-buffer's worth of data before the connection is closed.
+Any failure is the answer to the OP, inside the channel: 401 for 1-5,
+403 for 6, 422 for 7, 429 for 8, 429 or 413 for 9, 507 for 10. No part
+is taken and the session ends. An upload that passes gets the parts
+offer (see Uploads in parts).
 
 Before step 8, an upload whose signed meta carries `size` and `sha256`
 answers 429 when its sender already holds `links.max` names of that
 content in a storage it goes to (see Storage, `links.max`).
+
+Authorization is checked once, at the OP, as for a single request: a key
+removed from `allow`, a certificate revoked or expired while its upload
+runs, finishes that upload. The parts and the COMPLETE are authenticated
+by the session.
 
 ### Identities
 
@@ -431,7 +755,7 @@ it is true is not):
 - `dry_run` - set by `--dry-run`; the server runs every check up to the
   body (verification, matching, the signed size against the limits, the
   storage names) and answers the debug JSON (200) with `"dry_run": true` in
-  `client` before `100 Continue`: no body is sent, nothing is stored, no
+  `client` as the answer to the OP: no part is sent, nothing is stored, no
   pipeline runs. The answer has no `size` or `sha256` in `server`.
   `pipelines` holds the matched pipeline names, sorted; `schedule` the
   same pipelines in the order they start, each `{"pipeline", "group",
@@ -475,7 +799,9 @@ secrets).
 
 ## Response
 
-Set per endpoint:
+The answer of an upload is the answer to its COMPLETE (see Uploads in
+parts), or to its OP for a dry run and a deduplicated upload. Set per
+endpoint:
 
 - `respond: accept` - a sink (backups): `202` with
   `{"id", "size", "sha256"}`, plus `ttl`, `ttl_note`, `ttl_min` and
@@ -509,7 +835,140 @@ asked or not given. `ttl_min` and `ttl_max` are the `ttl.min` and
 storage has no such bound.
 
 A normal upload answers per `respond` (201 or 202); only `dry_run`
-returns the debug JSON (200), without reading the body.
+returns the debug JSON (200), without any part. The `200` with the parts
+offer is no answer of the upload: it asks for its content.
+
+## Uploads in parts
+
+The content of an upload (and of a link replace, see Links) goes in parts
+through the session of its OP. A dry run, a deduplicated upload and a
+refusal are answered at the OP and end the session there; any other OP
+that passed every check before the body is answered:
+
+```
+200 {"parts": {"size": 8388608, "parallel": 4}}
+```
+
+```yaml
+endpoint:
+  backup:
+    parts:
+      size: 8M        # default 8M; a multiple of 64K, from 64K to 2G-64K
+      parallel: 4     # default 4; 1 to 64
+    limits:
+      body:
+        size: 50G     # the largest upload; 0 or absent: none
+        idle: 2m      # default 2m
+        rate: 64K     # bytes per second, default 64K; 0: off
+```
+
+- `parts.size` is the size of every part but the last; `parts.parallel`
+  is the most parts a client sends at once (`luk send --parallel N`
+  sends up to N, at most this). A reload applies both to new uploads.
+- At the OP lukd takes the place of the upload (`limits.uploads`), the
+  quota and the queue space of a signed size, then the acceptance order
+  of the upload (see Acceptance order), and creates its staging file
+  `<queue>/<id>/.payload.tmp` in the queue directory of the upload (the
+  secret queue of a secret upload, so a secret stages in RAM): the
+  signed size preallocated where the filesystem can (`fallocate`), else
+  a sparse file; a stream grows as its parts land.
+
+PART (kind 2, number n) carries the bytes of the content from n x
+`parts.size` on. Every part but the last is exactly `parts.size` bytes;
+a file of size S has S / `parts.size` parts rounded up (an empty file
+none), a stream ends with its first part shorter than `parts.size`
+(possibly empty).
+
+- From the clear nonce, before the body is read: a part beyond the parts
+  of a signed size, beyond the last part of a stream once that is known,
+  or beyond `limits.body.size` of a stream is 400; a part already
+  verified is answered 200 at once (sending a part twice is harmless); a
+  part of an aborted or expired upload is 410, of one finalizing or
+  committed 409; a part `2 x parts.parallel` or more ahead of the
+  contiguous prefix of verified parts is 429 `part <n> ahead of the
+  window` with `Retry-After: 1`. The window bounds the staging a client
+  can scatter ahead of the hash.
+- Once its first frame opened the part is taken. One writer per part: a
+  newer attempt of a part replaces an older one still running, whose
+  writes stop at its next frame (409). Bytes land in the staging at
+  their offsets as their frames open.
+- A part is verified once the whole message opened and its length is
+  right: exactly `parts.size`, the rest of a file for its last part
+  (400 otherwise); a short part of a stream when a later part is there
+  already is 400. A verified part never changes. The sha256 of the
+  content grows over the contiguous prefix of verified parts, read back
+  from the staging.
+- A stream is charged to the quota as its parts are verified; a part
+  over its quota (429 `quota exceeded`, 413) ends the upload, which gives
+  back what it took. A stream over `limits.body.size` is 413 (422 over
+  the 64 KiB of a reveal).
+- `limits.body.idle`: a part without received bytes for it is 408 `no
+  body data for <idle>`. `limits.body.rate`: a part must arrive within
+  `parts.size / rate` (8 MiB at 64 KiB/s: 128s), else 408 `body not
+  received within <time>`; a slow client then sends fewer parts at once.
+- Answers: 200 `{}` (verified), 400, 408, 409, 410, 413, 422, 429, 507
+  `not enough space`. A part answered before its body was read ends the
+  connection.
+
+COMPLETE (kind 3, number: the round, 0 for the first) asks lukd to commit
+the upload; its plaintext is empty (400 otherwise).
+
+- Parts missing: 409 `{"missing": [3, 7]}`, at most 1024 numbers; for a
+  stream whose last part has not come, the number after the parts it has.
+- Else the upload is finalizing: the hash of the prefix is finished, the
+  size and sha256 of a file must equal the signed meta (422 `content
+  differs from the signed <size> bytes sha256 <hex>`; for a secret the
+  size only), those of a stream are computed (as before, nothing signs
+  them). The staging becomes the payload of the queue entry and the
+  entry is committed as any upload (see Response): 201 or 202 with the
+  answer of `respond`.
+- Any other refusal at the COMPLETE (422, 507) ends the upload as an
+  ABORT does.
+- The answer of the COMPLETE that ended the upload is kept: a COMPLETE
+  sent again gets it again while the session lives, 3 x
+  `limits.body.idle` after the end.
+
+ABORT (kind 4) ends an open upload: the staging goes at once, the place,
+the quota and the queue space go back; 200 `{}` (also for an upload that
+had ended without a commit), 409 `upload committed` after a commit. luk
+sends it on Ctrl-C and on a failure, waiting at most 5s for the answer.
+
+States: open, then finalizing (the COMPLETE), then committed, aborted
+(ABORT, a refusal, the session dropped) or expired.
+
+- An open upload whose session has no activity (bytes of a part that
+  opened, a message) for `limits.body.idle` expires (logged `upload
+  expired`): the staging goes, as for an ABORT.
+- A restart of the receive role drops every session; the staging
+  directories (without `meta.json`) are removed at start like any half
+  received entry (see Service). luk sends a file once more from the
+  start in a new session (new handshake, new signature); a stream fails
+  (`server lost the upload; the stream cannot be sent again`).
+- Result unknown: when the receive role restarts between the commit and
+  the answer of the COMPLETE, luk gets 404 `unknown session` to the
+  COMPLETE and reports `result unknown: the server lost the upload
+  session at its end; check whether it arrived before sending it again`
+  (exit 3). It never sends such an upload again by itself; there is no
+  idempotency key and no record of it on disk.
+
+luk sends the parts with `--parallel` workers (default 1):
+
+- An attempt of a part that makes no progress for 30s, in the sending or
+  in the wait for its answer, is cut. A part fails after 5 failed
+  attempts, with 1s, 2s, 4s and 8s (+-20%) between them; a failed part
+  fails the upload (ABORT). A 429 of the window waits `Retry-After` and
+  counts no attempt; a 408 also takes one worker away (down to one); any
+  other refusal ends the upload. 404 `unknown session` to a part is the
+  restart above.
+- Before the COMPLETE luk checks that a file has the size and
+  modification time its hash pass saw: else `file changed while sending:
+  send it again` (exit 3, after an ABORT). A 422 of a file whose content
+  no longer has its signed sha256 is a hash mismatch (exit 4).
+- Missing parts listed by the COMPLETE are sent again, up to 3 rounds; a
+  stream cannot send a part again (an error). A COMPLETE whose answer is
+  lost is sent again (5 attempts) and gets the kept answer.
+- `--bwlimit` paces all the parts together; `--progress` counts the
+  bytes of the parts, a part sent again once.
 
 ## Transfer dedup
 
@@ -536,14 +995,15 @@ After every check before the body (verification, matching, limits, the
 names), lukd creates the queue entry with the payload as a hardlink of
 the object (or of that entry's payload), commits it and answers as for any
 upload (`201` or `202` per `respond`, with a new name and URL) plus
-`"deduplicated": true`, before `100 Continue`: the body is never read, no
-queue space is reserved, and the connection is closed. Logged as `upload
+`"deduplicated": true`, as the answer to the OP: no part is sent, no
+queue space is reserved, and the session ends. Logged as `upload
 deduplicated` instead of `upload accepted`. The pipelines run as for any
 upload and store the content as a hardlink of its object. When a
 condition fails or the hardlink cannot be made (a queue on another
 filesystem than the storage, an object removed meanwhile), the upload
-goes on as before: the body is read and checked against the signed size
-and sha256, and the store shares the space all the same.
+goes on as before: the OP gets the parts offer, the content is checked
+against the signed size and sha256, and the store shares the space all
+the same.
 
 Never across owners. A sha256 is no secret: the portal page of a
 `download` upload shows it, a catalog lists it, whoever saw a file can
@@ -607,18 +1067,18 @@ endpoint:
   matched per request, as their principals and Key IDs are not known
   before.
 - Charged with the received bytes. An upload with a signed `size` is
-  checked at the `Expect: 100-continue` gate, after transfer dedup and
-  before the queue space, and charged its size: over what the bucket
-  holds it is refused with 429 and `Retry-After` (seconds until the
-  bucket holds the size) before any body. An upload without a signed size
-  is charged while it streams and cut at the limit, with 429 and
+  checked at its OP, after transfer dedup and before the queue space,
+  and charged its size: over what the bucket holds it is refused with
+  429 and `Retry-After` (seconds until the bucket holds the size) before
+  any part. An upload without a signed size is charged as its parts are
+  verified and ended by the part over the limit, with 429 and
   `Retry-After` (until the bucket holds what it had received). An upload
   larger than `burst` (the signed size, or a stream past it) can never
   pass and is refused with 413, without `Retry-After`. A dry run is
   checked the same way and charges nothing.
 - Deduplicated uploads (no body, see Transfer dedup) cost nothing. An
-  upload that is not accepted (refused, cut, a body that differs from the
-  signed size or sha256, a broken connection, a failed commit) gives back
+  upload that is not accepted (refused, aborted, expired, content that
+  differs from the signed size or sha256, a failed commit) gives back
   everything it took. Secret uploads and link replaces are uploads to the
   endpoint and count.
 - The answer names no limit, no class and no level (as with the clock
@@ -726,42 +1186,41 @@ applies to new requests.
 
 ### Wire format
 
-A link request goes to the intake side: the endpoint path on the
-endpoint's listeners, like an upload. The headers `Luk-Link` and
-`Luk-Link-Action` tell it from an upload; the download listeners never
-take link requests.
+A link request is the OP of a channel session on the endpoint path (see
+Channel), like an upload. The headers `Luk-Link` and `Luk-Link-Action`
+tell it from an upload; exposes never take link requests.
 
 ```
-<METHOD> /<endpoint>
+<METHOD> /<endpoint>             (method and target of the OP)
 Luk-Link:        <the full link URL, as luk send printed it; empty for list>
 Luk-Link-Action: remove | ttl | replace | list
 Luk-Meta:        <base64url of the meta JSON, no padding>
 Luk-Timestamp:   <RFC 3339, UTC>
 Luk-Nonce:       <16 random bytes, base64url, no padding>
 Luk-Signature:   <SSHSIG blob, base64 std, one line>
-[Expect: 100-continue, Content-Length, body: replace only]
 ```
 
 | action | method | meta | body |
 |---|---|---|---|
 | `remove` | `DELETE` | `{}` | none |
 | `ttl` | `PATCH` | `{"ttl": "3d"}` | none |
-| `replace` | `PUT` | the upload meta of the new content | the new content |
+| `replace` | `PUT` | the upload meta of the new content | the new content, in parts (see Uploads in parts) |
 | `list` | `GET` | `{}` | none |
 
-The signature is SSHSIG, namespace `luk-link@v1`, over the canonical text
+The signature is SSHSIG, namespace `luk-link@v2`, over the canonical text
 (lines joined by `\n`, no trailing newline):
 
 ```
-luk-link@v1
+luk-link@v2
 <METHOD>
-<Host header>
-<request path>
+<host of the session>
+<path of the session>
 <Luk-Link>
 <Luk-Link-Action>
 <Luk-Timestamp>
 <Luk-Nonce>
 <Luk-Meta>
+<h: the final handshake hash, base64url without padding>
 ```
 
 `Luk-Link` and `Luk-Meta` are signed as sent; for `list` `Luk-Link` is
@@ -831,10 +1290,11 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   are those of the endpoint for the tags of the stored upload, and one of
   them must store into the storage of the link (else 422); a link of the
   secret storage of the endpoint is replaced as a secret upload (its
-  secret queue, no pipeline, see Volatile secrets). The body then
-  goes through the queue like an upload (`Expect: 100-continue`, space
-  reservation, limits, inotify pickup): 202 `{"url", "id", "size",
-  "sha256"}` once it is committed, `id` being the queue entry. The
+  secret queue, no pipeline, see Volatile secrets). The OP then gets the
+  parts offer and the content goes through the queue like an upload (in
+  parts, space reservation, limits, inotify pickup): the COMPLETE answers
+  202 `{"url", "id", "size", "sha256"}` once it is committed, `id` being
+  the queue entry. The
   pipelines of a replace (store steps only, see above) run as one
   publish, whatever their queue groups: every storage they store into gets a copy of the new content
   under a temporary name first; then the stores into the other storages
@@ -1324,29 +1784,30 @@ no-store`), logged as `signed listing` with the sender and the count:
 ## Endpoint listing
 
 Every listener (except an `acme: true` one, which redirects it like any
-request) serves `GET /.well-known/luk/endpoints`: the endpoints of that
-listener the signer may upload to, with what each takes. It is the
-contract a client (or an agent driving `luk`) reads to configure itself
-(`luk scan`).
+request) serves `/.well-known/luk/endpoints` through the channel (see
+Channel): a session whose handshake and OP go to that path gets the
+endpoints of that listener the signer may upload to, with what each
+takes. It is the contract a client (or an agent driving `luk`) reads to
+configure itself (`luk scan`). The OP:
 
 ```
-GET /.well-known/luk/endpoints
+GET /.well-known/luk/endpoints   (method and target of the OP)
 Luk-Timestamp:  <RFC 3339, UTC>
 Luk-Nonce:      <16 random bytes, base64url, no padding>
 Luk-Signature:  <SSHSIG blob, base64 std, one line>
 ```
 
-The signature is SSHSIG, namespace `luk-list@v1`, over the canonical text
-(lines joined by `\n`, no trailing newline; no `Luk-Meta`), built as for
-`luk-get@v1`:
+The signature is SSHSIG, namespace `luk-list@v2`, over the canonical text
+(lines joined by `\n`, no trailing newline; no `Luk-Meta`):
 
 ```
-luk-list@v1
+luk-list@v2
 GET
-<Host header>
+<host of the session>
 /.well-known/luk/endpoints
 <Luk-Timestamp>
 <Luk-Nonce>
+<h: the final handshake hash, base64url without padding>
 ```
 
 The timestamp, clock skew, server start, nonce cache and `Host` checks are
@@ -1354,7 +1815,7 @@ those of an upload (Server verification). The namespace and the first
 line differ from every other signed request, so no other signature
 verifies as a listing and a listing signature as nothing else (401).
 
-Answers:
+Answers (inside the channel; the session ends with them):
 
 - a request without the signature headers, incomplete, malformed, out
   of the clock skew, replayed or not verifying, or a key that resolves to
@@ -1382,8 +1843,8 @@ Answers:
   upload), by name; `[]` for none.
 - `name` and `path` - the endpoint name and its `endpoint` path; `url` -
   the scheme of the listener (of its `public`, else `https` with `tls`,
-  `http` without), the `Host` of the request as sent (port included) and
-  the path.
+  `http` without), the host of the session (port included) and the path.
+  The URL carries no pin; `luk scan --print` adds the lukd key.
 - `respond` - `url` or `accept` (see Response).
 - `secret`, `pretty`, `private` and `link` are the capabilities (see
   Capabilities) as they apply to the signer: `true` when its list grants
@@ -1418,8 +1879,8 @@ Answers:
   block (any hostname).
 
 Nothing else of the configuration is in the answer: no pipelines, tags,
-storages, exposes, paths on disk, limits or quotas of others. A lukd without the listing
-answers 404 (`luk scan` says so).
+storages, exposes, paths on disk, limits or quotas of others. A request
+for the listing outside the channel is 400 (see Carrier).
 
 `/.well-known/` is reserved: an endpoint or expose path equal to
 `/.well-known` or under it is a configuration error, so the listing and
@@ -1549,6 +2010,7 @@ directory of the main file holds:
   ssh.d/ca/host/<name>.pub
   ssh.d/ca/user/<name>.pub
                        keys of CA <name> of type host or user (see Identities)
+  identity.key         the identity key of the channel (see Identity key)
   run.yaml             lukd run global settings (see Jobs with other users)
   run.d/<job>.yaml     lukd run jobs
   gpg.d/               *.asc, *.gpg, *.pgp, *.key keys of encrypt recipients (gpg.keys)
@@ -1605,6 +2067,13 @@ limits:                               # connection level, all listeners; optiona
     timeout: 10s                      # reading request headers, including the TLS handshake
   failed:
     age: 3d                           # failure records are removed after it; 0 keeps them
+  channel:                            # the channel sessions (see Sessions and limits)
+    auth: 60s                         # from the handshake to the signed operation
+    pending: 1024                     # sessions without their operation; the oldest goes first
+    idle: 2m                          # a session after its operation, unless it is an upload
+  uploads:
+    total: 256                        # uploads in parts open at once
+    identity: 8                       # per identity
 
 log:
   level: info                         # debug, info (the default), warn or error; both roles, live on reload
@@ -1624,9 +2093,12 @@ endpoint:
         principal: ["hosts:*"]
     limits:                           # request level, per endpoint; optional
       body:
-        size: 50G                     # max body size, 413 above it; 0 or absent = unlimited
-        idle: 2m                      # max time without body progress after 100 Continue (default 2m)
-        timeout: 0                    # max total body time; 0 or absent = none
+        size: 50G                     # max upload size, 413 above it; 0 or absent = unlimited
+        idle: 2m                      # max time without bytes in a part, and of an idle upload (default 2m)
+        rate: 64K                     # a part arrives within parts.size / rate (default 64K; 0 = off)
+    parts:                            # how the content goes (see Uploads in parts); optional
+      size: 8M                        # default 8M
+      parallel: 4                     # default 4
   drop:
     listen: intake
     endpoint: /drop
@@ -1716,7 +2188,7 @@ expose:
         - 'dev:$2y$05$TpFzQdt1oY6UgSKCZGgt8eCbBXDAuiQxNl13XDuDnYKUSuIC9O79W'   # example: dev/dev
 ```
 
-`limits` bounds resource use against slow-client exhaustion. `limits.conn.max` must be at least 1, each duration positive and `limits.body.size` not negative; an absent or zero value takes the default (`body.size` and `body.timeout`: no limit). A slow but progressing upload is never cut by `limits.body.idle`, which only measures time between body bytes; `limits.body.timeout`, when set, caps the whole body read. A stalled or too slow upload is answered with 408. The other direction is bounded the same way: a download whose client takes nothing of the response for `limits.conn.idle` is cut (the write deadline moves with every write, so a slow but reading client is never cut). `limits.conn.max` counts connections; an HTTP/2 connection runs at most 16 requests at once, so an address runs at most 16 x `limits.conn.max` requests and open files. The limit is per address, not per client.
+`limits` bounds resource use against slow-client exhaustion. `limits.conn.max` must be at least 1, each duration positive and `limits.body.size` and `limits.body.rate` not negative; an absent or zero value takes the default (`body.size`: no limit; `body.rate` 0 turns the rate off, absent is 64K). An upload goes in parts (see Uploads in parts): `limits.body.idle` measures the time between the bytes of a part and the time an open upload goes without activity, and `limits.body.rate` gives each part `parts.size / rate` to arrive, so a part never holds a connection longer than that; the upload as a whole has no time limit. A stalled or too slow part is answered with 408. `limits.channel` and `limits.uploads` bound the channel sessions and the open uploads (see Sessions and limits). The other direction is bounded the same way: a download whose client takes nothing of the response for `limits.conn.idle` is cut (the write deadline moves with every write, so a slow but reading client is never cut). `limits.conn.max` counts connections; an HTTP/2 connection runs at most 16 requests at once, so an address runs at most 16 x `limits.conn.max` requests and open files. The limit is per address, not per client.
 
 `endpoint.<n>.pretty` lets an upload with `pretty_url` (`luk send
 --pretty-url`) of an identity of `pretty.allow` (required, see
@@ -1820,6 +2292,10 @@ and `ssh.d/ca/`):
   base (see Permanent names);
 - `pretty` requires `respond: url` and a respond storage `path` (and a
   secret storage `path`) that uses `.Random`; `pretty.bits` is 64 to 128;
+- `parts.size` is a multiple of 64K from 64K to 2G-64K (`endpoint <n>:
+  parts.size must be a multiple of 64KiB from 64KiB to 2GiB-64KiB`),
+  `parts.parallel` 1 to 64; `limits.body.rate` is not negative;
+  `limits.channel.*` and `limits.uploads.*` are positive;
 - `run` is an absolute path; `tee` only on a `run` step (`tee needs
   run`); `relay` is a job name (`[a-z0-9][a-z0-9._-]*`, at most 64
   bytes) and takes no `tee` or `env` (`relay takes no tee or env`);
@@ -1854,6 +2330,9 @@ is kept and reloads once the role runs, never ends the process.
   role refuses the same changes, as both roles share the configuration.
 - New queue and local storage directories are created as at start; one
   that cannot be prepared fails the reload like an invalid configuration.
+- The identity key is re-read on every `SIGHUP` by the receive role; a
+  key that does not load is logged and the current one stays (see
+  Identity key).
 - The TLS certificates and keys are re-read on every `SIGHUP` (see TLS),
   also when the configuration reload fails or is refused. Acme listeners
   keep their certificates (lukd renews and swaps them itself, `SIGHUP` is
@@ -1874,8 +2353,9 @@ In-flight work keeps the configuration it started with:
 - A signed get (`luk-get@v1`) takes the configuration once when it
   arrives: the identity, the `allow` of the expose (`*` included) and
   the expose itself.
-- An upload takes the configuration once when its request arrives and
-  uses it to the end: identity, endpoint, matched pipelines, body limits,
+- An upload takes the configuration once when its OP arrives and uses it
+  to the end, its parts and COMPLETE included: identity, endpoint,
+  matched pipelines, body limits, the parts size,
   `respond`, the storage and expose of the answered URL and the `ttl`
   policy of every storage it is stored into (the expiries are fixed at
   receipt, so a reload of `ttl` applies to new uploads only; stored
@@ -1904,7 +2384,8 @@ In-flight work keeps the configuration it started with:
   received with (see Scheduling).
 - A quota takes the configuration when the upload arrives; its buckets
   are not part of the configuration (see Quota).
-- State survives a reload: the quota buckets, the nonce cache (its window only grows when
+- State survives a reload: the channel sessions and the open uploads in
+  parts, the quota buckets, the nonce cache (its window only grows when
   `auth.clock_skew` changes, so a nonce seen under the longer skew is
   still refused; a raised skew does not reach back past what the cache
   remembers, see Server verification), queue space reservations (`limits.queue.reserve`
@@ -1951,7 +2432,8 @@ listen.main.addr changed, restart required (reload would be refused)
 Run as root (as `lukd.service` runs it on `systemctl reload lukd`), `lukd
 check` also checks that the service user (`--user`, default `luk`) can
 read every configuration input: `config.yaml`, `config.d/` and its
-`*.yaml`, `ssh.d/` with `ssh.d/ca/{,host/,user/}` and their files, the
+`*.yaml`, `ssh.d/` with `ssh.d/ca/{,host/,user/}` and their files,
+`identity.key` (unless `--no-identity`), the
 `cert` and `key` of `self` and `files` listeners, the `eab.key_file` of
 acme listeners, and `gpg.keys` with its key files. Each file needs read
 permission, each listed directory read and search, and every directory
@@ -2091,16 +2573,19 @@ the upload again, a new upload with its own id and acceptance order.
 
 ### Acceptance order
 
-An upload is accepted when `lukd receive` commits its queue entry, after
-the whole body was received: `meta.json` is renamed into the entry. The
-moment of that commit, not the start of the request, orders uploads: a
-large upload started earlier and committed later is the newer one.
+An upload is ordered by its start: `lukd receive` takes its acceptance
+order when it admits the OP, before the first part (a deduplicated
+upload, committed at its OP, at the commit). A dump started at 01:00
+holds the state of 01:00, whenever its last part arrives. The upload is
+committed with its COMPLETE (`meta.json` renamed into the entry), so
+entries commit in another order than their acceptance when a long upload
+finishes after a newer one.
 
-- `accepted` (Unix nanoseconds) and `accepted_seq` are taken right
-  before `meta.json` is written and are part of it, so they are on disk
-  with the entry the moment it is committed (a crash before the rename
-  leaves a half entry that is removed at start, the client got no 2xx
-  and its retry is accepted later). The value is the wall clock read
+- `accepted` (Unix nanoseconds) and `accepted_seq` are written into
+  `meta.json` and are part of it, so they are on disk with the entry the
+  moment it is committed (a crash before the rename leaves a half entry
+  that is removed at start, the client got no 2xx and its retry is a new
+  upload with a new order). The value is the wall clock read
   once at the start of `lukd receive` plus the time elapsed since, on
   the monotonic clock: it never goes back while the process runs, also
   when NTP or an administrator steps the wall clock back.
@@ -2125,6 +2610,23 @@ large upload started earlier and committed later is the newer one.
 - Entries and sidecars written before it (no `accepted`) count by their
   `received` time (whole seconds), then by id (and, where files of one
   upload tie, by stored name).
+
+An upload that is older by acceptance never replaces a newer one, however
+late it finishes:
+
+| stored under the name | incoming is newer | incoming is older (late) |
+|---|---|---|
+| nothing | stored | stored |
+| a file, `conflict: version` | becomes `<name>`, the previous file a version | stored as the version `<name>.<its received ts>`; `<name>` stays |
+| a file, `conflict: replace` | replaces it | skipped: nothing is written, logged `store: older upload skipped`, the step succeeds |
+| a file, `conflict: reject` | the store fails | the store fails |
+| an alias, `latest`, a permanent name | moves to it | stays where it is |
+
+- The files a `run` step produces carry the acceptance order of their
+  upload, so a late dump still runs its pipelines and its results lose
+  at the store step.
+- A store run again for the upload that holds the name (the same id, after
+  an interruption) is never older.
 
 ### Scheduling
 
@@ -2685,6 +3187,9 @@ pipeline:
   and so on when that name is taken, so the name tells when the old
   version arrived), `reject` (the pipeline fails, visible in status),
   `replace` (atomic overwrite; for deliberate cases such as aliases).
+  Newest is by acceptance order: an upload accepted before the stored
+  file is placed as a version under `version` and skipped under
+  `replace` (see Acceptance order).
   A `version` store runs under the base lock in an order that never
   loses data: first the old data is hardlinked (not renamed) to its
   versioned name and its sidecar is copied there unchanged (same
@@ -3021,7 +3526,7 @@ listen:
 
 endpoint:
   drop:
-    listen: intake              # PUT /drop only on lukd.vm
+    listen: intake              # uploads to /drop only on lukd.vm
     endpoint: /drop
 
 expose:
@@ -3063,6 +3568,9 @@ expose:
   disjoint `host` lists. `limits.conn.max` applies per address.
 - `/.well-known/luk/endpoints` is the endpoint listing on every listener
   (see Endpoint listing), routed before the endpoints and the exposes.
+- A channel request (`POST` with the channel content type, see Channel)
+  is routed to the channel before the path is looked at: its handshake
+  takes only an endpoint path of the listener and the listing.
 - On a listener without upload endpoints nothing is an upload: `GET` and
   `HEAD` go to its exposes, `POST` only to the portal actions
   (`<name>/reveal`, `<name>/download`, `<name>/get`). Any other method,
@@ -3070,9 +3578,10 @@ expose:
   (`GET, HEAD, POST` on an action path), decided by the path alone,
   before the expose and the file are looked up. On a listener with upload
   endpoints, a request other than `GET`, `HEAD` and `POST` to a path that
-  is no endpoint is 404 (`no endpoint`). On an endpoint path, a request
-  with `Luk-Link` or `Luk-Link-Action` is a link request (see Links);
-  without them, any method but `PUT` is 405 with `Allow: PUT`.
+  is no endpoint is 404 (`no endpoint`). On an endpoint path every
+  request outside the channel is 400 (see Carrier). Inside the channel,
+  an OP with `Luk-Link` or `Luk-Link-Action` is a link request (see
+  Links); without them, any method but `PUT` is 405 with `Allow: PUT`.
 - Logging: an unknown host (421), a 404 of an expose and a 405 of a
   listener without endpoints (`method not allowed`) are logged at DEBUG
   (remote, host, method, path). `upload rejected` is logged only on
@@ -3081,10 +3590,11 @@ expose:
   which is logged at DEBUG. The HTTP server's own errors (a failed TLS
   handshake, a malformed request) are logged at DEBUG, a handler panic
   at ERROR.
-- A signed upload whose `Host` is not in its listener's `host` list is
-  rejected (401) before the body. This closes replay of a captured request
-  against a second lukd trusting the same keys (the nonce cache is per
-  process). A listener without `host` accepts any host (development).
+- A signed operation whose host (the host of its session) is not in its
+  listener's `host` list is rejected (401) before the body. With the
+  session hash in every signed text a signature never verifies outside
+  its session anyway; the host check stays as the rule of every signed
+  request. A listener without `host` accepts any host (development).
 - `expose.url` is replaced by `listen` + `path`; the URL answered for
   `respond: url` is `<public of the first listener of the expose><path><name>`.
 - Behind a proxy the proxy must pass the original `Host`; lukd does not
@@ -3094,7 +3604,7 @@ expose:
   TLS listeners. HTTP-01 needs a plain listener with `acme: true` (see
   TLS, ACME).
 
-Intake on a self-signed certificate (clients pin it), downloads for
+Intake on a self-signed certificate (clients pin the lukd key), downloads for
 browsers on a Let's Encrypt certificate:
 
 ```yaml
@@ -3117,10 +3627,16 @@ expose:
   drop: {listen: download, path: /}
 ```
 
-`luk` clients of `intake` keep their SPKI pin (`luk scan --pin
-https://lukd.example.com:8443/`, compared with `lukd tls pin`); browsers
-and `curl` reach `https://drop.example.com/<name>` with normal CA
-verification.
+`luk` clients of `intake` pin the lukd key (`luk scan --pin
+https://lukd.example.com:8443/`, compared with `lukd key`) and do not
+verify its certificate; browsers and `curl` reach
+`https://drop.example.com/<name>` with normal CA verification.
+
+Endpoints and exposes may share a listener. Its clients then hold two
+kinds of pins, never in the same place: the endpoint URL in the luk
+config carries the lukd key (see Pins), and the download links of a
+`self` or `files` listener carry the SPKI pin of its certificate (see
+TLS, Private files).
 
 ## Status
 
@@ -3227,14 +3743,16 @@ configuration of the storages.
 ## TLS
 
 `listen.<n>.tls.mode: self` - a self-signed certificate with a stable key;
-clients trust it by SPKI pin, not by a CA. Pin format (as in
+downloads (`luk get`) trust it by SPKI pin, not by a CA. Pin format (as in
 DLG): `sha256//<base64 of sha256 over the DER SubjectPublicKeyInfo>`.
+Endpoints do not use TLS for trust: luk authenticates lukd by the
+channel and takes any certificate there (see Channel).
 
 `listen.<n>.tls.algorithm` selects the key: `ed25519` (default) or
 `ecdsa-p256`. Browsers (Chrome) do not support Ed25519 in TLS and fail with
 `ERR_SSL_VERSION_OR_CIPHER_MISMATCH`, so a listener that browsers open (for
-example one serving `expose` downloads) uses `ecdsa-p256`; pinned `luk`
-clients work with either. Changing the algorithm means a new key and a new
+example one serving `expose` downloads) uses `ecdsa-p256`; `luk` works
+with either. Changing the algorithm means a new key and a new
 pin. `lukd receive` loads whatever key type the files hold.
 
 Bootstrap:
@@ -3242,7 +3760,7 @@ Bootstrap:
 ```sh
 runuser -u luk -- lukd tls generate          # writes missing cert + key, prints the pins
 lukd tls pin                                 # prints the pin of the existing cert
-luk scan --pin https://host:8443/ # client side: pin of what the server presents (TOFU)
+luk scan --pin https://host:8443/ # client side: the lukd key, and "download pin: sha256//..." on stderr (TOFU)
 ```
 
 `lukd receive` does not generate certificates; a missing cert is an error
@@ -3368,10 +3886,9 @@ listen:
   next handshake gets it), after a renewal or a `lukd tls acme renew`.
   `SIGHUP` only logs `tls acme` with the pin and expiry of each name (or
   `no certificate yet`).
-- Clients of an acme listener verify the certificate against the system
-  CAs and need no pin: the key changes with every renewal. `luk scan
-  --print` adds no pin for a chain that verifies; `luk scan
-  --pin` still prints the pin of whatever certificate is served; `lukd tls pin`
+- Downloads of an acme listener verify the certificate against the
+  system CAs and need no pin: the key changes with every renewal. `luk
+  scan` prints no download pin for a chain that verifies; `lukd tls pin`
   and `lukd tls generate` skip acme listeners.
 - All `tls` settings and `acme` are restart-only (see Reload).
 - `status.json` in each cache directory, written by the receive role
@@ -3457,8 +3974,9 @@ or reloaded one by one. Install the three units and enable the group:
 systemctl enable --now lukd
 ```
 
-- `lukd receive` (`deploy/lukd-receive.service`): the listeners,
-  verification, queue writes (reserve, 507), downloads, portals, once
+- `lukd receive` (`deploy/lukd-receive.service`): the listeners, the
+  channel sessions (it reads the identity key), verification, queue
+  writes (reserve, 507), downloads, portals, once
   claims, the catalog read, and the expiry part of the janitor on every
   local storage (ttl, `cleanup.age`, stale claimed files). It removes half-received queue
   entries at start, before the listeners open: directories of a queue
@@ -3508,7 +4026,8 @@ at 0 and every catalog is rebuilt). A base must be on a local filesystem
 - Config: `/etc/site/lukd/config.yaml` and `config.d/*.yaml`, owned
   `root:luk`, mode 0640; `ssh.d/` and `ssh.d/ca/{,host/,user/}` owned
   `root:luk`, mode 0750, their `*.pub` files 0640 (never writable by group
-  or others).
+  or others); `identity.key` owned `root:luk`, mode 0640, created by the
+  package (see Identity key).
 - State: `/var/lib/luk` (`quota.json` of the quotas among it), shared by
   both role units and created by tmpfiles.d (`deploy/luk.tmpfiles.conf`, installed as
   `/etc/tmpfiles.d/luk.conf`).
@@ -3893,8 +4412,8 @@ luk send [flags]      (aliases: put, push)
                             (exactly one of --file, --stdin, or a bare --secret)
 
   -e, --endpoint NAME|URL   endpoint name from the config, or a full URL
-                            (URL may carry the pin: "#sha256//..." or "#pin=sha256//..."); default:
-                            config "default"
+                            (URL may carry the lukd pins: "#PIN[,PIN...]",
+                            see Pins); default: config "default"
   -k, --key PATH|SHA256:FP  private key file (signs locally; uses
                             PATH-cert.pub when present), a .pub file
                             (selects that key in the SSH agent), or a
@@ -3963,6 +4482,9 @@ luk send [flags]      (aliases: put, push)
       --bwlimit RATE        limit the upload rate, bytes per second with
                             K, M, G, T suffix (10M = 10 MiB/s); 0 or unset
                             = unlimited
+      --parallel N          parts in flight at once, 1 to 64 (default 1),
+                            at most what the endpoint offers
+                            (parts.parallel, see Uploads in parts)
       --json                print the server answer as JSON (exclusive
                             with --quiet)
   -q, --quiet               print only the URL, nothing for an endpoint
@@ -4001,20 +4523,25 @@ luk link ls [-e|--endpoint NAME|URL] [-k|--key PATH|SHA256:FP] [--json]
 luk config show [--layer global|user]   merged config with the source of
                                  each value and both layer paths; --layer
                                  prints one raw layer
-luk config endpoint ls [--layer global|user]   merged endpoints, one per
-                                 line: name, URL, pin or -, key or -, source,
+luk config endpoint ls [--layer global|user] [--pin-format words|key]
+                                 merged endpoints, one per line: name, URL,
+                                 pins (comma separated, words by default)
+                                 or -, key or -, source,
                                  * marks the default; the source of an
                                  endpoint with a user key overlay is
                                  global,key:user; --layer lists one raw
                                  layer (an overlay shows - as URL)
 luk config endpoint show -e|--endpoint NAME   one merged endpoint: name, url,
-                                 full pin, key, source, whether it is the
-                                 default; with a pin, the line under url
-                                 is the URL with #<pin>, as endpoint add
+                                 pins as stored, key, source, whether it is
+                                 the default; with pins, the line under url
+                                 is the URL with #<pins>, as endpoint add
                                  takes it; the source of an overlaid
                                  endpoint is "global, key: user"
-luk config endpoint add -e|--endpoint NAME --url URL [--pin sha256//...]
-                                 [-k|--key PATH|SHA256:FP]
+luk config endpoint add -e|--endpoint NAME --url URL[#PIN[,PIN...]]
+                                 [--pin PIN]... [-k|--key PATH|SHA256:FP]
+                                 PIN: a lukd key, words or key form (see
+                                 Pins); the pins of the URL fragment and of
+                                 --pin must agree when both are given
 luk config endpoint rm -e|--endpoint NAME   (removing the default clears it)
 luk config endpoint key -e|--endpoint NAME (-k|--key PATH|SHA256:FP | --clear)
                                  set or clear the key of one endpoint;
@@ -4043,10 +4570,11 @@ luk config check [--file PATH]   validate config files: with --file that one
                                  prints ok, or every problem and exit 1
   (all config edits take --global to write the global layer)
   (`endpoint add` moves a pin fragment of the URL into `pin`)
-luk scan URL [--pin] [--endpoints] [--print] [--json] [-k|--key PATH|SHA256:FP]
-                                 the SPKI pin of the server's TLS certificate
-                                 and the endpoints it offers the key (see
-                                 Endpoint listing); neither flag: both
+luk scan URL [--pin] [--endpoints] [--print] [--json] [--pin-format words|key]
+        [-k|--key PATH|SHA256:FP]
+                                 the lukd key of the server and the
+                                 endpoints it offers the key (see Endpoint
+                                 listing); neither flag: both
 luk alias ls                     merged aliases, one per line: name,
                                  expansion (shell-quoted), source
 luk alias add --alias NAME -- ARGS...   add or replace an alias; everything
@@ -4067,9 +4595,11 @@ host <host>; add one with luk config link add --url LINK -e NAME` (exit 1).
 The signing key is chosen as for `send`, for that endpoint. Output on stdout: nothing for
 `--rm`; the new expiry (RFC 3339) for `--ttl` (nothing when `--ttl max`
 cleared it), with the `ttl_note` line of `send` on stderr; the URL for a
-replace; `--json` prints the server answer instead. A replace streams `--stdin` and non-regular files like `send`,
-waits for `100 Continue`, and compares the sha256 of the answer with its
-own (exit 4 on a mismatch). Exit codes are those of `send`; a link that is
+replace; `--json` prints the server answer instead. Every link request
+goes through the channel with the pins of its endpoint, as `send`. A
+replace sends its content in parts as `send` does (`--stdin` and
+non-regular files as a stream), and compares the sha256 of the answer
+with its own (exit 4 on a mismatch). Exit codes are those of `send`; a link that is
 not there or not the signer's is a 404 (exit 2).
 
 `luk get` sends one signed `GET` (`luk-get@v1`, see Private files) for
@@ -4321,7 +4851,7 @@ also with `--links 1`; without `--links` the single answer object). The
 first upload goes as usual; the later ones carry in the meta the `size`
 and `sha256` of the first answer (a stream had none, see Client meta), so
 the server can answer them without the content (see Transfer dedup). When
-the server asks for the body anyway (`100 Continue`), a regular `--file`
+the server answers with the parts offer instead, a regular `--file`
 is read again from its start and sent; a stream (`--stdin`, `--file` on a
 pipe, a prompted `--secret`) cannot be sent twice: the request is
 abandoned and luk stops with `the server asked for the content again for
@@ -4345,14 +4875,15 @@ needs one link URL`, `luk link needs one link URL`, `luk scan needs one
 URL`; `luk link ls` takes none), and the expansion after `--`
 of `luk alias add`; a
 missing required flag or a stray argument is a usage error (exit 1). The `config` commands validate their input (URL
-is http or https with a host, a pin needs https and starts with
-`sha256//`, `default` names an existing endpoint) and write the file
+is http or https with a host, a pin is a lukd key in key or words form,
+`default` names an existing endpoint) and write the file
 atomically. Each edit reads and writes only the chosen layer, never the
 merged values.
 
 `luk config check --file PATH` is strict (unknown keys and a second YAML
 document are errors, an empty file is valid): endpoint URLs are http(s) with a host and no fragment, `pin`
-needs https and is `sha256//` plus base64 of 32 bytes, `default` names an
+is a list of lukd keys in key or words form (a `sha256//` pin is the
+error `an endpoint pin is the lukd key: run luk scan URL`), `default` names an
 endpoint of that file, `key` and `endpoint.<n>.key` are absolute, start
 with `~/`, or are a fingerprint: `SHA256:` and 43 characters of unpadded
 base64 of 32 bytes. A missing key file only warns on stderr; a fingerprint
@@ -4360,28 +4891,32 @@ is checked for its form only, not against the agent. For provisioning with Ansib
 `template: ... validate: "luk config check --file %s"`.
 
 `luk scan URL` takes an origin (`https://host:8443`) or an endpoint URL
-(`https://host:8443/drop`), or a config endpoint name in place of the URL
-(its URL and pin); a pin fragment of the URL (`#sha256//...`) is a pin as
-in the config. `--pin` and `--endpoints` select the parts, neither is
-both:
+(`https://host:8443/drop`), `http` or `https`, or a config endpoint name
+in place of the URL (its URL and pins); a pin fragment of the URL
+(`#PIN[,PIN...]`) is a list of pins as in the config. Only the scheme,
+host and port count. `--pin` and `--endpoints` select the parts, neither
+is both:
 
-- `--pin` connects over TLS to the host and port of the URL without
-  verifying the chain and prints the leaf certificate's pin in lukd's
-  format on stdout; the subject and validity go to stderr. It is trust on
-  first use: compare the pin with `lukd tls pin` on the server. An `http`
-  URL has no pin: `--pin` is a usage error, and without flags only the
-  listing is done.
-- `--endpoints` sends the endpoint listing request (see Endpoint listing)
-  to the origin of the URL, whatever its path. The server is trusted by
-  the pin of the config endpoint whose URL equals the URL (the first by
-  name with the same scheme, host and port and a pin, for any other URL
-  of that origin) or of the URL fragment; else by the system CAs when
-  the chain verifies for the host; else by the pin scanned in the same
-  run. The key is `--key`, else the `key` of the config endpoint whose URL
-  equals the URL (or that the name names), else the top-level `key`, else
-  each key of the SSH agent in agent order, the next one tried only while
-  the server answers 401 `unknown key` (all unknown: the error adds `none
-  of the <n> agent keys is known`).
+- `--pin` runs the handshake of the channel on the endpoint listing path
+  of the origin, without a pin, and prints the key lukd presents on
+  stdout: its six words, or the full key with `--pin-format key`. It is
+  trust on first use: compare it with `lukd key` on the server. When the
+  config (an endpoint of the same origin) or the URL fragment has pins
+  and the key matches none of them, the key is still printed, then the
+  error `the lukd key <words> matches no pin of this endpoint`, exit 3.
+  For an `https` URL whose certificate chain does not verify against the
+  system CAs for the host, stderr also gets `download pin: sha256//...`:
+  the SPKI pin of the certificate, the one the download links of that
+  listener carry (`lukd tls pin`); none for a chain that verifies (an
+  acme listener) or for `http`.
+- `--endpoints` asks lukd for the endpoint listing (see Endpoint
+  listing) in a new session that pins the key just scanned; a key that
+  matches no configured pin gets no listing (the signed request is never
+  sent to it). The key is `--key`, else the `key` of the config endpoint
+  whose URL equals the URL (or that the name names), else the top-level
+  `key`, else each key of the SSH agent in agent order, one session each,
+  the next one tried only while the server answers 401 `unknown key`
+  (all unknown: the error adds `none of the <n> agent keys is known`).
 
 Output: the pin line, then the endpoints as aligned columns under a header
 line, by name: `NAME`, `URL`, `RESPOND` (`url` or `accept`), `TTL` (the
@@ -4396,24 +4931,22 @@ comma separated; `-` for none), and when an endpoint has a
 quota for the signer `QUOTA` (`10G/1d 50G (12.5G left)`: the rate, the
 burst and what the bucket holds now, `, passive` added in passive mode;
 `-` for an endpoint without one); no endpoint prints no table.
-`--json` prints one object, `{"pin": ..., "endpoints": [...]}` with the
-entries of the listing answer, each key only when asked for. `--print`
-prints instead one command per endpoint, `luk config endpoint add -e
-<name> --url '<url>#<pin>' [--key KEY]` (the pin scanned, for an `https`
-URL whose certificate chain does not verify against the system CAs, or
-with `--pin`; no fragment for a verified chain, such as an acme listener,
-whose key changes with every renewal, nor for `http`; `--key` the key the listing was signed with: `--key`
-as given to scan, else the `key` of the config endpoint, else
-`SHA256:<fingerprint>` of the agent key the server knew; none for the
-top-level `key`); with `--pin` alone (or without flags when the
-listing fails) one
-command for the URL itself, named by its last path segment, or by the
-first label of the host for an origin (`NAME`, a placeholder to replace,
-for an IP address). `--print` and `--json` exclude each
-other. When the listing fails the pin is still printed, then the error:
-`listing endpoints of <host>: ...`, with `the server does not offer an
-endpoint listing` for a 404 (a lukd without it); the exit codes are those
-of `send`.
+`--json` prints one object, `{"pin": ..., "download_pin": ...,
+"endpoints": [...]}` with the entries of the listing answer, each key
+only when asked for (`download_pin` only for a certificate that does
+not verify). `--print` prints instead one command per endpoint, `luk
+config endpoint add -e <name> --url '<url>#<pin>' [--key KEY]` (the key
+scanned, in the `--pin-format`, for every scheme; `--key` the key the
+listing was signed with: `--key` as given to scan, else the `key` of the
+config endpoint, else `SHA256:<fingerprint>` of the agent key the server
+knew; none for the top-level `key`), and the download pin line on
+stderr; with `--pin` alone one command for the URL itself, named by its
+last path segment, or by the first label of the host for an origin
+(`NAME`, a placeholder to replace, for an IP address); a key that
+matches no configured pin gets no commands. `--print` and `--json`
+exclude each other. When the listing fails the pin is still printed,
+then the error, `listing endpoints of <host>: ...`; the exit codes are
+those of `send`.
 
 Config has two layers, both YAML with the same schema:
 
@@ -4541,9 +5074,10 @@ key: ~/.ssh/id_ed25519.pub
 endpoint:
   drop:
     url: https://lukd.vm:8443/drop
-    pin: sha256//Xk9...
+    pin: [lusab-babad-gutih-tugad-hajop-kizof]
   backup:
     url: http://lukd.vm:8080/backup
+    pin: [lusab-babad-gutih-tugad-hajop-kizof]
     key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s
 link:
   drop.lukd.vm: drop
@@ -4555,52 +5089,54 @@ alias:
 - One file per run. A regular file is hashed first (read twice) and its
   `size` and `sha256` go into the signed meta. `--stdin`, and `--file` on
   anything that is not a regular file (pipe, FIFO, device, process
-  substitution), stream chunked without `size`/`sha256` and without a
+  substitution), stream in parts without `size`/`sha256` and without a
   `file` name unless `--name` gives one. A directory is an error. A file named `-`
   is an ordinary path.
-- The request goes with `Expect: 100-continue`; an early rejection stops
-  the upload before the body. The body is sent only after `100 Continue`;
-  with neither `100 Continue` nor the complete headers of a final (non-1xx)
-  answer within 60s the client gives up without sending it. Other 1xx
-  answers (`103 Early Hints`) are no decision, and the limit never covers
-  the body upload after `100 Continue`. A `201` or `202` before `100 Continue` (or
-  with `"deduplicated": true`) is a success without the body (see
-  Transfer dedup): its size and sha256 are compared with the signed ones;
-  `--progress` prints nothing for it and `--json` shows `"deduplicated": true`.
-- The signed GET and HEAD of `luk get` and the endpoint listing of `luk
-  scan` give up when the headers of the answer do not come within 60s
-  (`the server gave no answer within 60s`).
-- Once decided, every wait for the server is limited to 2m without
-  progress: for the server to take the next body bytes, for the answer
-  after the whole body, and between the bytes of an answer (a `luk get`
-  download included). Only the server counts: time spent reading a slow
-  source, writing to a slow output or pacing for `--bwlimit` never does.
-  There is no limit on the whole transfer; a slow but progressing one
-  is never cut.
+- An upload is one channel session (see Channel): the handshake (10s),
+  the pin check, the signed OP, then the parts and the COMPLETE (see
+  Uploads in parts). A refusal answers the OP, before any part. A `201`
+  or `202` answer to the OP (or one with `"deduplicated": true`) is a
+  success without the content (see Transfer dedup): its size and sha256
+  are compared with the signed ones; `--progress` prints nothing for it
+  and `--json` shows `"deduplicated": true`.
+- A part attempt that makes no progress for 30s, in the sending or in the
+  wait for its answer, is cut and sent again (see Uploads in parts). luk
+  sets no limit of its own on the answers to the OP and to the COMPLETE,
+  nor on the whole transfer; a slow but progressing one is never cut.
+  Only the server counts: time spent reading a slow source or pacing for
+  `--bwlimit` never does.
+- The signed GET and HEAD of `luk get` give up when the headers of the
+  answer do not come within 60s (`the server gave no answer within
+  60s`); then every wait for the server is limited to 2m without
+  progress, between the bytes of the answer.
 - `--progress` prints on stderr, refreshed about every 200ms on one line:
   sent bytes, total, percent, rate and ETA (only sent bytes and rate for a
   stream), then a summary line (bytes, duration, average rate). Bytes are
-  counted as the transport reads the body, after `100 Continue`. Nothing is
+  counted as the parts are sent; a part sent again counts once. Nothing is
   printed when stderr is not a terminal.
-- `--bwlimit` paces the body reads to the given rate (burst of one read
-  chunk) and stops at once when the upload is cancelled.
+- `--bwlimit` paces the reads of all the parts together to the given rate
+  (burst of one read chunk) and stops at once when the upload is
+  cancelled.
 - The server's sha256 in the answer is compared with the client's own;
   a mismatch is an error.
 - Exit codes: 0 ok, 1 usage/config, 2 rejected (401/403/413/422/429), 3 transfer
-  or server error, 4 hash mismatch, 130 interrupted (Ctrl-C).
-- A request that ends in transit says why, with the body bytes moved
-  (of the size, when known) instead of the raw transport error:
-  `interrupted after 12.4 MiB of 2.1 GiB`, `the server gave no decision
-  within 60s`, `the server gave no answer within 60s`, `no progress for
-  120s after 12.4 MiB of 2.1 GiB` (`no progress for 120s` with nothing
-  to count), `connection closed after 12.4 MiB of 2.1 GiB: connection
-  reset by peer`, `cannot reach HOST: connection refused` (before any
-  body byte). `luk get` counts the bytes received of the Content-Length.
+  or server error, 4 hash mismatch, 130 interrupted (Ctrl-C). A lukd key
+  that matches no pin, an answer outside the channel and a result
+  unknown (see Uploads in parts) are exit 3; an endpoint without a pin
+  is exit 1.
+- A request that ends in transit says why, with the bytes of the parts
+  lukd verified (of the size, when known) instead of the raw transport
+  error: `interrupted after 12.4 MiB of 2.1 GiB`, `no progress for 30s
+  after 12.4 MiB of 2.1 GiB` (`no progress for 30s` with nothing to
+  count), `connection closed after 12.4 MiB of 2.1 GiB: connection reset
+  by peer`, `cannot reach HOST: connection refused` (before any byte);
+  `luk get` reports the bytes received of the Content-Length the same
+  way, with its `no progress for 120s` and `the server gave no answer
+  within 60s`.
 - Text from the server that `luk` prints as text (error messages after
   `rejected (...)`, the lines of `luk get --head`, the columns of `luk
   link ls`, `luk get URL/` and `luk scan`, the names of a directory
-  download, URLs and expiry times printed on stdout, the
-  certificate subject of `luk scan`) has every control character (C0,
+  download, URLs and expiry times printed on stdout) has every control character (C0,
   DEL, C1), line and paragraph separator (U+2028, U+2029) and
   bidirectional formatting character replaced by its Go escape (`\n`,
   `\x1b`, `\u2028`): a server or another identity can neither drive the

@@ -43,6 +43,8 @@ func TestCompleteFlags(t *testing.T) {
 		{[]string{"quota", "ls", "-c", cfgPath, "--endpoint", ""}, "drop"},
 		{[]string{"tls", "acme", "revoke", "-c", cfgPath, "--reason", "key"}, "keyCompromise"},
 		{[]string{"storage", "ls", "-c", "/nonexistent.yaml", "--storage", ""}, ""},
+		{[]string{"key", "-c", cfgPath, "--pin-format", ""}, "words,key"},
+		{[]string{"key", "-c", cfgPath, ""}, "generate\tCreate the identity key and print its pin"},
 	} {
 		if got := strings.Join(complete(t, c.args...), ","); got != c.want {
 			t.Errorf("%v: %q, want %q", c.args, got, c.want)

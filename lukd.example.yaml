@@ -55,6 +55,13 @@ limits:
     reserve: 1G
   failed:
     age: 3d
+  channel:                      # the channel sessions of luk (handshake, then one operation)
+    auth: 60s                   # from the handshake to its signed operation (a hardware key touch)
+    pending: 1024               # sessions without their operation; the oldest goes for a new one
+    idle: 2m                    # a session that is no upload, after its operation
+  uploads:                      # uploads in parts open at once
+    total: 256
+    identity: 8                 # per identity
 
 log:
   level: info                   # debug, info, warn, error; SIGHUP applies a change
@@ -90,7 +97,11 @@ endpoint:
     limits:
       body:
         size: 50G
-        idle: 2m
+        idle: 2m                # the default: a part without received bytes for it fails
+        rate: 64K               # the default: a part arrives within its size / rate (0 = off)
+    parts:                      # how an upload goes in parts; the defaults
+      size: 8M                  # a multiple of 64K, 64K to 2G-64K
+      parallel: 4               # parts in flight at once, at most (1 to 64)
     # backup:                   # who may set the luk send --backup hostname; absent = anyone, any
     #   hostname:
     #     any: [robert.socha]   # may send any hostname

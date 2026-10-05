@@ -17,15 +17,19 @@ Typical uses:
 
 - SSH signatures (SSHSIG) with plain keys, agent keys, hardware keys and
   OpenSSH certificates (host and user CAs).
-- Every check (signature, identity, endpoint access, size, quota, disk
-  space) runs before the body is sent (`Expect: 100-continue`).
+- A Noise channel between `luk` and `lukd`: the client pins the lukd
+  key (`luk scan`, `lukd key`), and HTTP, TLS and proxies only carry
+  the encrypted requests.
+- Uploads in parts: a failed part is sent again, not the whole file;
+  `--parallel` parts at once. Every check (signature, identity, endpoint
+  access, size, quota, disk space) runs before the first part.
 - Pipelines selected by endpoint and tags: `store`, `encrypt` (OpenPGP, keys
   from files or WKD), `run` (any program), `relay` (an allowlisted job
   as another user, through a small root helper and systemd).
 - Links with a TTL, one-time downloads, private files fetched by signed
   requests, mutable links, content deduplication.
 - Portal pages for browsers (reveal or download, then delete).
-- TLS: self-signed with pinning, own files, or ACME (HTTP-01).
+- TLS for downloads: self-signed with pinning, own files, or ACME (HTTP-01).
 - Per-identity upload quotas (token bucket), with a passive learning mode.
 - Hot reload, `lukd check` before every reload, Checkmk check in
   `contrib/checkmk`.
@@ -46,8 +50,9 @@ apt install ./lukd_<version>_amd64.deb
 
 The `lukd` package installs the units (`lukd.service` groups
 `lukd-receive.service` and `lukd-process.service`), creates the user
-`luk` and `/etc/site/lukd/`, and starts nothing. Examples are in
-`/usr/share/doc/lukd/examples/`.
+`luk`, `/etc/site/lukd/` and the identity key
+(`/etc/site/lukd/identity.key`, kept on upgrades), and starts nothing.
+Examples are in `/usr/share/doc/lukd/examples/`.
 
 From source (Go):
 
@@ -105,7 +110,9 @@ expose:
 
 ```sh
 cp alice.pub /etc/site/lukd/ssh.d/alice.pub   # the identity "alice"
-lukd tls generate                             # self-signed certificate, prints its pin
+lukd key generate --if-missing                # the identity key (the package creates it)
+lukd key                                      # its pin, the six words clients compare
+lukd tls generate                             # self-signed certificate, for the download links
 lukd check
 systemctl enable --now lukd
 ```
@@ -113,6 +120,7 @@ systemctl enable --now lukd
 Client (the key comes from the SSH agent):
 
 ```sh
+luk scan --pin https://lukd.example.com:8443     # the lukd key: compare with lukd key
 luk scan --print https://lukd.example.com:8443   # prints "luk config endpoint add ..." with the pin
 luk scan --print https://lukd.example.com:8443 | sh
 luk send --endpoint drop --ttl 1d --file report.pdf   # prints the URL

@@ -6,6 +6,7 @@ endpoint:
     pin: [REPLACE-WITH-luk-scan-pin]   # the lukd key: words or key form, see luk scan
   backup:
     url: http://lukd.vm:8080/backup
+    pin: [REPLACE-WITH-luk-scan-pin]   # http works the same: the channel authenticates lukd
     key: SHA256:REPLACE-WITH-ssh-add-l-fingerprint
 link:                         # endpoint of luk link by the host of the link
   drop.lukd.vm: drop

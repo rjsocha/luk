@@ -210,15 +210,14 @@ type HeaderLimits struct {
 	Timeout Duration `yaml:"timeout" json:"timeout"`
 }
 
-// EndpointLimits bound one request; Body.Timeout zero means no total limit.
+// EndpointLimits bound the requests of an endpoint.
 type EndpointLimits struct {
 	Body BodyLimits `yaml:"body"`
 }
 
 type BodyLimits struct {
-	Size    Size     `yaml:"size"`
-	Idle    Duration `yaml:"idle"`
-	Timeout Duration `yaml:"timeout"`
+	Size Size     `yaml:"size"`
+	Idle Duration `yaml:"idle"`
 	// Rate is the slowest a part may arrive, in bytes per second: a part
 	// must arrive within its size / Rate. 0 turns it off; unset is
 	// DefaultBodyRate.
@@ -1512,9 +1511,6 @@ func (c *Config) validate() []error {
 		}
 		if bl.Idle == 0 {
 			bl.Idle = Duration(DefaultBodyIdle)
-		}
-		if bl.Timeout < 0 {
-			bad("endpoint %s: limits.body.timeout must be positive", name)
 		}
 		if bl.Rate == nil {
 			r := Size(DefaultBodyRate)

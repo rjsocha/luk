@@ -440,7 +440,7 @@ func TestLimitsDefaults(t *testing.T) {
 		t.Fatalf("%+v", l)
 	}
 	b := c.Endpoint["drop"].Limits.Body
-	if b.Size != 0 || b.Idle != Duration(2*time.Minute) || b.Timeout != 0 {
+	if b.Size != 0 || b.Idle != Duration(2*time.Minute) {
 		t.Fatalf("%+v", b)
 	}
 	if ch := l.Channel; ch.Auth != Duration(time.Minute) || ch.Pending != 1024 || ch.Idle != Duration(2*time.Minute) {
@@ -469,12 +469,12 @@ func TestLimitsSet(t *testing.T) {
 	if ch := l.Channel; ch.Auth != Duration(7*time.Second) || ch.Pending != 1 || ch.Idle != Duration(8*time.Second) {
 		t.Fatalf("%+v", ch)
 	}
-	c, err = Parse([]byte(strings.Replace(good, "limits: {body: {size: 50G}}", "limits: {body: {size: 1K, idle: 5s, timeout: 1h}}", 1)))
+	c, err = Parse([]byte(strings.Replace(good, "limits: {body: {size: 50G}}", "limits: {body: {size: 1K, idle: 5s}}", 1)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	b := c.Endpoint["backup"].Limits.Body
-	if b.Size != 1024 || b.Idle != Duration(5*time.Second) || b.Timeout != Duration(time.Hour) {
+	if b.Size != 1024 || b.Idle != Duration(5*time.Second) {
 		t.Fatalf("%+v", b)
 	}
 	c, err = Parse([]byte(strings.Replace(good, "limits: {body: {size: 50G}}", "limits: {body: {rate: 0}}\n    parts: {size: 2097088K, parallel: 64}", 1) +
@@ -490,6 +490,15 @@ func TestLimitsSet(t *testing.T) {
 	}
 	if u := c.Limits.Uploads; u.Total != 3 || u.Identity != 2 {
 		t.Fatalf("%+v", u)
+	}
+}
+
+// TestBodyTimeoutUnknown: limits.body.timeout bounded the single upload
+// request, which parts replaced; like any unknown key it is an error.
+func TestBodyTimeoutUnknown(t *testing.T) {
+	_, err := Parse([]byte(strings.Replace(good, "limits: {body: {size: 50G}}", "limits: {body: {size: 50G, timeout: 1h}}", 1)))
+	if err == nil || !strings.Contains(err.Error(), "field timeout not found") {
+		t.Fatalf("got %v", err)
 	}
 }
 
@@ -510,7 +519,7 @@ func TestLimitsInvalid(t *testing.T) {
 			t.Fatalf("%s: %v", l, err)
 		}
 	}
-	for _, b := range []string{"idle: -1s", "timeout: -1s"} {
+	for _, b := range []string{"idle: -1s"} {
 		text := strings.Replace(good, "limits: {body: {size: 50G}}", "limits: {body: {"+b+"}}", 1)
 		if _, err := Parse([]byte(text)); err == nil || !strings.Contains(err.Error(), "limits.body.") {
 			t.Fatalf("%s: %v", b, err)

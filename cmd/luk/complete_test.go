@@ -98,6 +98,7 @@ func TestCompleteFixedAndFree(t *testing.T) {
 	tempConfig(t)
 	ttl := []string{"max", "1h", "1d", "7d"}
 	layer := []string{"global", "user"}
+	pinFormat := []string{"words", "key"}
 	for _, c := range []struct {
 		args      []string
 		want      []string
@@ -114,6 +115,10 @@ func TestCompleteFixedAndFree(t *testing.T) {
 		{[]string{"config", "check", "--file", ""}, nil, ":0"},
 		{[]string{"config", "show", "--layer", ""}, layer, ":4"},
 		{[]string{"config", "endpoint", "ls", "--layer", ""}, layer, ":4"},
+		{[]string{"config", "endpoint", "ls", "--pin-format", ""}, pinFormat, ":4"},
+		{[]string{"scan", "--pin-format", ""}, pinFormat, ":4"},
+		{[]string{"send", "--parallel", ""}, nil, ":4"},
+		{[]string{"config", "endpoint", "add", "--pin", ""}, nil, ":4"},
 	} {
 		wantCompletion(t, c.args, c.want, c.directive)
 	}
