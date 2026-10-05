@@ -2997,15 +2997,18 @@ pipeline:
 - The pipeline `timeout` does not apply; stopping lukd interrupts the step
   like a run step.
 - Decrypt with the secret key of any recipient:
-  `gpg --output f.txt --decrypt f.txt.gpg`.
+  `gpg --output f.txt --decrypt f.txt.gpg`. The decrypt commands for every
+  case are in [encryption.md](encryption.md).
 
-#### Insecure options
+#### Insecure options (legacy)
 
-`encrypt.insecure` adds password based encryption for receivers without
-an OpenPGP key. Both options are weaker than public-key encryption: the
-passwords sit on the server (anyone who reads `password.d` decrypts the
-files), and a password is only as strong as it is long and random. The
-key reads as a warning in the configuration on purpose.
+`encrypt.insecure` adds password based encryption for receivers that
+cannot use an OpenPGP key. It is very insecure and exists only for such
+legacy receivers; nothing new should use it. The passwords sit on the
+server (anyone who reads `password.d` decrypts the files), a password is
+only as strong as it is long and random, and the `openssl` format has no
+integrity check. The key reads as a warning in the configuration on
+purpose.
 
 ```yaml
       - encrypt:
@@ -3019,9 +3022,10 @@ key reads as a warning in the configuration on purpose.
 
 - Passwords: `password.d/<name>` next to the main file
   (`/etc/site/lukd/password.d/receiver-a`), owned `root:luk`, mode 0640
-  (the directory 0750). The content is the password; one trailing newline
-  is stripped, everything else (spaces, a `\r`, further newlines) is part
-  of it. An empty file, or one over 4096 bytes, is an error. lukd reads
+  (the directory 0750). The content is the password, one line: one
+  trailing newline is stripped, spaces are part of it, and a `\r` or a
+  further newline is an error (both decrypt commands read the first line
+  only). An empty file, or one over 4096 bytes, is an error. lukd reads
   the passwords when the step runs, so a changed file takes effect with
   the next run, without a reload; a missing or empty one fails the step.
   Only the process role reads them: `lukd-receive.service` and
@@ -3035,16 +3039,11 @@ key reads as a warning in the configuration on purpose.
   recipient key or any of the passwords decrypts it. The password is
   turned into a key with the iterated and salted S2K with SHA-256
   (16777216 bytes hashed), which every OpenPGP implementation reads,
-  GnuPG 2.4 among them: `gpg --output f.txt --decrypt f.txt.gpg` asks for
-  the password, or takes it with `--batch --pinentry-mode loopback
-  --passphrase-file password.txt`. The meta
-  of the file gets `"passwords"`: the names (never the passwords), next
-  to `"recipients"`. Key holders: gpg tries the password packet first, so
-  `gpg --batch -d` with a recipient key prints the plaintext but exits 2
-  (problem with the agent); scripts must use `gpg --batch --pinentry-mode
-  cancel -d f.txt.gpg`, which decrypts with the key and exits 0
-  (verified on GnuPG 2.4.7). Interactive gpg asks for the password first
-  and uses the key once the prompt is cancelled.
+  GnuPG 2.4 among them; the password decrypts without a gpg agent. The
+  meta of the file gets `"passwords"`: the names (never the passwords),
+  next to `"recipients"`. Key holders: gpg tries the password packet
+  first, so a script decrypting with a key needs `--pinentry-mode cancel`
+  (see [encryption.md](encryption.md)).
 - `openssl`: a file whose name (as it enters the step) matches one of
   the `files` globs (`path.Match`: `*`, `?`, `[...]`, never across a
   slash) is written only as `out/<name>.enc`, never as `.gpg`, in the
@@ -3058,10 +3057,8 @@ key reads as a warning in the configuration on purpose.
   Files that do not match take the `.gpg` path. The meta of an `.enc`
   file is `"encryption": "openssl"`, `"passwords": [<key>]` and `"plain"`
   as for `.gpg` (no `"recipients"`).
-- Decrypt an `.enc` file with the password in a file (only its first
-  line is read):
-  `openssl enc -d -aes-256-cbc -pbkdf2 -in db-latest.sql.zst.enc -out db-latest.sql.zst -pass file:password.txt`.
-  The openssl command reads at most 1023 bytes from `-pass file:`, so the
+- Decrypt commands: [encryption.md](encryption.md). The openssl
+  command reads at most 1023 bytes from `-pass file:`, so the
   password named by `insecure.openssl.key` must not be longer than that
   (without the trailing newline); the encrypt step and `lukd check`
   reject a longer one. The passwords of `symmetric` keep the limit of
