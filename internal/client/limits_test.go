@@ -88,8 +88,9 @@ func TestCompleteNoAnswerRetried(t *testing.T) {
 	}
 }
 
-// A COMPLETE that is never answered fails the upload after its attempts,
-// as a transfer error.
+// A COMPLETE that is never answered leaves the result unknown after its
+// attempts: lukd may have stored the upload. luk sends an ABORT and does
+// not send the upload again.
 func TestCompleteNoAnswer(t *testing.T) {
 	shortWaits(t)
 	var release <-chan struct{}
@@ -99,9 +100,86 @@ func TestCompleteNoAnswer(t *testing.T) {
 	})
 	release = never(t)
 	_, err := Upload(context.Background(), fakeOpts(t, srv, patterned(3<<16)))
-	wantNoAnswer(t, "complete", err, completeWait)
+	if !errors.Is(err, ErrResultUnknown) || !strings.Contains(err.Error(), "no answer within") || strings.Contains(err.Error(), "committed") {
+		t.Fatalf("complete: %v", err)
+	}
+	var te *TransferError
+	if errors.As(err, &te) {
+		t.Fatalf("a transfer error: %v", err)
+	}
 	if n := srv.Count(channel.KindComplete); n != partAttempts {
 		t.Fatalf("%d completes", n)
+	}
+	if srv.Count(channel.KindOp) != 1 || srv.Count(channel.KindAbort) != 1 {
+		t.Fatalf("%d OPs, %d aborts", srv.Count(channel.KindOp), srv.Count(channel.KindAbort))
+	}
+}
+
+// A COMPLETE whose answers are lost while lukd commits the upload: the
+// ABORT that follows gets 409 upload committed, which the error tells;
+// the result stays unknown, as the URL never came.
+func TestCompleteLostCommitted(t *testing.T) {
+	srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+	srv.Message = func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool {
+		if n.Kind == channel.KindComplete {
+			w.WriteHeader(http.StatusBadGateway)
+			io.WriteString(w, "<html>502 Bad Gateway</html>")
+			return false
+		}
+		return true
+	}
+	srv.Abort = func(channel.Nonce) *chantest.Answer {
+		return &chantest.Answer{Status: http.StatusConflict, Body: wire.ErrorResponse{Error: "upload committed"}}
+	}
+	_, err := Upload(context.Background(), fakeOpts(t, srv, patterned(3<<16)))
+	if !errors.Is(err, ErrResultUnknown) || !strings.Contains(err.Error(), "lukd reports the upload as committed") {
+		t.Fatalf("complete: %v", err)
+	}
+	if srv.Count(channel.KindComplete) != partAttempts || srv.Count(channel.KindAbort) != 1 || srv.Count(channel.KindOp) != 1 {
+		t.Fatalf("%d completes, %d aborts, %d OPs", srv.Count(channel.KindComplete), srv.Count(channel.KindAbort), srv.Count(channel.KindOp))
+	}
+}
+
+// proxy404 answers the messages of kind k with a clear 404 that is not
+// lukd's.
+func proxy404(k channel.Kind) func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool {
+	return func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool {
+		if n.Kind != k {
+			return true
+		}
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, "<html>404 Not Found</html>")
+		return false
+	}
+}
+
+// A clear 404 that is not lukd's unknown session (a proxy) to a part is
+// a transfer error: the upload is not started over in a new session.
+func TestPartProxy404(t *testing.T) {
+	srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+	srv.Message = proxy404(channel.KindPart)
+	_, err := Upload(context.Background(), fakeOpts(t, srv, patterned(3<<16)))
+	var te *TransportError
+	if !errors.As(err, &te) || te.Status != http.StatusNotFound || errors.Is(err, errSessionGone) {
+		t.Fatalf("%v", err)
+	}
+	if srv.Count(channel.KindOp) != 1 || srv.Count(channel.KindAbort) != 1 {
+		t.Fatalf("%d OPs, %d aborts", srv.Count(channel.KindOp), srv.Count(channel.KindAbort))
+	}
+}
+
+// A clear 404 that is not lukd's to a COMPLETE is a transfer error, not
+// a lost session: the result is not unknown and an ABORT follows.
+func TestCompleteProxy404(t *testing.T) {
+	srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+	srv.Message = proxy404(channel.KindComplete)
+	_, err := Upload(context.Background(), fakeOpts(t, srv, patterned(3<<16)))
+	var te *TransportError
+	if !errors.As(err, &te) || te.Status != http.StatusNotFound || errors.Is(err, ErrResultUnknown) {
+		t.Fatalf("%v", err)
+	}
+	if srv.Count(channel.KindComplete) != partAttempts || srv.Count(channel.KindAbort) != 1 {
+		t.Fatalf("%d completes, %d aborts", srv.Count(channel.KindComplete), srv.Count(channel.KindAbort))
 	}
 }
 
@@ -152,17 +230,23 @@ func TestOpRedial(t *testing.T) {
 }
 
 // A 409 older attempt to a part is no failure: the part goes again as a
-// newer attempt, however often.
+// newer attempt, however often, after the usual wait.
 func TestPartOlderAttemptIgnored(t *testing.T) {
 	srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+	partBackoff = []time.Duration{50 * time.Millisecond}
 	srv.PartAnswer = func(n channel.Nonce, _ []byte) *chantest.Answer {
 		if n.Number == 1 && n.Attempt <= partAttempts {
 			return &chantest.Answer{Status: http.StatusConflict, Body: wire.ErrorResponse{Error: "older attempt"}}
 		}
 		return nil
 	}
+	start := time.Now()
 	if _, err := Upload(context.Background(), fakeOpts(t, srv, patterned(3<<16))); err != nil {
 		t.Fatal(err)
+	}
+	// Six refusals, each followed by at least 40ms (50ms -20%).
+	if d := time.Since(start); d < 6*40*time.Millisecond {
+		t.Fatalf("sent again without a wait: %v", d)
 	}
 }
 

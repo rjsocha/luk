@@ -72,6 +72,36 @@ var (
 	errSessionGone = errors.New("the server lost the upload session")
 )
 
+// msgUnknownSession is the error lukd answers in the clear (404) to a
+// message of a session it does not have.
+const msgUnknownSession = "unknown session"
+
+// sessionGone reports whether err is lukd's 404 unknown session. Only its
+// message tells it from any other 404 in the clear, such as one of a
+// proxy on the way, which says nothing about the session.
+func sessionGone(err error) bool {
+	var te *TransportError
+	return errors.As(err, &te) && te.Status == http.StatusNotFound && te.Message == msgUnknownSession
+}
+
+// noAnswerError is an upload whose COMPLETE got no answer after its
+// attempts: lukd may have stored it, so the result is unknown
+// (ErrResultUnknown). committed is set when the ABORT that followed was
+// refused as the upload committed: stored, but its URL was lost.
+type noAnswerError struct {
+	cause     error
+	committed bool
+}
+
+func (e *noAnswerError) Error() string {
+	if e.committed {
+		return fmt.Sprintf("result unknown: %v at the end of the upload; lukd reports the upload as committed, but its answer with the URL was lost", e.cause)
+	}
+	return fmt.Sprintf("result unknown: %v at the end of the upload; check whether it arrived before sending it again", e.cause)
+}
+
+func (e *noAnswerError) Is(target error) bool { return target == ErrResultUnknown }
+
 // partsResult is the answer that ended an upload: to its OP when the OP
 // needed no parts (a dry run, a deduplicated upload, a refusal), else to
 // its COMPLETE. sum is the sha256 of the stream sent.
@@ -132,8 +162,7 @@ func opSession(ctx context.Context, u *url.URL, pins []channel.Pin, op opFunc) (
 			return c, resp, nil
 		}
 		c.Close()
-		var te *TransportError
-		if !again || !errors.As(err, &te) || te.Status != http.StatusNotFound || te.Message != "unknown session" {
+		if !again || !sessionGone(err) {
 			return nil, nil, err
 		}
 	}
@@ -322,6 +351,14 @@ func (r *partsRun) inRange(ns []uint32) bool {
 // already. A file that changed is reported as such whatever failed before
 // the COMPLETE, and a transfer error carries the bytes lukd verified.
 func (r *partsRun) fail(ctx context.Context, err error) error {
+	var na *noAnswerError
+	if errors.As(err, &na) {
+		// The session may still hold the upload: the ABORT drops it, or
+		// tells it was committed meanwhile.
+		resp := r.abort()
+		na.committed = resp != nil && resp.Status == http.StatusConflict && errorText(resp.Body) == "upload committed"
+		return err
+	}
 	if errors.Is(err, ErrResultUnknown) {
 		return err
 	}
@@ -346,13 +383,19 @@ func (r *partsRun) fail(ctx context.Context, err error) error {
 }
 
 // abort asks lukd to drop the upload, within abortTimeout and whatever
-// the caller's context.
-func (r *partsRun) abort() {
+// the caller's context; its answer, nil without one.
+func (r *partsRun) abort() *InnerResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), abortTimeout)
 	defer cancel()
-	if n, err := r.nonce(channel.Nonce{Kind: channel.KindAbort}); err == nil {
-		_, _ = r.c.Send(ctx, n, nil)
+	n, err := r.nonce(channel.Nonce{Kind: channel.KindAbort})
+	if err != nil {
+		return nil
 	}
+	resp, err := r.c.Send(ctx, n, nil)
+	if err != nil {
+		return nil
+	}
+	return resp
 }
 
 // unchanged checks a file against its hash pass: the same size and
@@ -571,7 +614,7 @@ func (r *partsRun) sendPart(ctx context.Context, j partJob) error {
 		switch {
 		case errors.As(err, &se):
 			return err
-		case errors.As(err, &te) && te.Status == http.StatusNotFound:
+		case sessionGone(err):
 			return errSessionGone
 		case errors.As(err, &te) && te.Status == http.StatusRequestEntityTooLarge:
 			// lukd answers a part too large inside the channel: a 413 in
@@ -593,7 +636,11 @@ func (r *partsRun) sendPart(ctx context.Context, j partJob) error {
 			return nil
 		case resp.Status == http.StatusConflict && errorText(resp.Body) == "older attempt":
 			// lukd has a newer attempt of the part than this one: the next
-			// attempt is newer than every one sent, so it counts no failure.
+			// attempt is newer than every one sent, so it counts no failure,
+			// but waits as one would.
+			if err := sleep(ctx, jitter(partBackoff[min(failed, len(partBackoff)-1)])); err != nil {
+				return err
+			}
 			continue
 		case resp.Status == http.StatusTooManyRequests && message(errorText(resp.Body)) != wire.ErrQuotaExceeded:
 			if err := sleep(ctx, retryAfter(resp)); err != nil {
@@ -645,7 +692,9 @@ func (r *partsRun) attempt(ctx context.Context, j partJob, n channel.Nonce) (res
 // complete sends the COMPLETE of round seq, again when its answer is
 // lost or does not come within completeWait: lukd answers the attempt
 // that follows from the answer it kept, or once the first one is done. A
-// session lukd lost by then leaves the result unknown.
+// session lukd lost by then, or no answer after every attempt, leaves the
+// result unknown; a 404 in the clear that is not lukd's is a transfer
+// error.
 func (r *partsRun) complete(ctx context.Context, seq uint32) (*InnerResponse, error) {
 	for failed := 0; ; {
 		n, err := r.nonce(channel.Nonce{Kind: channel.KindComplete, Number: seq})
@@ -661,13 +710,16 @@ func (r *partsRun) complete(ctx context.Context, seq uint32) (*InnerResponse, er
 			return resp, nil
 		case ctx.Err() != nil:
 			return nil, ctx.Err()
-		case errors.As(err, &te) && te.Status == http.StatusNotFound:
+		case sessionGone(err):
 			return nil, ErrResultUnknown
 		case errors.Is(actx.Err(), context.DeadlineExceeded):
 			err = &TransferError{Reason: NoAnswer, Host: r.host, Total: -1, Wait: completeWait, Err: context.DeadlineExceeded}
 		}
 		if failed++; failed == partAttempts {
-			return nil, err
+			if errors.As(err, &te) && te.Status == http.StatusNotFound {
+				return nil, err
+			}
+			return nil, &noAnswerError{cause: err}
 		}
 		if err := sleep(ctx, jitter(partBackoff[min(failed, len(partBackoff))-1])); err != nil {
 			return nil, err

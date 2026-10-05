@@ -40,6 +40,8 @@ type Server struct {
 	// PartAnswer, when set, answers a PART once it was read; nil keeps
 	// the part and answers 200.
 	PartAnswer func(n channel.Nonce, data []byte) *Answer
+	// Abort, when set, answers an ABORT; nil answers 200.
+	Abort func(n channel.Nonce) *Answer
 	// Part, when set, runs when a PART arrives, before it is read; true
 	// lets the PART go on.
 	Part func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool
@@ -188,6 +190,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		a = s.Complete(cs.req, n, content)
+	case channel.KindAbort:
+		a = Answer{Status: http.StatusOK, Body: struct{}{}}
+		if s.Abort != nil {
+			if aa := s.Abort(n); aa != nil {
+				a = *aa
+			}
+		}
 	default:
 		a = Answer{Status: http.StatusOK, Body: struct{}{}}
 	}
