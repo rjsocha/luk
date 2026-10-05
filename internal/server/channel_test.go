@@ -698,7 +698,7 @@ func TestSignedOutsideChannelRefused(t *testing.T) {
 		f.handler().ServeHTTP(rec, hr)
 		var e wire.ErrorResponse
 		if rec.Code != http.StatusBadRequest || json.Unmarshal(rec.Body.Bytes(), &e) != nil ||
-			e.Error != "endpoint requests go through the channel (update luk)" || rec.Header().Get("Connection") != "close" {
+			e.Error != "protocol mismatch" || rec.Header().Get("Connection") != "close" {
 			t.Errorf("%s: %d %v %s", name, rec.Code, rec.Header(), rec.Body)
 		}
 	}

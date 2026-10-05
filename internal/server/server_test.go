@@ -1237,25 +1237,11 @@ func TestRejectedLogLevel(t *testing.T) {
 	if rec.Code != http.StatusNotFound || !strings.Contains(logs.String(), `level=DEBUG msg="upload rejected"`) || strings.Contains(logs.String(), "level=INFO") {
 		t.Errorf("unsigned junk: %d %s", rec.Code, logs)
 	}
-	// A signed request outside the channel is an old luk: worth an info
-	// line; an unsigned one is not.
-	logs.Reset()
-	metaS, err := wire.EncodeMeta(fileMeta([]byte("x"), "prod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	hr := httptest.NewRequest(http.MethodPut, "http://lukd.test/backup", strings.NewReader("x"))
-	signV1(t, f.user, hr, before(wire.Namespace), metaS, http.MethodPut, "lukd.test", "/backup")
-	rec = httptest.NewRecorder()
-	f.handler().ServeHTTP(rec, hr)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(logs.String(), `level=INFO msg="endpoint request outside the channel"`) {
-		t.Errorf("signed request outside the channel: %d %s", rec.Code, logs)
-	}
 	logs.Reset()
 	rec = httptest.NewRecorder()
 	f.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "http://lukd.test/backup", nil))
 	if rec.Code != http.StatusBadRequest || !strings.Contains(logs.String(), `level=DEBUG msg="endpoint request outside the channel"`) || strings.Contains(logs.String(), "level=INFO") {
-		t.Errorf("unsigned request to an endpoint: %d %s", rec.Code, logs)
+		t.Errorf("request to an endpoint outside the channel: %d %s", rec.Code, logs)
 	}
 }
 

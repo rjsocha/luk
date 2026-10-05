@@ -228,7 +228,7 @@ func (c *Config) Resolve(arg string) (string, []string, error) {
 
 // ResolveLenient is Resolve for luk scan, the command that replaces a
 // stale pin: the stored pins of a named endpoint that are not lukd keys
-// (an old TLS pin) are left out instead of failing, and each is returned
+// are left out instead of failing, and each is returned
 // as a notice for the user. Pins given in a URL fragment still fail.
 func (c *Config) ResolveLenient(arg string) (string, []string, []string, error) {
 	return c.resolve(arg, true)
@@ -271,7 +271,7 @@ func usablePins(name string, pins []string) ([]string, []string) {
 	var ok, notices []string
 	for _, p := range pins {
 		if _, err := channel.ParsePin(p); err != nil {
-			notices = append(notices, fmt.Sprintf("endpoint %s: pin %s is not a lukd key (old TLS pin?): replace it with the pin below", name, p))
+			notices = append(notices, fmt.Sprintf("endpoint %s: pin %s is not a lukd key", name, p))
 			continue
 		}
 		ok = append(ok, p)
@@ -351,7 +351,7 @@ func PinsFor(cfg *Config, u *url.URL, fragment string) ([]channel.Pin, error) {
 }
 
 // PinsForLenient is PinsFor for luk scan: a stored pin that is not a lukd
-// key (an old TLS pin) is ignored, as if the endpoint had none, and
+// key is ignored, as if the endpoint had none, and
 // returned as a notice. A fragment is the user's own input and still fails.
 func PinsForLenient(cfg *Config, u *url.URL, fragment string) ([]channel.Pin, []string, error) {
 	if fragment != "" || cfg == nil {

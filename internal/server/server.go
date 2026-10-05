@@ -278,18 +278,13 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request, sn *snapshot,
 }
 
 // errOutsideChannel is the answer to an endpoint request outside the
-// channel: only a luk from before the channel sends one.
-const errOutsideChannel = "endpoint requests go through the channel (update luk)"
+// channel.
+const errOutsideChannel = "protocol mismatch"
 
 // outsideChannel refuses a request on an endpoint path or the endpoint
 // listing that came outside the channel.
 func (s *Server) outsideChannel(w http.ResponseWriter, r *http.Request) {
-	// Unsigned requests are scanners and stray clients, not an old luk.
-	level := slog.LevelInfo
-	if !signed(r) {
-		level = slog.LevelDebug
-	}
-	s.log.Log(r.Context(), level, "endpoint request outside the channel", "remote", r.RemoteAddr, "host", r.Host, "method", r.Method, "path", r.URL.Path)
+	s.log.Debug("endpoint request outside the channel", "remote", r.RemoteAddr, "host", r.Host, "method", r.Method, "path", r.URL.Path)
 	// The body is left unread; do not keep the connection.
 	w.Header().Set("Connection", "close")
 	writeJSON(w, http.StatusBadRequest, wire.ErrorResponse{Error: errOutsideChannel})

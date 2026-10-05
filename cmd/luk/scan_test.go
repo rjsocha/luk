@@ -387,7 +387,7 @@ func TestPrintEndpointsBackupHost(t *testing.T) {
 	}
 }
 
-// An endpoint pinned with an old TLS pin must not stop the scan that tells
+// An endpoint pinned with a TLS pin must not stop the scan that tells
 // the pin to replace it with, and that scan's own output must fix it.
 func TestScanIgnoresStaleTLSPin(t *testing.T) {
 	e := newScanEnv(t)
@@ -400,7 +400,7 @@ func TestScanIgnoresStaleTLSPin(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	notice := "endpoint backup: pin " + stale + " is not a lukd key (old TLS pin?): replace it with the pin below\n"
+	notice := "endpoint backup: pin " + stale + " is not a lukd key\n"
 	for _, target := range []string{e.url + "/backup", "backup", e.url + "/drop"} {
 		code, out, errs := runLuk(t, "scan", "--pin", target)
 		if code != 0 || out != e.words+"\n" || !strings.Contains(errs, notice) {

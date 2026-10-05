@@ -14,11 +14,9 @@ HTTP. It replaces two things with one:
 Binaries: `luk` (client), `lukd` (server). Language: Go, static binaries
 (`CGO_ENABLED=0`).
 
-Stage: phases 1 to 6 are implemented; the Phases section keeps their
-history, and Later lists what is not implemented yet (S3 storage among
-it). Uploads, link requests and the endpoint listing have since moved
-into the channel (see Channel, Uploads in parts): the signed `PUT` with
-`Expect: 100-continue` the phases describe is gone.
+Stage: phases 1 to 6 are implemented; the Phases section describes
+them, and Later lists what is not implemented yet (S3 storage among
+it).
 
 ## Model
 
@@ -78,9 +76,8 @@ Content-Type: application/vnd.luk.channel
 - lukd tells a channel request by its method and content type, before
   the path. A request to an endpoint path or to the endpoint listing
   outside the channel (any other method or content type) is 400
-  `endpoint requests go through the channel (update luk)` with
-  `Connection: close`, logged as `endpoint request outside the channel`
-  (INFO when it carries a `Luk-*` signature header, else DEBUG).
+  `protocol mismatch` with `Connection: close`, logged at DEBUG as
+  `endpoint request outside the channel`.
 - An answer that is not `200` with the channel content type comes from
   outside the channel: a proxy, or lukd refusing a request before any of
   it opened (below). Nothing authenticates it, so luk reports it as a
@@ -2642,14 +2639,6 @@ the upload again, a new upload with its own id and acceptance order.
   `status.json` and monitoring work on the records (see Phase 5).
 
 ### Acceptance order
-
-Changed in the release with the channel: an upload was ordered by when
-it arrived (the commit of its entry); it is now ordered by when it
-starts. So a long upload that finishes after a shorter one started
-later is the older of the two: it no longer replaces the newer one's
-file under `conflict: replace` (skipped), becomes a version instead of
-`<name>` under `conflict: version`, and moves no alias, `latest` or
-permanent name past the newer one (see the table below).
 
 An upload is ordered by its start: `lukd receive` takes its acceptance
 order when it admits the OP, before the first part (a deduplicated
@@ -5318,51 +5307,7 @@ alias:
 
 ## Phases
 
-The history of the delivery, phase by phase; the sections above describe
-the current behaviour.
-
-### Phase 1 - auth layer and matching
-
-Goal: test authentication, matching and the request shape end to end;
-the rest of the logic follows once this settles.
-
-Client: everything in "Client" above, including config, key from agent
-or file, certificates, all flags (`--secret` alone reads the content masked from
-the terminal; `--dry-run`), SPKI pinning, `100-continue`, streaming.
-
-Server:
-
-- the server (now `lukd receive` and `lukd process`), `lukd check`,
-  `lukd tls generate`, `lukd tls pin`;
-- `listen`: plain HTTP and `tls.mode: self`;
-- full verification (signature, keys, CA, revocation, clock, nonce, ACL,
-  matching) with early rejection before the body;
-- body: read, counted and hashed (sha256), checked against signed
-  `size`/`sha256` and `limits.body.size`, then discarded - nothing is written
-  (with or without `dry_run`, which only marks the answer; from phase 2 a
-  dry run sends no body);
-- `pipeline`, `storage`, `expose` parsed and validated, never executed;
-- answer: a debug JSON (200):
-
-```json
-{
-  "id": "20260930T081512Z-9f2c01ab",
-  "identity": {"name": "hosts:luk.vm", "type": "certificate",
-               "ca": "hosts", "key_id": "luk.vm",
-               "principals": [], "serial": 250622104730,
-               "fingerprint": "SHA256:..."},
-  "endpoint": "backup",
-  "client": {...client meta...},
-  "server": {"received": "...", "size": 1234, "sha256": "..."},
-  "pipelines": ["archive", "devdb"],
-  "schedule": [{"pipeline": "archive", "group": "backup", "order": 1},
-               {"pipeline": "devdb", "group": "backup", "order": 2}],
-  "respond": {"mode": "url", "url": "https://lukd.vm:8443/d/x7Kq..."}
-}
-```
-
-Out of phase 1: queue, pipeline execution, storage, expose, catalog,
-status, ACME, packaging (hopper, deb), deployment.
+The delivery, phase by phase; the sections above are the reference.
 
 ### Phase 2 - queue, local storage, direct download
 
