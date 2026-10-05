@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -63,5 +64,26 @@ func TestFormatPin(t *testing.T) {
 	}
 	if _, err := FormatPin(k.Public, "hex"); err == nil {
 		t.Fatal("hex accepted")
+	}
+}
+
+func TestWriteKeyGroup(t *testing.T) {
+	k, err := GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "identity.key")
+	if err := WriteKeyGroup(path, k, os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); int(st.Gid) != os.Getgid() || fi.Mode().Perm() != 0o640 {
+		t.Fatalf("gid %d mode %v", st.Gid, fi.Mode())
+	}
+	if _, err := LoadKey(path); err != nil {
+		t.Fatal(err)
 	}
 }

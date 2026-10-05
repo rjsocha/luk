@@ -52,6 +52,9 @@ func inputs(cfg *config.Config) (files, dirs []string) {
 		filepath.Join(dir, config.SSHDir, "ca", "user"),
 	}
 	files = append(files, cfg.Files...)
+	if cfg.IdentityPath != "" {
+		files = append(files, cfg.IdentityPath)
+	}
 	for _, name := range cfg.ListenNames() {
 		t := cfg.Listen[name].TLS
 		if t == nil {

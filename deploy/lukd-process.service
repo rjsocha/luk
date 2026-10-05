@@ -17,7 +17,7 @@ ExecStart=/usr/bin/lukd process
 # reloads it on SIGHUP. The kill runs outside the sandbox ("+"): with
 # PrivatePIDs= the unit has its own PID namespace, where $MAINPID of the
 # host does not exist.
-ExecReload=/usr/bin/lukd check
+ExecReload=/usr/bin/lukd check --no-identity
 ExecReload=+/bin/kill -HUP $MAINPID
 Restart=on-failure
 # SIGTERM to lukd only: it kills its run step process groups and leaves

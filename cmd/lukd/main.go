@@ -87,7 +87,7 @@ func rootCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: run(server.Process),
 	})
-	var noRunning bool
+	var noRunning, noIdentity bool
 	var serviceUser string
 	checkCmd := &cobra.Command{
 		Use:   "check",
@@ -98,7 +98,8 @@ func rootCmd() *cobra.Command {
 			"would refuse. A local storage base holding anything but .db/ and file/ (an\n" +
 			"older layout) fails the check; an orphaned permanent name in a readable\n" +
 			"base (see lukd storage permanent) is a warning.\n" +
-			"The identity key (see lukd key) must exist and be loadable.\n" +
+			"The identity key (see lukd key) must exist and be loadable; --no-identity\n" +
+			"skips that, as the process role never reads the key.\n" +
 			"--no-running skips that comparison, before a restart. Run as root, it also\n" +
 			"checks that the service user (--user) can read every configuration input:\n" +
 			"config.yaml, config.d, ssh.d, the tls files, the eab key file and gpg.keys.\n" +
@@ -115,7 +116,11 @@ func rootCmd() *cobra.Command {
 				fmt.Fprintln(errw, "warning: "+w)
 			}
 			failed := false
-			if err := checkIdentity(cfg); err != nil {
+			if noIdentity {
+				// The process role never reads the key: it is neither
+				// loaded nor required to be readable here.
+				cfg.IdentityPath = ""
+			} else if err := checkIdentity(cfg); err != nil {
 				fmt.Fprintln(errw, err)
 				failed = true
 			}
@@ -152,6 +157,7 @@ func rootCmd() *cobra.Command {
 		},
 	}
 	checkCmd.Flags().BoolVar(&noRunning, "no-running", false, "do not compare with the settings of the running lukd")
+	checkCmd.Flags().BoolVar(&noIdentity, "no-identity", false, "do not check the identity key (the process role never reads it)")
 	checkCmd.Flags().StringVar(&serviceUser, "user", "luk", "service user that must read the configuration (checked when run as root)")
 	completeFlags(checkCmd, map[string]cobra.CompletionFunc{"user": completeNone})
 	root.AddCommand(checkCmd)

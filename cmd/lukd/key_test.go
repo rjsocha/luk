@@ -92,3 +92,10 @@ func TestConfigIdentityPath(t *testing.T) {
 		t.Fatalf("%q", c.IdentityPath)
 	}
 }
+
+func TestCheckNoIdentity(t *testing.T) {
+	cfg, _ := statusConfig(t)
+	if out, errOut, err := runCheck(t, "--no-running", "--no-identity", "-c", cfg); err != nil || out != "ok\n" || errOut != "" {
+		t.Fatalf("%q %q %v", out, errOut, err)
+	}
+}

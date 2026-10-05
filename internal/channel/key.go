@@ -75,7 +75,14 @@ func (k Key) Marshal() []byte {
 
 // WriteKey replaces path atomically, so that a crash never leaves lukd with
 // a truncated identity.
-func WriteKey(path string, k Key) (err error) {
+func WriteKey(path string, k Key) error {
+	return WriteKeyGroup(path, k, -1)
+}
+
+// WriteKeyGroup is WriteKey with the group of the file set to gid before it
+// is renamed into place, so the live key is never unreadable for the group
+// that needs it; gid < 0 leaves the group as created.
+func WriteKeyGroup(path string, k Key, gid int) (err error) {
 	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
@@ -86,7 +93,13 @@ func WriteKey(path string, k Key) (err error) {
 			os.Remove(tmp)
 		}
 	}()
-	if err = f.Chmod(0o640); err == nil {
+	if gid >= 0 {
+		err = f.Chown(-1, gid)
+	}
+	if err == nil {
+		err = f.Chmod(0o640)
+	}
+	if err == nil {
 		if _, err = f.Write(k.Marshal()); err == nil {
 			err = f.Sync()
 		}

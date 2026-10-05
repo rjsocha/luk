@@ -94,10 +94,7 @@ func keyCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := channel.WriteKey(path, k); err != nil {
-				return err
-			}
-			if err := chownService(path); err != nil {
+			if err := channel.WriteKeyGroup(path, k, serviceGID()); err != nil {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), channel.Words(k.Public))
@@ -110,20 +107,20 @@ func keyCmd(cfgPath *string) *cobra.Command {
 	return cmd
 }
 
-// chownService gives the key file to root:luk when run as root and the group
-// exists; elsewhere (tests, a user without the group) the file stays as
-// written.
-func chownService(path string) error {
+// serviceGID is the group luk when run as root and the group exists, else
+// -1 (tests, a user without the group): the key then keeps the group it
+// gets from its creator.
+func serviceGID() int {
 	if geteuid() != 0 {
-		return nil
+		return -1
 	}
 	g, err := user.LookupGroup("luk")
 	if err != nil {
-		return nil
+		return -1
 	}
 	gid, err := strconv.Atoi(g.Gid)
 	if err != nil {
-		return nil
+		return -1
 	}
-	return os.Chown(path, 0, gid)
+	return gid
 }
