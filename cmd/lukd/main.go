@@ -87,7 +87,7 @@ func rootCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: run(server.Process),
 	})
-	var noRunning, noIdentity bool
+	var noRunning, noIdentity, noPasswords bool
 	var serviceUser string
 	checkCmd := &cobra.Command{
 		Use:   "check",
@@ -100,9 +100,12 @@ func rootCmd() *cobra.Command {
 			"base (see lukd storage permanent) is a warning.\n" +
 			"The identity key (see lukd key) must exist and be loadable; --no-identity\n" +
 			"skips that, as the process role never reads the key.\n" +
+			"Every password the encrypt steps name (password.d) must exist and not be\n" +
+			"empty; --no-passwords skips that, as the receive role never reads them.\n" +
 			"--no-running skips that comparison, before a restart. Run as root, it also\n" +
 			"checks that the service user (--user) can read every configuration input:\n" +
-			"config.yaml, config.d, ssh.d, the tls files, the eab key file and gpg.keys.\n" +
+			"config.yaml, config.d, ssh.d, the tls files, the eab key file, gpg.keys and\n" +
+			"the passwords.\n" +
 			"A relay step whose job has no file in " + rund.DefaultJobs + " is a warning when\n" +
 			"that directory is readable.",
 		Args: cobra.NoArgs,
@@ -123,6 +126,18 @@ func rootCmd() *cobra.Command {
 			} else if err := checkIdentity(cfg); err != nil {
 				fmt.Fprintln(errw, err)
 				failed = true
+			}
+			if noPasswords {
+				// The receive role never reads the passwords: password.d
+				// is hidden from it, and it need not be readable here.
+				cfg.PasswordDir = ""
+			} else {
+				for _, n := range cfg.PasswordNames() {
+					if _, err := config.ReadPassword(cfg.PasswordDir, n); err != nil {
+						fmt.Fprintf(errw, "password %s: %v\n", n, err)
+						failed = true
+					}
+				}
 			}
 			for _, err := range storageLayouts(cfg) {
 				fmt.Fprintln(errw, err)
@@ -158,6 +173,7 @@ func rootCmd() *cobra.Command {
 	}
 	checkCmd.Flags().BoolVar(&noRunning, "no-running", false, "do not compare with the settings of the running lukd")
 	checkCmd.Flags().BoolVar(&noIdentity, "no-identity", false, "do not check the identity key (the process role never reads it)")
+	checkCmd.Flags().BoolVar(&noPasswords, "no-passwords", false, "do not check the passwords of the encrypt steps (the receive role never reads them)")
 	checkCmd.Flags().StringVar(&serviceUser, "user", "luk", "service user that must read the configuration (checked when run as root)")
 	completeFlags(checkCmd, map[string]cobra.CompletionFunc{"user": completeNone})
 	root.AddCommand(checkCmd)

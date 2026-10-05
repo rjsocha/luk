@@ -75,6 +75,11 @@ func inputs(cfg *config.Config) (files, dirs []string) {
 			files = append(files, keys...)
 		}
 	}
+	if d := cfg.PasswordDir; d != "" {
+		for _, n := range cfg.PasswordNames() {
+			files = append(files, filepath.Join(d, n))
+		}
+	}
 	seen := map[string]bool{}
 	keep := func(p string) bool {
 		if p == "" || seen[p] {

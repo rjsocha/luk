@@ -22,8 +22,9 @@ CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-# The identity key of lukd receive stays out of reach of the run programs.
-InaccessiblePaths=-/etc/site/lukd/identity.key
+# The identity key of lukd receive and the passwords of the encrypt steps
+# of lukd process stay out of reach of the run programs.
+InaccessiblePaths=-/etc/site/lukd/identity.key -/etc/site/lukd/password.d
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
