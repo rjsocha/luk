@@ -718,7 +718,7 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, Outcome) {
 				}
 			}
 			if s.Encrypt != nil {
-				next, err := d.encryptStep(j, d.resolver(cfg), name, i+1, s.Encrypt, set, stepDir(work, i+1))
+				next, err := d.encryptStep(j, d.resolver(cfg), cfg.PasswordDir, name, i+1, s.Encrypt, set, stepDir(work, i+1))
 				if err != nil {
 					if errors.Is(err, errInterrupted) {
 						return i + 1, err

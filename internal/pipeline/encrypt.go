@@ -11,9 +11,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/ProtonMail/go-crypto/openpgp/s2k"
 	openpgp "github.com/ProtonMail/go-crypto/openpgp/v2"
 
 	"luk/internal/config"
@@ -85,13 +87,43 @@ func (d *Dispatcher) recipients(j Job, keys *gpgkeys.Resolver, name string, step
 	return ents, fps, nil
 }
 
-// encryptStep encrypts every file of set to out/<name>.gpg of dir; the
-// result is the next set, each file with its meta extended by the
-// encryption, the recipient fingerprints and the plain file.
-func (d *Dispatcher) encryptStep(j Job, keys *gpgkeys.Resolver, name string, step int, e *config.Encrypt, set []file, dir string) ([]file, error) {
-	ents, fps, err := d.recipients(j, keys, name, step, e)
-	if err != nil {
-		return nil, err
+// encryptStep encrypts every file of set to out/<name>.gpg of dir, or to
+// out/<name>.enc in the openssl format when insecure.openssl matches its
+// name; the result is the next set, each file with its meta extended by
+// the encryption, the recipient fingerprints, the password names and the
+// plain file. The passwords are read here, so a changed file takes effect
+// on the next run without a reload.
+func (d *Dispatcher) encryptStep(j Job, keys *gpgkeys.Resolver, passwordDir, name string, step int, e *config.Encrypt, set []file, dir string) ([]file, error) {
+	var symmetric []string
+	var ossl *config.OpenSSL
+	if in := e.Insecure; in != nil {
+		symmetric, ossl = in.Symmetric, in.OpenSSL
+	}
+	var passwords [][]byte
+	for _, n := range symmetric {
+		pw, err := config.ReadPassword(passwordDir, n)
+		if err != nil {
+			return nil, fmt.Errorf("password %s: %w", n, err)
+		}
+		passwords = append(passwords, pw)
+	}
+	var osslPassword []byte
+	if ossl != nil {
+		pw, err := config.ReadPassword(passwordDir, ossl.Key)
+		if err != nil {
+			return nil, fmt.Errorf("password %s: %w", ossl.Key, err)
+		}
+		osslPassword = pw
+	}
+	// The recipients are looked up only for a set that has a file for
+	// them.
+	var ents []*openpgp.Entity
+	var fps []string
+	if slices.ContainsFunc(set, func(f file) bool { return !ossl.Match(f.name) }) {
+		var err error
+		if ents, fps, err = d.recipients(j, keys, name, step, e); err != nil {
+			return nil, err
+		}
 	}
 	in, out, err := prepareWork(dir, set)
 	if err != nil {
@@ -102,24 +134,56 @@ func (d *Dispatcher) encryptStep(j Job, keys *gpgkeys.Resolver, name string, ste
 		now = keys.Now()
 	}
 	var next []file
+	nossl := 0
 	for _, f := range set {
-		o := file{name: f.name + ".gpg", produced: true}
+		kind, ext, seal, pwNames, to := "gpg", ".gpg", gpgSeal(ents, passwords, now), symmetric, fps
+		if ossl.Match(f.name) {
+			kind, ext, seal, pwNames, to = "openssl", ".enc", opensslSeal(osslPassword), []string{ossl.Key}, nil
+			nossl++
+		}
+		o := file{name: f.name + ext, produced: true}
 		if !runstep.ValidName(o.name) {
 			return nil, fmt.Errorf("%q: name too long", o.name)
 		}
 		o.path = filepath.Join(out, o.name)
-		plain, err := encryptFile(filepath.Join(in, f.name), o.path, ents, now, d.stop)
+		plain, err := encryptFile(filepath.Join(in, f.name), o.path, seal, d.stop)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", f.name, err)
 		}
 		o.size, o.sha256 = plain.outSize, plain.outSum
-		if o.meta, err = encryptedMeta(f.meta, fps, f.name, plain.size, plain.sum); err != nil {
+		if o.meta, err = encryptedMeta(f.meta, kind, to, pwNames, f.name, plain.size, plain.sum); err != nil {
 			return nil, err
 		}
 		next = append(next, o)
 	}
-	d.log.Info("encrypted", "id", j.Entry.ID, "pipeline", name, "step", step, "files", len(next), "recipients", fps)
+	attrs := []any{"id", j.Entry.ID, "pipeline", name, "step", step, "files", len(next), "recipients", fps}
+	if len(symmetric) > 0 {
+		attrs = append(attrs, "passwords", symmetric)
+	}
+	if ossl != nil {
+		attrs = append(attrs, "openssl", nossl)
+	}
+	d.log.Info("encrypted", attrs...)
 	return next, nil
+}
+
+// gpgSeal opens a binary OpenPGP message to the recipients to and the
+// passwords. A password gets the Argon2 S2K of RFC 9580.
+func gpgSeal(to []*openpgp.Entity, passwords [][]byte, now time.Time) func(io.Writer) (io.WriteCloser, error) {
+	return func(w io.Writer) (io.WriteCloser, error) {
+		cfg := gpgkeys.Config(now)
+		if len(passwords) > 0 {
+			cfg.S2KConfig = &s2k.Config{S2KMode: s2k.Argon2S2K}
+		}
+		return openpgp.EncryptWithParams(w, to, nil, &openpgp.EncryptParams{Config: cfg, Passwords: passwords})
+	}
+}
+
+// opensslSeal opens the openssl enc format with the password.
+func opensslSeal(password []byte) func(io.Writer) (io.WriteCloser, error) {
+	return func(w io.Writer) (io.WriteCloser, error) {
+		return newOpenSSLWriter(w, password)
+	}
 }
 
 type encrypted struct {
@@ -127,9 +191,9 @@ type encrypted struct {
 	sum, outSum   string
 }
 
-// encryptFile streams src into a binary OpenPGP message at dst, hashing
-// both sides on the way.
-func encryptFile(src, dst string, to []*openpgp.Entity, now time.Time, stop <-chan struct{}) (encrypted, error) {
+// encryptFile streams src through seal into dst, hashing both sides on
+// the way.
+func encryptFile(src, dst string, seal func(io.Writer) (io.WriteCloser, error), stop <-chan struct{}) (encrypted, error) {
 	var r encrypted
 	in, err := openRegular(src)
 	if err != nil {
@@ -142,7 +206,7 @@ func encryptFile(src, dst string, to []*openpgp.Entity, now time.Time, stop <-ch
 	}
 	defer of.Close()
 	ow := &hashWriter{w: of, h: sha256.New()}
-	pt, err := openpgp.EncryptWithParams(ow, to, nil, &openpgp.EncryptParams{Config: gpgkeys.Config(now)})
+	pt, err := seal(ow)
 	if err != nil {
 		return r, err
 	}
@@ -192,18 +256,27 @@ func (s stopReader) Read(p []byte) (int, error) {
 	return s.r.Read(p)
 }
 
-func encryptedMeta(in json.RawMessage, fps []string, name string, size int64, sum string) (json.RawMessage, error) {
+// encryptedMeta extends the meta in by the encryption kind (gpg or
+// openssl), the recipient fingerprints (gpg only) and the names of the
+// passwords that decrypt the file (when there are any).
+func encryptedMeta(in json.RawMessage, kind string, fps, passwords []string, name string, size int64, sum string) (json.RawMessage, error) {
 	m := map[string]json.RawMessage{}
 	if in != nil {
 		if err := json.Unmarshal(in, &m); err != nil {
 			return nil, errors.New("meta of the input is not a JSON object")
 		}
 	}
-	for k, v := range map[string]any{
-		"encryption": "gpg",
-		"recipients": fps,
+	add := map[string]any{
+		"encryption": kind,
 		"plain":      map[string]any{"name": name, "size": size, "sha256": sum},
-	} {
+	}
+	if kind == "gpg" {
+		add["recipients"] = fps
+	}
+	if len(passwords) > 0 {
+		add["passwords"] = passwords
+	}
+	for k, v := range add {
 		b, err := json.Marshal(v)
 		if err != nil {
 			return nil, err
