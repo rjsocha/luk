@@ -98,6 +98,11 @@ func keyCmd(cfgPath *string) *cobra.Command {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), channel.Words(k.Public))
+			if force {
+				// The receive role reads the key at start and on SIGHUP: a
+				// running lukd still presents the old one.
+				fmt.Fprintln(cmd.ErrOrStderr(), "reload lukd (systemctl reload lukd) for the new key to take effect")
+			}
 			return nil
 		},
 	}

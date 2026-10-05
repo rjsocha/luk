@@ -70,9 +70,12 @@ func TestKeyCommand(t *testing.T) {
 	if after, _ := runLukd(t, "key", "-c", cfg); after != words {
 		t.Fatalf("--if-missing changed the key: %q != %q", after, words)
 	}
-	out, err := runLukd(t, "key", "generate", "--force", "-c", cfg)
+	out, errOut, err := runLukdIn(t, "", "key", "generate", "--force", "-c", cfg)
 	if err != nil || out == words || strings.Count(out, "-") != 5 {
 		t.Fatalf("--force: %q %v", out, err)
+	}
+	if errOut != "reload lukd (systemctl reload lukd) for the new key to take effect\n" {
+		t.Fatalf("--force: stderr %q", errOut)
 	}
 	if after, _ := runLukd(t, "key", "-c", cfg); after != out {
 		t.Fatalf("pin after rotation %q != %q", after, out)
