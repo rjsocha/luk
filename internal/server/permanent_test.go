@@ -100,7 +100,7 @@ func TestPermanentUploadServesLast(t *testing.T) {
 	if code, _ := f.fetch(t, perm); code != http.StatusNotFound {
 		t.Fatalf("after removing v3: %d", code)
 	}
-	if got := entries(t, filepath.Join(f.root, "s/drop/.db/permanent/permanent/rev/hosts.krl")); strings.Join(got, ",") != "current.last" {
+	if got := entries(t, filepath.Join(f.root, "s/drop/.db/permanent/permanent/rev/hosts.krl")); len(got) != 0 {
 		t.Fatalf("permanent directory %v", got)
 	}
 	f.sendPermanent(t, clock, "rev/hosts.krl", "four")

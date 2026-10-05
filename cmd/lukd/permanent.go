@@ -29,16 +29,16 @@ func storagePermanentCmd(cfgPath *string) *cobra.Command {
 		Short: "List the permanent names of a storage, remove orphaned and empty ones",
 		Long: "List the permanent names of a local storage (the directories under\n" +
 			".db/permanent): PATH and NAME (as published), CURRENT (the stored name of\n" +
-			"the current version, the version published last), RECEIVED and EXPIRES (of\n" +
-			"that version; never without an expiry) and ORPHAN when the configuration no\n" +
-			"longer allocates the name: no endpoint of the storage has its\n" +
-			"permanent.path, or no entry of that endpoint covers it. A name whose\n" +
-			"version is gone (removed, expired) is empty: CURRENT, RECEIVED and EXPIRES\n" +
-			"are -, it answers 404 until a later version is published.\n" +
+			"the current version), RECEIVED and EXPIRES (of that version; never without\n" +
+			"an expiry) and ORPHAN when the configuration no longer allocates the name:\n" +
+			"no endpoint of the storage has its permanent.path, or no entry of that\n" +
+			"endpoint covers it. A name whose version is gone (removed, expired) is\n" +
+			"empty: CURRENT, RECEIVED and EXPIRES are -, it answers 404 until a version\n" +
+			"is published.\n" +
 			"An orphan is not served and never removed by lukd itself. --prune\n" +
 			"removes, under the base lock, the directories of the orphans and of the\n" +
-			"empty names (with the record of the version published last); the versions\n" +
-			"stay, they are ordinary stored files (lukd storage rm, ttl, retention).\n" +
+			"empty names; the versions stay, they are ordinary stored files (lukd\n" +
+			"storage rm, ttl, retention).\n" +
 			"It asks for confirmation on a terminal; elsewhere --yes is required.",
 		Example: "  lukd storage permanent --storage drop\n" +
 			"  lukd storage permanent --storage drop --prune\n" +

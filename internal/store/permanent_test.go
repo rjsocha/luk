@@ -108,10 +108,10 @@ func permEntries(t *testing.T, l Local, key string) []string {
 }
 
 // onlyCurrent wants the directory of the name key to hold its current
-// version and the record of the version published last, nothing else.
+// version, nothing else.
 func onlyCurrent(t *testing.T, l Local, key string) {
 	t.Helper()
-	if got := permEntries(t, l, key); !slices.Equal(got, []string{permCurrent, permLast}) {
+	if got := permEntries(t, l, key); !slices.Equal(got, []string{permCurrent}) {
 		t.Fatalf("%s: entries %v", key, got)
 	}
 }
@@ -147,14 +147,9 @@ func TestPermanentLastPublished(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkNoPerm(t, l, url)
-	if got := permEntries(t, l, "permanent/rev/hosts.krl"); !slices.Equal(got, []string{permLast}) {
+	if got := permEntries(t, l, "permanent/rev/hosts.krl"); len(got) != 0 {
 		t.Fatalf("entries of an empty name %v", got)
 	}
-	// Still older than the version published last: superseded.
-	if res := mustPerm(t, l, "r1b", "rev/hosts.krl", "v1b", permT0+1); res.Superseded == nil {
-		t.Fatal("an older version became current of an empty name")
-	}
-	checkNoPerm(t, l, url)
 	if err := l.Reconcile(); err != nil {
 		t.Fatal(err)
 	}
@@ -163,6 +158,13 @@ func TestPermanentLastPublished(t *testing.T) {
 	if err != nil || len(list) != 1 || list[0].Current != "" || list[0].Name != "rev/hosts.krl" || list[0].Path != "permanent" || list[0].Orphan {
 		t.Fatalf("list of an empty name %+v %v", list, err)
 	}
+	// An empty name takes any version, also one accepted before the
+	// version that went.
+	if res := mustPerm(t, l, "r1b", "rev/hosts.krl", "v1b", permT0+1); res.Superseded != nil || len(res.Replaced) != 0 {
+		t.Fatalf("empty name: replaced %+v superseded %+v", res.Replaced, res.Superseded)
+	}
+	checkPerm(t, l, url, "r1b", "v1b")
+	onlyCurrent(t, l, "permanent/rev/hosts.krl")
 	// A later version takes the name again.
 	mustPerm(t, l, "r3", "rev/hosts.krl", "v3", permT0+3)
 	checkPerm(t, l, url, "r3", "v3")
@@ -209,10 +211,30 @@ func TestPermanentExpiredIs404(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkNoPerm(t, l, url)
-	if got := permEntries(t, l, "permanent/one"); !slices.Equal(got, []string{permLast}) {
+	if got := permEntries(t, l, "permanent/one"); len(got) != 0 {
 		t.Fatalf("entries %v", got)
 	}
 	if got := storedNames(t, l); len(got) != 0 {
+		t.Fatalf("stored %v", got)
+	}
+}
+
+// TestPermanentExpiredCurrentReplaced stores a version accepted before
+// the current one after the current one expired, before any maintenance:
+// an expired current counts as none, so it is published.
+func TestPermanentExpiredCurrentReplaced(t *testing.T) {
+	l := permLocal(t)
+	exp := time.Unix(permT0+2000, 0).UTC().Format(time.RFC3339)
+	if _, err := putPerm(t, l, "b", "one", "new", permT0+2, exp); err != nil {
+		t.Fatal(err)
+	}
+	fixedNow(t, permT0+3000)
+	if res := mustPerm(t, l, "a", "one", "old", permT0+1); res.Superseded != nil {
+		t.Fatalf("superseded by an expired current: %+v", res)
+	}
+	checkPerm(t, l, "permanent/one", "a", "old")
+	onlyCurrent(t, l, "permanent/one")
+	if got := storedNames(t, l); !slices.Equal(got, []string{"a"}) {
 		t.Fatalf("stored %v", got)
 	}
 }
@@ -230,7 +252,7 @@ func TestPermanentExpiryPass(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkNoPerm(t, l, "permanent/one")
-	if got := permEntries(t, l, "permanent/one"); !slices.Equal(got, []string{permLast}) {
+	if got := permEntries(t, l, "permanent/one"); len(got) != 0 {
 		t.Fatalf("entries %v", got)
 	}
 }
@@ -252,15 +274,15 @@ func TestPermanentTTLUpdateRepublishes(t *testing.T) {
 	}
 }
 
-// TestPermanentStoreRetry stores the version published last again (a
-// retry of its queue entry): it stays current.
-func TestPermanentStoreRetry(t *testing.T) {
+// TestPermanentStoreAgain stores the current version again (its store run
+// again after an interruption): it stays current.
+func TestPermanentStoreAgain(t *testing.T) {
 	l := permLocal(t)
 	sc := permSidecar("one", "x", permT0+1, "")
 	mustPermSC(t, l, "a", "x", sc)
 	res := mustPermSC(t, l, "a", "x", sc)
 	if res.Superseded != nil || len(res.Replaced) != 0 {
-		t.Fatalf("retry %+v %v", res, storedNames(t, l))
+		t.Fatalf("stored again %+v %v", res, storedNames(t, l))
 	}
 	checkPerm(t, l, "permanent/one", "a", "x")
 	onlyCurrent(t, l, "permanent/one")
@@ -389,7 +411,7 @@ func TestPermanentCrash(t *testing.T) {
 			// After the exchange the old version is left beside current (a
 			// panic before it runs the cleanup of publish, a crash would
 			// not: TestPermanentLeftoverRemovedUnderLock covers that).
-			if got := permEntries(t, l, "permanent/one"); step == 2 && len(got) != 3 {
+			if got := permEntries(t, l, "permanent/one"); step == 2 && len(got) != 2 {
 				t.Fatalf("entries after the crash %v", got)
 			}
 			if err := l.Reconcile(); err != nil {
@@ -544,18 +566,32 @@ func TestPermanentNestedNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkPerm(t, l, "permanent/a/b", "y", "AB")
-	// The empty name a goes with --prune, a/b stays.
+	// The empty name a is the directory of a/b: nothing to prune.
 	if err := l.PruneEmpty("permanent/a/b"); err == nil {
 		t.Fatal("pruned a name with a current version")
 	}
-	if err := l.PruneEmpty("permanent/a"); err != nil {
-		t.Fatal(err)
+	if err := l.PruneEmpty("permanent/a"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("prune of a: %v", err)
 	}
 	if got := permEntries(t, l, "permanent/a"); !slices.Equal(got, []string{"b"}) {
 		t.Fatalf("entries of a %v", got)
 	}
 	checkPerm(t, l, "permanent/a/b", "y", "AB")
-	// Without the record any later store becomes current again.
+	// The empty name takes any version.
 	mustPerm(t, l, "z", "a", "Z", permT0)
 	checkPerm(t, l, "permanent/a", "z", "Z")
+	if err := l.Remove("z"); err != nil {
+		t.Fatal(err)
+	}
+	// A name without a nested one leaves an empty directory, pruned with
+	// the empty directories above it.
+	if err := l.Remove("y"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.PruneEmpty("permanent/a/b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(l.Base, PermanentDir, "permanent")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("permanent/ kept: %v", err)
+	}
 }

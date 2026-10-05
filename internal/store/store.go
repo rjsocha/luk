@@ -866,7 +866,7 @@ func (l Local) Put(src, rel string, sc Sidecar) (string, error) {
 // Stored is the outcome of Store: the final relative path, whether it
 // is an existing version kept by Dedup, with nothing placed, and for a
 // version of a permanent name the other versions the store removed
-// (Replaced) or, for a version accepted before the one published last,
+// (Replaced) or, for a version accepted before the current one,
 // the version itself, stored and removed again (Superseded).
 type Stored struct {
 	Rel        string

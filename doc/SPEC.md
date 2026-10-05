@@ -974,39 +974,39 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   without a version, or one the configuration no longer allocates. There
   is never a fallback to an older version. Link actions take the version
   URL; the permanent URL is no link (404 `link not found`).
-- Last published: the version accepted last (see Acceptance order) is
-  current; `received` and the order the queue entries are processed in
-  do not count. After a version is stored, under the base lock:
-  - accepted after the version published last (or the first): it becomes
-    current, then every other stored version of the name is removed as
+- Last published: a new version is compared with the current one by
+  acceptance order (see Acceptance order; that of the current one is read
+  from `current/meta.json`); `received` and the order the queue entries
+  are processed in do not count. An upload is processed seconds after its
+  acceptance and a failed one never runs again (see Failures), so the
+  current version is all a new one is compared with. After a version is
+  stored, under the base lock:
+  - no current version (the first, or the current one went or expired):
+    it becomes current;
+  - accepted after the current version: it becomes current;
+  - either way every other stored version of the name is then removed as
     `lukd storage rm` removes a file (sidecar, objects, catalog), logged
     as `permanent version replaced`; a name has at most one stored
     version;
-  - accepted before the version published last (an older upload whose
-    entry ran late): it never becomes current; it is removed again at
-    once, logged as `permanent version superseded`. This holds also
-    while the name is empty: the version published last is recorded
-    beside it (`current.last`, see On disk) and outlives it;
-  - the version published last itself (its store run again after an
+  - accepted before the current version (an older upload whose entry ran
+    late): it never becomes current; it is removed again at once, logged
+    as `permanent version superseded`;
+  - the current version itself (its store run again after an
     interruption): it stays current.
 - Gone: when the current version goes (`luk link --rm`, `lukd storage
   rm`, retention, a replace of its stored name) or expires, the name is
-  empty and answers 404 until a later version is published. The expiry
+  empty and answers 404 until a version is published. The expiry
   pass (every minute) removes an expired version and with it `current`;
   the maintenance pass of the process role unpublishes an expired or
   removed current version it finds. A `luk link --ttl` of the current
   version publishes its new expiry at once.
 - On disk: `<base>/.db/permanent/<path>/<name>/current/` holds `data`, a
   hardlink of the current version, and `meta.json`, a copy of its
-  sidecar; `current.last` (a file) records the version published last
-  (`accepted`, `accepted_seq`, `id`, `version` its stored name, `path`
-  and `name`) and stays when the version goes, so the directory of an
-  empty name holds only it. A new version is prepared in full as
+  sidecar; the directory of an empty name is empty. A new version is prepared in full as
   `<base>/.db/permanent/<path>/<name>/current.<random>/` (the hardlink,
   the sidecar, both synced with the directory), then swapped with
   `current` in one `renameat2(RENAME_EXCHANGE)` (a plain rename when
-  there is no `current`), the directory synced, `current.last` written,
-  and the old version (now `current.<random>`) removed. A current version
+  there is no `current`), the directory synced and the old version (now `current.<random>`) removed. A current version
   that goes is renamed away in one step before its files are removed.
 - Atomic for readers: a reader opens `current` once (a directory
   handle) and reads `meta.json` and opens `data` through it, so it gets
@@ -1025,8 +1025,9 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   accepted last wins), and a `current.<random>` found under the lock is a
   crash leftover by definition: it is removed before the next version is
   prepared, and by the maintenance of the process role. That pass also
-  finishes a switch a crash interrupted: a live version accepted after
-  the one published last (stored, not published) becomes current, and
+  finishes a switch a crash interrupted: the newest live version becomes
+  current when there is no current version or it was accepted after the
+  current one (stored, not published), and
   every other stored version of the name (replaced or superseded, not
   removed yet) is removed.
 - `renameat2(RENAME_EXCHANGE)` is required: the receive and process
@@ -1058,11 +1059,10 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   Its versions stay ordinary stored files (ttl, retention, `lukd storage
   rm`); adding the entry back publishes the name again (its version
   accepted last).
-- Empty names: the directory of an empty name (only `current.last`)
-  stays; `lukd storage permanent` lists it without a current version and
-  `--prune` removes it, with the record of the version published
-  last (a version stored afterwards becomes current whatever its
-  acceptance).
+- Empty names: the directory of an empty name (a directory without
+  `current`) stays; `lukd storage permanent` lists it without a current
+  version and `--prune` removes it when it is empty (a name with nested
+  names keeps the directory they live in).
 - Listing: the endpoint listing shows `permanent: true` when an entry
   grants the signer, never the names or patterns. `luk link ls` lists
   the version of a name as a link with the flag `permanent`, and then the
@@ -2862,7 +2862,7 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   names of the storage (the directories of `.db/permanent/`), read only,
   by key: aligned columns `PATH` and `NAME` (as published; the key when
   nothing can be read), `CURRENT` (the stored name of the current
-  version, the one published last), `RECEIVED` and `EXPIRES` (of that
+  version), `RECEIVED` and `EXPIRES` (of that
   version, `never` without an expiry) and `ORPHAN` (`ORPHAN` for a name
   the configuration does not allocate, see Permanent names, else `-`).
   An empty name (its version gone) shows `-` as `CURRENT`, `RECEIVED`
@@ -2870,8 +2870,8 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   `current`, `id`, `received`, `expires` (the last four omitted when
   empty) and `orphan`.
   `--prune [--yes]` removes the directories of the orphans and of the
-  empty names (allocated, without a current version, with their record of
-  the version published last) under the base lock, each only while it is
+  empty names (allocated, an empty directory) under the base lock, each
+  only while it is
   still an orphan or empty, printing
   `<path>/<name>: removed` per name; without `--yes` it lists them on
   stderr with their current versions and asks on a terminal (`[y/N]`),

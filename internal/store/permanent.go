@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -17,18 +18,16 @@ import (
 	"golang.org/x/sys/unix"
 
 	"luk/internal/config"
-	"luk/internal/queue"
 	"luk/internal/wire"
 )
 
 // PermanentDir holds the permanent names of a base: the directory
 // <path>/<name> per name (path being the permanent.path of its endpoint),
-// holding the directory "current" with the hardlink "data" of the version
-// of the name published last and its sidecar "meta.json" (a copy of the
-// version's sidecar with alias_of set to the version's stored name), and
-// the file "current.last" recording that version (its acceptance order,
-// id and stored name), which stays when the version goes. A new version
-// is prepared in full as "current.<random>" and swapped with "current" by
+// holding the directory "current" with the hardlink "data" of the current
+// version of the name and its sidecar "meta.json" (a copy of the
+// version's sidecar with alias_of set to the version's stored name). The
+// directory of a name whose version went is empty. A new version is
+// prepared in full as "current.<random>" and swapped with "current" by
 // renameat2(RENAME_EXCHANGE), so a reader that opens "current" once and
 // reads both files through it always sees one version whole. No element
 // of a path or a name is current or starts with current. (see
@@ -40,7 +39,6 @@ const (
 	permCurrent = "current"
 	permData    = "data"
 	permMeta    = "meta.json"
-	permLast    = "current.last"
 )
 
 // ErrNoExchange fails a publish of a permanent name on a filesystem
@@ -151,87 +149,30 @@ func readCurrent(r *os.Root, dir string) (Sidecar, error) {
 	return sc, nil
 }
 
-// lastMark is the content of current.last: the version of the name
-// published last, by its acceptance order (Sidecar.Order), id and stored
-// name, with the path and name it was published under.
-type lastMark struct {
-	Accepted    int64  `json:"accepted"`
-	AcceptedSeq int    `json:"accepted_seq,omitempty"`
-	ID          string `json:"id"`
-	Version     string `json:"version"`
-	Path        string `json:"path"`
-	Name        string `json:"name"`
+// currentOf is the current version of the permanent directory dir: its
+// stored name and the sidecar of current; ok false when there is none.
+func currentOf(r *os.Root, dir string) (t target, ok bool, err error) {
+	cur, err := readCurrent(r, dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return target{}, false, nil
+	}
+	if err != nil {
+		return target{}, false, err
+	}
+	return target{cur.AliasOf, cur}, true, nil
 }
 
-func markOf(t target) lastMark {
-	o := t.sc.Order()
-	return lastMark{Accepted: o.NS, AcceptedSeq: o.Seq, ID: t.sc.ID, Version: t.rel, Path: t.sc.PermanentPath, Name: t.sc.Client.Permanent}
-}
-
-// after reports whether a was accepted after b (by order, then id).
-func (a lastMark) after(b lastMark) bool {
-	if c := a.order().Compare(b.order()); c != 0 {
+// acceptedAfter reports whether a was accepted after b: by acceptance
+// order (Sidecar.Order), then by id.
+func acceptedAfter(a, b Sidecar) bool {
+	if c := a.Order().Compare(b.Order()); c != 0 {
 		return c > 0
 	}
 	return a.ID > b.ID
 }
 
-func (a lastMark) same(b lastMark) bool { return a.order() == b.order() && a.ID == b.ID }
-
-func (a lastMark) order() queue.Acceptance {
-	return queue.Acceptance{NS: a.Accepted, Seq: a.AcceptedSeq}
-}
-
-// readLast is the version published last of the permanent directory dir:
-// the later of its current.last and its current version; ok false when it
-// has neither.
-func readLast(r *os.Root, dir string) (m lastMark, ok bool, err error) {
-	p := dir + "/" + permLast
-	if err := noSymlinks(r, p); err != nil {
-		return m, false, err
-	}
-	f, err := openRegular(r, p)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-	case err != nil:
-		return m, false, err
-	default:
-		err = json.NewDecoder(f).Decode(&m)
-		f.Close()
-		if err != nil {
-			return m, false, fmt.Errorf("%s: %w", p, err)
-		}
-		ok = true
-	}
-	cur, err := readCurrent(r, dir)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-	case err != nil:
-		return m, false, err
-	default:
-		if c := markOf(target{cur.AliasOf, cur}); !ok || c.after(m) {
-			m, ok = c, true
-		}
-	}
-	return m, ok, nil
-}
-
-// writeLast records m as the version of dir published last.
-func writeLast(r *os.Root, dir string, m lastMark) error {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	tmp, err := writeTemp(r, b)
-	if err != nil {
-		return err
-	}
-	if err := r.Rename(tmp, dir+"/"+permLast); err != nil {
-		r.Remove(tmp)
-		return err
-	}
-	return syncDir(r, dir)
-}
+// sameUpload reports whether a and b are the sidecars of one upload.
+func sameUpload(a, b Sidecar) bool { return a.Order() == b.Order() && a.ID == b.ID }
 
 // permanentSound reports whether the current version of dir is t: the
 // same id, expiry and content, and its data the inode of t.
@@ -261,7 +202,7 @@ func leftovers(r *os.Root, dir string) []string {
 	names, _ := d.Readdirnames(-1)
 	var out []string
 	for _, n := range names {
-		if strings.HasPrefix(n, permCurrent+".") && n != permLast {
+		if strings.HasPrefix(n, permCurrent+".") {
 			out = append(out, n)
 		}
 	}
@@ -298,8 +239,7 @@ func removeVersionDir(r *os.Root, p string) error {
 // key, under the base lock: the new version is prepared in full beside
 // the current one (synced), then swapped with it in one
 // renameat2(RENAME_EXCHANGE) (a plain rename when there is none), the
-// directory synced, t recorded in current.last and the old version
-// directory removed.
+// directory synced and the old version directory removed.
 func (l Local) publish(r *os.Root, key string, t target) error {
 	dir := permDirOf(key)
 	if err := mkdirs(r, dir); err != nil {
@@ -357,10 +297,7 @@ func (l Local) publish(r *os.Root, key string, t target) error {
 			return err
 		}
 		placed = true
-		if err := d.Sync(); err != nil {
-			return err
-		}
-		return writeLast(r, dir, markOf(t))
+		return d.Sync()
 	} else if err != nil {
 		return err
 	}
@@ -373,14 +310,13 @@ func (l Local) publish(r *os.Root, key string, t target) error {
 		return err
 	}
 	hookPermanent(2)
-	return errors.Join(writeLast(r, dir, markOf(t)), removeVersionDir(r, np))
+	return removeVersionDir(r, np)
 }
 
 // unpublish takes the current version of the permanent name key away:
-// current.last records it (when it is the later), then current is
-// renamed away in one step, so a reader sees it whole or not at all, and
-// removed. The directory of the name stays with current.last: the name
-// answers 404 until a later version is published.
+// current is renamed away in one step, so a reader sees it whole or not at
+// all, and removed. The directory of the name stays, empty: the name
+// answers 404 until a version is published.
 func unpublish(r *os.Root, key string) error {
 	dir := permDirOf(key)
 	if _, err := r.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
@@ -391,15 +327,6 @@ func unpublish(r *os.Root, key string) error {
 	}
 	var errs []error
 	if _, err := r.Lstat(dir + "/" + permCurrent); err == nil {
-		m, ok, err := readLast(r, dir)
-		if err != nil {
-			return err
-		}
-		if ok {
-			if err := writeLast(r, dir, m); err != nil {
-				return err
-			}
-		}
 		b := make([]byte, 8)
 		rand.Read(b)
 		gone := dir + "/" + permCurrent + ".gone." + hex.EncodeToString(b)
@@ -415,16 +342,13 @@ func unpublish(r *os.Root, key string) error {
 }
 
 // removeName removes the directory of the permanent name key whole:
-// current (see unpublish), current.last and the directories it leaves
-// empty (never PermanentDir itself, never a directory of a nested name).
+// current (see unpublish) and the directories it leaves empty (never
+// PermanentDir itself, never a directory of a nested name).
 func removeName(r *os.Root, key string) error {
 	if err := unpublish(r, key); err != nil {
 		return err
 	}
 	dir := permDirOf(key)
-	if err := r.Remove(dir + "/" + permLast); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
 	for d := dir; d != PermanentDir && d != "." && d != DBDir; d = path.Dir(d) {
 		if rmdir(r, d) != nil {
 			break
@@ -502,26 +426,28 @@ func (l Local) versionsOf(r *os.Root, key string) ([]target, error) {
 }
 
 // placePermanent publishes the version t of the permanent name key that
-// a store just placed, under the base lock h. A version accepted after
-// the one published last becomes current, and every other stored version
-// of the name is removed as Remove does (sidecar, objects, catalog): they
-// are returned as replaced. A version accepted before the one published
-// last (an older upload stored late) never becomes current: it is removed
-// and returned as superseded. The version published last itself (a retry
-// of its store) is published again when its current is not sound.
+// a store just placed, under the base lock h. Without a current version
+// (none published yet, or it went or expired) t becomes current; with
+// one, t replaces it only when accepted after it. Every other stored
+// version of the name is then removed as Remove does (sidecar, objects,
+// catalog): they are returned as replaced. A version accepted before the
+// current one (an older upload stored late) never becomes current: it is
+// removed and returned as superseded. The current version itself (its
+// store run again after an interruption) is published again when its
+// current is not sound.
 func (l Local) placePermanent(r *os.Root, h *held, key string, t target) (replaced []PermanentVersion, superseded *PermanentVersion, err error) {
 	dir := permDirOf(key)
-	last, ok, err := readLast(r, dir)
+	cur, ok, err := currentOf(r, dir)
 	if err != nil {
 		return nil, nil, err
 	}
-	m := markOf(t)
+	ok = ok && !expiredNow(cur.sc)
 	switch {
-	case ok && m.same(last):
+	case ok && sameUpload(t.sc, cur.sc):
 		if !l.permanentSound(r, dir, t) || len(leftovers(r, dir)) > 0 {
 			err = l.publish(r, key, t)
 		}
-	case ok && !m.after(last):
+	case ok && !acceptedAfter(t.sc, cur.sc):
 		id := t.sc.ID
 		err := l.removeHeld(r, h, t.rel, func(s Sidecar) bool { return s.ID == id })
 		if errors.Is(err, fs.ErrNotExist) {
@@ -567,8 +493,9 @@ func (l Local) dropOthers(r *os.Root, h *held, key string, keep target) ([]Perma
 }
 
 // presentPermanent lists the keys of the permanent directories of the
-// base: the directories under PermanentDir holding current, a version
-// directory current.<random> or current.last, relative to PermanentDir.
+// base, relative to PermanentDir: the directories under PermanentDir
+// holding current or a version directory current.<random>, and the empty
+// ones (a name whose version went).
 func presentPermanent(r *os.Root) ([]string, error) {
 	var out []string
 	if _, err := r.Lstat(PermanentDir); errors.Is(err, fs.ErrNotExist) {
@@ -577,10 +504,19 @@ func presentPermanent(r *os.Root) ([]string, error) {
 	if err := noSymlinks(r, PermanentDir); err != nil {
 		return nil, err
 	}
-	add := func(p string) {
-		if dir := path.Dir(p); dir != PermanentDir && !slices.Contains(out, strings.TrimPrefix(dir, PermanentDir+"/")) {
-			out = append(out, strings.TrimPrefix(dir, PermanentDir+"/"))
+	add := func(dir string) {
+		if key := strings.TrimPrefix(dir, PermanentDir+"/"); dir != PermanentDir && !slices.Contains(out, key) {
+			out = append(out, key)
 		}
+	}
+	empty := func(dir string) bool {
+		d, err := r.Open(dir)
+		if err != nil {
+			return false
+		}
+		defer d.Close()
+		names, err := d.Readdirnames(1)
+		return len(names) == 0 && errors.Is(err, io.EOF)
 	}
 	err := fs.WalkDir(r.FS(), PermanentDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -590,15 +526,15 @@ func presentPermanent(r *os.Root) ([]string, error) {
 			return nil
 		}
 		base := path.Base(p)
-		if !d.IsDir() {
-			if base == permLast && d.Type().IsRegular() {
-				add(p)
-			}
+		if !d.IsDir() || p == PermanentDir {
 			return nil
 		}
-		if p != PermanentDir && (base == permCurrent || strings.HasPrefix(base, permCurrent+".")) {
-			add(p)
+		if base == permCurrent || strings.HasPrefix(base, permCurrent+".") {
+			add(path.Dir(p))
 			return fs.SkipDir
+		}
+		if empty(p) {
+			add(p)
 		}
 		return nil
 	})
@@ -609,9 +545,9 @@ func presentPermanent(r *os.Root) ([]string, error) {
 // reconcilePermanent repairs the permanent names the configuration
 // allocates, under the base lock h: version directories left by a crash
 // go; a current version that is gone or expired is unpublished, one whose
-// sidecar changed is published again; a live version accepted after the
-// one published last (stored, not yet published: a crash in between)
-// becomes current; every stored version of a name but its current one
+// sidecar changed is published again; the newest live version becomes
+// current when there is none or it was accepted after the current one
+// (stored, not yet published: a crash in between); every stored version of a name but its current one
 // (replaced or superseded versions a crash left) is removed. Orphans
 // (keys the configuration does not allocate) are left alone. With dry set
 // it only reports whether a repair is needed (h may be nil); any reports
@@ -657,6 +593,7 @@ func (l Local) reconcilePermanent(r *os.Root, h *held, dry bool) (changed, any b
 			})
 		}
 		keep := ""
+		var current *target
 		if cur, cerr := readCurrent(r, dir); cerr == nil {
 			t, ok, lerr := l.liveVersion(r, key, cur)
 			switch {
@@ -666,10 +603,10 @@ func (l Local) reconcilePermanent(r *os.Root, h *held, dry bool) (changed, any b
 			case !ok:
 				fix(func() error { return unpublish(r, key) })
 			case !l.permanentSound(r, dir, t):
-				keep = t.rel
+				keep, current = t.rel, &t
 				fix(func() error { return l.publish(r, key, t) })
 			default:
-				keep = t.rel
+				keep, current = t.rel, &t
 			}
 		} else if !errors.Is(cerr, fs.ErrNotExist) {
 			errs = append(errs, cerr)
@@ -680,9 +617,8 @@ func (l Local) reconcilePermanent(r *os.Root, h *held, dry bool) (changed, any b
 			// publish nor remove on a partial view.
 			continue
 		}
-		last, ok, lerr := readLast(r, dir)
-		if lerr != nil {
-			errs = append(errs, lerr)
+		if keep != "" && current == nil {
+			// The current version could not be checked: keep it.
 			continue
 		}
 		var newest *target
@@ -691,7 +627,7 @@ func (l Local) reconcilePermanent(r *os.Root, h *held, dry bool) (changed, any b
 				newest = &versions[key][i]
 			}
 		}
-		if newest != nil && (!ok || markOf(*newest).after(last)) {
+		if newest != nil && (current == nil || acceptedAfter(newest.sc, current.sc)) {
 			t := *newest
 			keep = t.rel
 			fix(func() error { return l.publish(r, key, t) })
@@ -892,8 +828,8 @@ func (l Local) PermanentList() ([]PermanentInfo, error) {
 	for _, key := range present {
 		dir := permDirOf(key)
 		pi := PermanentInfo{Key: key, Orphan: !l.allocated(key)}
-		if m, ok, err := readLast(r, dir); err == nil && ok {
-			pi.Path, pi.Name = m.Path, m.Name
+		if ep, name, ok := l.PermanentPrefix(key); ok && !pi.Orphan {
+			pi.Path, pi.Name = l.Permanent[ep].Path, name
 		}
 		if sc, err := readCurrent(r, dir); err == nil {
 			pi.Path, pi.Name, pi.Current, pi.ID, pi.Received, pi.Expires = sc.PermanentPath, sc.Client.Permanent, sc.AliasOf, sc.ID, sc.Received, sc.Expires
@@ -917,9 +853,8 @@ func (l Local) PruneOrphan(key string) error {
 }
 
 // PruneEmpty removes the permanent directory of key, under the base lock,
-// while the name has no current version (its version is gone); the record
-// of the version published last goes with it, so any version stored
-// later becomes current. fs.ErrNotExist for a key without a directory, an
+// while the name has no current version (its version is gone).
+// fs.ErrNotExist for a key without a directory, an
 // error for a name with a current version.
 func (l Local) PruneEmpty(key string) error {
 	return l.pruneName(key, func(r *os.Root) error {
