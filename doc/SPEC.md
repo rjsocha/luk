@@ -331,7 +331,8 @@ their length:
 - An endpoint takes a list of pins and accepts lukd when its key matches
   any of them (rotation): comma-separated in the fragment of an endpoint
   URL (`https://lukd.vm:8443/drop#lusab-...,<key>`), a YAML list `pin`
-  in the luk config, `--pin` repeated on `luk config endpoint add`.
+  in the luk config (one pin may be a plain scalar, `pin: lusab-...`),
+  `--pin` repeated on `luk config endpoint add`.
 - Endpoints of one origin are one lukd: an endpoint URL without pins of
   its own takes those of the first config endpoint (by name) with the
   same scheme, host and port.

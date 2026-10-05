@@ -33,9 +33,29 @@ type Config struct {
 // URL is an overlay: it sets only Key on the global endpoint of its name.
 // Pins are the lukd keys the channel accepts, in key or words form.
 type EndpointConfig struct {
-	URL  string   `yaml:"url,omitempty"`
-	Pins []string `yaml:"pin,omitempty"`
-	Key  string   `yaml:"key,omitempty"`
+	URL  string  `yaml:"url,omitempty"`
+	Pins PinList `yaml:"pin,omitempty"`
+	Key  string  `yaml:"key,omitempty"`
+}
+
+// PinList is the pins of an endpoint: a YAML list, or one pin as a scalar.
+type PinList []string
+
+func (p *PinList) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode && n.ShortTag() != "!!null" {
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return err
+		}
+		*p = PinList{s}
+		return nil
+	}
+	var l []string
+	if err := n.Decode(&l); err != nil {
+		return err
+	}
+	*p = l
+	return nil
 }
 
 // GlobalConfigPath is the system-wide layer; $LUK_GLOBAL_CONFIG overrides it.

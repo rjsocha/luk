@@ -368,3 +368,22 @@ func TestOverlayRoundTrip(t *testing.T) {
 		t.Fatalf("%+v %v", c, err)
 	}
 }
+
+// A single pin may be written as a scalar: it is a list of one.
+func TestConfigPinScalar(t *testing.T) {
+	for _, text := range []string{
+		"endpoint:\n  a: {url: https://h/drop, pin: lusab-babad-gutih-tugad-hajop-kizof}\n",
+		"endpoint:\n  a: {url: https://h/drop, pin: [lusab-babad-gutih-tugad-hajop-kizof]}\n",
+	} {
+		c, err := ParseConfig("c.yaml", []byte(text))
+		if err != nil {
+			t.Fatalf("%q: %v", text, err)
+		}
+		if p := c.Endpoint["a"].Pins; len(p) != 1 || p[0] != "lusab-babad-gutih-tugad-hajop-kizof" {
+			t.Fatalf("%q: %v", text, p)
+		}
+	}
+	if _, err := ParseConfig("c.yaml", []byte("endpoint:\n  a: {url: https://h/drop, pin: {x: 1}}\n")); err == nil {
+		t.Fatal("a map as pin accepted")
+	}
+}
