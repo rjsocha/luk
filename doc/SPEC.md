@@ -4693,14 +4693,15 @@ luk send [flags]      (aliases: put, push)
                             without one (with --dry-run: the would-be
                             URL); the upload id is in --json
 
-luk get URL (-o|--output FILE [--force] [--inplace] | -c|--stdout | --head [--json])
+luk get URL (-o|--output FILE [--force] [--inplace] | -O|--remote-name
+        [-J|--remote-header-name] [--force] [--inplace] | -c|--stdout | --head [--json])
         [-k|--key PATH|SHA256:FP] [--progress] [--bwlimit RATE] [-q]
                                  download a private file (see Private
                                  files), or a file of a signed expose,
                                  with a signed request (luk-get@v1);
                                  --head prints what the server announces
                                  without downloading
-luk get URL/ [-r] [--json] | URL/ -o DIR/ [--force] [-q]
+luk get URL/ [-r] [--json] | URL/ -o DIR/ [--force] [-q] [--parallel N]
         [-k|--key PATH|SHA256:FP] [--progress] [--bwlimit RATE]
                                  list a directory of a signed expose (see
                                  Signed expose), or download every file
@@ -4819,7 +4820,8 @@ A download needs `--output FILE`, or `-c`/`--stdout` (the same as
 `--output -`) for stdout; `-c` with `-o` is a usage error; without either
 and without `--head` it is a usage error (`luk get needs -o FILE, -c for
 stdout, or --head`, exit 1). The server never names
-the local file (its `Content-Disposition` is not used for that). An
+the local file (its `Content-Disposition` is not used for that), except
+with `-J` below. An
 existing FILE (a dangling symlink too) is refused unless `--force`
 (exit 1, `FILE exists; pass --force to overwrite it`), checked before the
 request: on any usage error nothing is sent, so a `once` file is never
@@ -4869,6 +4871,37 @@ Exit codes those of `send`: a file that is not there or not the signer's
 is a 404 (exit 2), an unknown key or a bad signature a 401 (exit 2).
 `-q`/`--quiet` leaves out the FILE line of a download.
 
+`-O`/`--remote-name` (as in curl) stands for `-o FILE` with FILE in the
+current directory, named after the last segment of the path of the URL,
+percent-decoded (`luk://h/d/my%20file.txt` writes `my file.txt`);
+`--force`, `--inplace`, `--progress`, `--bwlimit` and `-q` work as with
+`-o FILE`, and the existing-file check still comes before the request.
+`-O` with `-o` or `-c` is a usage error (`-O excludes -o and -c`), as
+is `-O` with `--head` (`--head takes no -O`) and with a directory URL
+(`-O takes no directory URL; use -o DIR/`). The name must be a bare
+file name: not empty, not `.` or `..`, valid UTF-8, without `/` or `\`
+and without the characters the text output escapes (control characters
+and NUL among them); anything else is a usage error before any request
+(`unsafe file name "a/b" in the URL: a path separator; pass -o FILE`,
+exit 1).
+
+`-J`/`--remote-header-name` (only with `-O`; alone a usage error, `-J
+needs -O`) names FILE after the file name the server announces, the
+`name` of `--head` (the `filename` of `Content-Disposition`; lukd
+announces the file name sent, so a drop link with a random name is
+saved under its original name). luk sends a signed `HEAD` first (it
+never claims a `once` file), so the name is checked and an existing
+FILE is refused (unless `--force`) before the `GET`; when the server
+announces no name, the URL segment is used as with `-O` alone. An
+announced name gets the same checks as the URL segment; one that fails
+them is never written anywhere (`unsafe file name "../x" announced by
+the server: a path separator; nothing downloaded`, exit 3).
+
+```
+$ luk get 'luk://secure.box.example.com/x7Kq...#sha256//Xk9...' -O -J
+report.pdf
+```
+
 A URL whose path ends with a slash names a directory (the rsync
 convention), served by a signed expose (see Signed expose); a URL
 without it is a file, as above. `luk get URL/` without `-o` sends a
@@ -4912,8 +4945,18 @@ name "../x" in the listing: path element ..; nothing downloaded`, exit
   `--force` or hard-linked without; `get NAME  SIZE  TIME` on success
   (`get 2026/10/db.sql.gz  45.0 MiB  3.0s`: the bytes written and the
   time from the request to the file in place). `--bwlimit` applies to
-  each file; the files are fetched one at a time, so the run stays
-  under the rate.
+  each file; without `--parallel` the files are fetched one at a time,
+  so the run stays under the rate.
+
+`--parallel N` (1 to 32, default 1; outside a usage error, `--parallel
+must be 1 to 32`) downloads up to N files at once, each exactly as
+above, with its own signed `GET`; the run stays under N times
+`--bwlimit`. The `get` and `skip` lines and the errors then come in the
+order the files end, not in the order of the listing; the summary and
+the exit code are as without it. Ctrl-C ends every download in flight
+and starts no other (exit 130). `--parallel` with a file URL is a usage
+error (`--parallel needs a directory URL (ending with a slash) and -o
+DIR/`), as is `--parallel` on a directory URL without `-o`.
 
 `--progress`, when stderr is a terminal, keeps one live line on stderr,
 redrawn in place at most five times a second:
@@ -4923,7 +4966,10 @@ redrawn in place at most five times a second:
 ```
 
 `[n/N]` is the place of the current file among all the files of the
-listing (skipped and failed files count); then the bytes of the current
+listing (skipped and failed files count); with `--parallel` it is the
+first of the files in flight, followed by the number of the others
+(`[ 7/20 +3]`), and the line is drawn again after every line of the
+output while any file is in flight; then the bytes of the current
 file against its size (the bytes alone when neither the listing nor the
 answer gives one), in the unit of the size, and its rate; then `total`,
 the bytes transferred in the run against the bytes to transfer: the
@@ -4946,9 +4992,9 @@ minute) and their rate. `-q` prints only errors. When
 any file failed, the last line on stderr is `luk: N of M files failed`
 and the exit code is that of the first failure (2 for a 404, 3 for a
 transfer, 4 for a sha256 mismatch, 1 for a local conflict). `-c`/`-o -`,
-`--inplace` and `--head` with a directory URL are usage errors, as are
-`--json` with `-o`, `--force`, `--progress` or `--bwlimit` without
-`-o`, and `-r` with a file URL. A second run of the same command
+`-O`, `--inplace` and `--head` with a directory URL are usage errors, as are
+`--json` with `-o`, `--force`, `--progress`, `--bwlimit` or `--parallel`
+without `-o`, and `-r` or `--parallel` with a file URL. A second run of the same command
 downloads only what changed.
 
 ```

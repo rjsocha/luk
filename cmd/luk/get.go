@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"math/rand/v2"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,6 +26,8 @@ func newGetCmd(out io.Writer) *cobra.Command {
 	var (
 		output, key, bwlimit                                             string
 		force, inplace, progress, head, asJSON, stdout, recursive, quiet bool
+		remoteName, remoteHeader                                         bool
+		parallel                                                         int
 	)
 	cmd := &cobra.Command{
 		Use:   "get URL",
@@ -41,16 +44,26 @@ has one, else by the system CAs. The key is --key, else the key of the
 endpoint luk config link maps the host of the URL to, else the config key,
 else the first agent key.
 
-The content goes to --output FILE (required; - or -c/--stdout for stdout); the server
-never names the local file. An existing FILE is refused unless --force,
-before any request is sent. The content is written to a temporary file
-next to FILE and renamed on success; a failed download leaves nothing.
+The content goes to --output FILE (required; - or -c/--stdout for stdout,
+or -O); the server names the local file only with -J. An existing FILE
+is refused unless --force, before the download is sent. The content is
+written to a temporary file next to FILE and renamed on success; a
+failed download leaves nothing.
 --inplace writes into FILE itself instead, opened once the server has
 answered 200: an existing file keeps its inode (permissions, owner, hard
 links), and a device or FIFO works without --force. A failed download
 then leaves FILE as written, partial or with a sha256 mismatch.
 --progress reports on stderr when it is a terminal; --bwlimit caps the
 rate in bytes per second (K, M, G, T suffixes; 0 = unlimited).
+
+-O (--remote-name) writes FILE into the current directory, named after
+the last segment of the URL path (percent-decoded), as -o FILE would;
+it takes no -o, -c or directory URL. -J (--remote-header-name, only with
+-O) names it after the file name the server announces (the name --head
+prints), asked with a signed HEAD first, else after the URL. Either name
+must be a bare file name: not empty, . or .., without a slash, a
+backslash or control characters; anything else is an error and nothing
+is downloaded.
 
 --head sends a signed HEAD instead (it never claims a once file) and
 prints what the server announces, one "key: value" per line: name, size,
@@ -79,17 +92,23 @@ It prints "get NAME  SIZE  TIME" or "skip NAME" per file and a summary
 errors). --progress keeps one live line on stderr when it is a terminal:
 the file among all ([7/20]), its bytes and rate, the bytes of the run
 against the bytes to transfer and an ETA; it is cleared before each
-line of the output. --bwlimit applies to each file; the files are
-fetched one at a time, so the run stays under it. A failed file is
-reported and the others still downloaded; the exit code is then that of
-the first failure. -c, --inplace and --head take no directory.`,
+line of the output. --parallel N downloads up to N files at once (1 to
+32, default 1), each with its own request; the lines then come in the
+order the files end and the live line shows the first file in flight
+with the number of the others ([7/20 +3]). --bwlimit applies to each
+file, so the run stays under N times it. A failed file is reported and
+the others still downloaded; the exit code is then that of the first
+failure. -c, -O, --inplace and --head take no directory URL; --parallel
+takes nothing but one with -o DIR/.`,
 		Example: `  luk get 'luk://secure.example.com/x7Kq...#sha256//Xk9...' -o notes.txt
   luk get luk://secure.example.com/x7Kq... -c | tar x
   luk get https://secure.example.com/x7Kq... -o notes.txt --force --progress
   luk get luk://secure.example.com/x7Kq... --head
+  luk get luk://secure.example.com/x7Kq... -O -J
   luk get luk://secure.example.com/v/2026/
   luk get luk://secure.example.com/v/ -r --json
-  luk get luk://secure.example.com/v/2026/ -o backups/`,
+  luk get luk://secure.example.com/v/2026/ -o backups/
+  luk get luk://secure.example.com/v/ -o backups/ --parallel 4`,
 		Args:              oneURL,
 		ValidArgsFunction: completeNone,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -97,6 +116,16 @@ the first failure. -c, --inplace and --head take no directory.`,
 			u, pin, err := client.ParseGetURL(rawURL)
 			if err != nil {
 				return usageError{err}
+			}
+			switch {
+			case remoteHeader && !remoteName:
+				return usageError{errors.New("-J needs -O")}
+			case remoteName && (output != "" || stdout):
+				return usageError{errors.New("-O excludes -o and -c")}
+			case remoteName && head:
+				return usageError{errors.New("--head takes no -O")}
+			case remoteName && client.IsDirURL(u):
+				return usageError{errors.New("-O takes no directory URL; use -o DIR/")}
 			}
 			if stdout {
 				if output != "" {
@@ -108,17 +137,34 @@ the first failure. -c, --inplace and --head take no directory.`,
 				return getDir(cmd, rawURL, u, pin, dirOptions{
 					output: output, key: key, bwlimit: bwlimit, force: force, inplace: inplace, progress: progress,
 					head: head, asJSON: asJSON, recursive: recursive, quiet: quiet,
+					parallel: parallel, parallelSet: cmd.Flags().Changed("parallel"),
 				}, out)
 			}
-			if recursive {
+			switch {
+			case recursive:
 				return usageError{errors.New("-r needs a directory URL (ending with a slash)")}
+			case cmd.Flags().Changed("parallel"):
+				return usageError{errors.New("--parallel needs a directory URL (ending with a slash) and -o DIR/")}
+			}
+			// -O names FILE after the URL now; -J after what the server
+			// announces, asked below, with the URL as the fallback.
+			var urlName string
+			var urlNameErr error
+			if remoteName {
+				urlName, urlNameErr = urlFileName(u)
+				if !remoteHeader {
+					if urlNameErr != nil {
+						return urlNameErr
+					}
+					output = urlName
+				}
 			}
 			switch {
 			case inplace && (head || output == "-"):
 				return usageError{errors.New("--inplace takes no --head, -o - or -c")}
 			case head && output != "":
 				return usageError{errors.New("--head takes no --output or -c")}
-			case !head && output == "":
+			case !head && output == "" && !remoteHeader:
 				return usageError{errors.New("luk get needs -o FILE, -c for stdout, or --head")}
 			case asJSON && !head:
 				return usageError{errors.New("--json needs --head")}
@@ -127,12 +173,17 @@ the first failure. -c, --inplace and --head take no directory.`,
 			if err != nil {
 				return err
 			}
-			if output != "-" && !head && !force {
-				refuse := refuseExisting
-				if inplace {
-					refuse = refuseInplace
+			refuse := func() error {
+				if output == "-" || head || force {
+					return nil
 				}
-				if err := refuse(output); err != nil {
+				if inplace {
+					return refuseInplace(output)
+				}
+				return refuseExisting(output)
+			}
+			if !remoteHeader {
+				if err := refuse(); err != nil {
 					return err
 				}
 			}
@@ -153,6 +204,28 @@ the first failure. -c, --inplace and --head take no directory.`,
 					return unknownKeyHint(err, agentKeys)
 				}
 				return printHead(out, h, asJSON)
+			}
+			if remoteHeader {
+				// A signed HEAD (which never claims a once file) names
+				// the file before the download.
+				h, err := client.HeadFile(ctx, o)
+				if err != nil {
+					return unknownKeyHint(err, agentKeys)
+				}
+				switch {
+				case h.Name != "":
+					if err := client.ValidFileName(h.Name); err != nil {
+						return fmt.Errorf("unsafe file name %q announced by the server: %v; nothing downloaded", h.Name, err)
+					}
+					output = h.Name
+				case urlNameErr != nil:
+					return urlNameErr
+				default:
+					output = urlName
+				}
+				if err := refuse(); err != nil {
+					return err
+				}
 			}
 			if progress && term.IsTerminal(int(os.Stderr.Fd())) {
 				o.Progress = os.Stderr
@@ -202,11 +275,27 @@ the first failure. -c, --inplace and --head take no directory.`,
 	f.StringVarP(&key, "key", "k", "", "private key file (uses PATH-cert.pub when present), a .pub file of an agent key, or SHA256:... fingerprint of an agent key")
 	f.BoolVar(&progress, "progress", false, "show transfer progress on stderr (terminal only)")
 	f.StringVar(&bwlimit, "bwlimit", "", "limit the download rate, bytes per second with K, M, G, T suffix (0 = unlimited)")
+	f.BoolVarP(&remoteName, "remote-name", "O", false, "write FILE into the current directory, named after the last segment of the URL")
+	f.BoolVarP(&remoteHeader, "remote-header-name", "J", false, "with -O: name FILE after the file name the server announces")
+	f.IntVar(&parallel, "parallel", 1, fmt.Sprintf("with a directory URL and -o DIR/: files downloaded at once (1 to %d)", maxGetParallel))
 	_ = f.SetAnnotation("output", cliflags.AllowDash, []string{"true"})
 	completeFlags(cmd, map[string]cobra.CompletionFunc{
-		"output": completeFiles, "key": completeKey, "bwlimit": completeNone,
+		"output": completeFiles, "key": completeKey, "bwlimit": completeNone, "parallel": completeNone,
 	})
 	return cmd
+}
+
+// urlFileName is the file name of -O: the last segment of the path of u,
+// percent-decoded, which must be a bare file name.
+func urlFileName(u *url.URL) (string, error) {
+	name, err := client.URLFileName(u)
+	if err == nil {
+		err = client.ValidFileName(name)
+	}
+	if err != nil {
+		return "", usageError{fmt.Errorf("unsafe file name %q in the URL: %v; pass -o FILE", name, err)}
+	}
+	return name, nil
 }
 
 // headInfo is the output of luk get --head; absent fields are left out.

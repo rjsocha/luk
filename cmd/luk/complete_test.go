@@ -118,9 +118,26 @@ func TestCompleteFixedAndFree(t *testing.T) {
 		{[]string{"config", "endpoint", "ls", "--pin-format", ""}, pinFormat, ":4"},
 		{[]string{"scan", "--pin-format", ""}, pinFormat, ":4"},
 		{[]string{"send", "--parallel", ""}, nil, ":4"},
+		{[]string{"get", "--parallel", ""}, nil, ":4"},
 		{[]string{"config", "endpoint", "add", "--pin", ""}, nil, ":4"},
 	} {
 		wantCompletion(t, c.args, c.want, c.directive)
+	}
+}
+
+func TestCompleteGetFlags(t *testing.T) {
+	tempConfig(t)
+	got, dir := complete(t, "get", "--")
+	for _, f := range []string{"--remote-name", "--remote-header-name", "--parallel"} {
+		if !slices.ContainsFunc(got, func(c string) bool { return strings.HasPrefix(c, f+"\t") }) {
+			t.Errorf("get --: no %s in %q %s", f, got, dir)
+		}
+	}
+	got, _ = complete(t, "get", "-")
+	for _, f := range []string{"-O", "-J"} {
+		if !slices.ContainsFunc(got, func(c string) bool { return strings.HasPrefix(c, f+"\t") }) {
+			t.Errorf("get -: no %s in %q", f, got)
+		}
 	}
 }
 

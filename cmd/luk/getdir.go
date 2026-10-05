@@ -15,6 +15,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -30,7 +31,14 @@ import (
 type dirOptions struct {
 	output, key, bwlimit                                     string
 	force, inplace, progress, head, asJSON, recursive, quiet bool
+	// parallel is the number of files downloaded at once; parallelSet
+	// tells whether --parallel was given.
+	parallel    int
+	parallelSet bool
 }
+
+// maxGetParallel is the largest --parallel of a directory download.
+const maxGetParallel = 32
 
 // getDir runs luk get on a directory URL: the listing without -o, the
 // download of every file below it with -o DIR.
@@ -42,8 +50,10 @@ func getDir(cmd *cobra.Command, rawURL string, u *url.URL, pin string, o dirOpti
 		return usageError{errors.New("--inplace and --head take no directory URL")}
 	case o.output != "" && o.asJSON:
 		return usageError{errors.New("--json takes no -o with a directory URL")}
-	case o.output == "" && (o.force || o.progress || o.bwlimit != ""):
-		return usageError{errors.New("--force, --progress and --bwlimit need -o DIR/")}
+	case o.output == "" && (o.force || o.progress || o.bwlimit != "" || o.parallelSet):
+		return usageError{errors.New("--force, --progress, --bwlimit and --parallel need -o DIR/")}
+	case o.parallel < 1 || o.parallel > maxGetParallel:
+		return usageError{fmt.Errorf("--parallel must be 1 to %d", maxGetParallel)}
 	}
 	if o.output != "" {
 		if err := checkDirTarget(o.output); err != nil {
@@ -78,7 +88,8 @@ func getDir(cmd *cobra.Command, rawURL string, u *url.URL, pin string, o dirOpti
 		}
 		return printListing(out, ents, time.Local)
 	}
-	d := &dirGet{ctx: ctx, base: u, opts: g, force: o.force, out: out, errOut: cmd.ErrOrStderr(), quiet: o.quiet, now: time.Now}
+	d := &dirGet{ctx: ctx, base: u, opts: g, force: o.force, out: out, errOut: cmd.ErrOrStderr(), quiet: o.quiet, now: time.Now,
+		parallel: o.parallel}
 	if o.progress && term.IsTerminal(int(os.Stderr.Fd())) {
 		d.live = newDirLive(os.Stderr, stderrWidth, time.Now)
 	}
@@ -154,12 +165,19 @@ type dirGet struct {
 	out, errOut io.Writer
 	root        *os.Root
 	now         func() time.Time
+	// parallel is the number of files downloaded at once; below 1 means 1.
+	parallel int
 	// live is the live line of --progress on a terminal; nil without.
 	live *dirLive
 
+	// mu guards the counters below, the output and the live line, which
+	// the downloads in flight share.
+	mu                   sync.Mutex
 	got, skipped, failed int
 	bytes                int64
 	first                error
+	// interrupted is the first download ended by Ctrl-C.
+	interrupted error
 }
 
 // dirFailed ends a directory download in which some files failed; it
@@ -206,32 +224,33 @@ func (d *dirGet) run(dir string, ents []wire.ListEntry) error {
 	}
 	d.live.init(sizes)
 	start := d.now()
+	// Each download holds a slot of slots while it runs; Ctrl-C starts no
+	// other and every one in flight ends with it.
+	slots := make(chan struct{}, max(d.parallel, 1))
+	var wg sync.WaitGroup
+	var stopped error
 	for i, e := range files {
+		select {
+		case slots <- struct{}{}:
+		case <-d.ctx.Done():
+		}
 		if err := d.ctx.Err(); err != nil {
-			return &client.TransferError{Reason: client.Interrupted, Err: err}
+			stopped = &client.TransferError{Reason: client.Interrupted, Err: err}
+			break
 		}
-		d.live.begin(i+1, client.Printable(e.Name), sizes[i])
-		skipped, n, took, err := d.file(e)
-		d.live.end(skipped)
-		d.live.clear()
-		var te *client.TransferError
-		switch {
-		case errors.As(err, &te) && te.Reason == client.Interrupted:
-			return err
-		case err != nil:
-			d.failed++
-			if d.first == nil {
-				d.first = err
-			}
-			fmt.Fprintf(d.errOut, "luk: %s: %v\n", client.Printable(e.Name), err)
-		case skipped:
-			d.skipped++
-			d.say("skip %s\n", client.Printable(e.Name))
-		default:
-			d.got++
-			d.bytes += n
-			d.say("get %s  %s  %s\n", client.Printable(e.Name), client.HumanBytes(n), durText(took))
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			d.one(i+1, e, sizes[i])
+		}()
+	}
+	wg.Wait()
+	if d.interrupted != nil {
+		return d.interrupted
+	}
+	if stopped != nil {
+		return stopped
 	}
 	el := d.now().Sub(start)
 	failed := ""
@@ -244,6 +263,40 @@ func (d *dirGet) run(dir string, ents []wire.ListEntry) error {
 		return &dirFailed{failed: d.failed, total: len(files), first: d.first}
 	}
 	return nil
+}
+
+// one downloads the file e, number index of the listing, of the given
+// size (-1: unknown), and reports it.
+func (d *dirGet) one(index int, e wire.ListEntry, size int64) {
+	d.mu.Lock()
+	f := d.live.begin(index, client.Printable(e.Name), size)
+	d.mu.Unlock()
+	skipped, n, took, err := d.file(e, f)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f.end(skipped)
+	d.live.clear()
+	defer d.live.redraw()
+	var te *client.TransferError
+	switch {
+	case errors.As(err, &te) && te.Reason == client.Interrupted:
+		if d.interrupted == nil {
+			d.interrupted = err
+		}
+	case err != nil:
+		d.failed++
+		if d.first == nil {
+			d.first = err
+		}
+		fmt.Fprintf(d.errOut, "luk: %s: %v\n", client.Printable(e.Name), err)
+	case skipped:
+		d.skipped++
+		d.say("skip %s\n", client.Printable(e.Name))
+	default:
+		d.got++
+		d.bytes += n
+		d.say("get %s  %s  %s\n", client.Printable(e.Name), client.HumanBytes(n), durText(took))
+	}
 }
 
 // entrySize is the size of a listing entry, -1 when it has none.
@@ -262,8 +315,8 @@ func (d *dirGet) say(format string, args ...any) {
 
 // file downloads one file of the listing unless a regular file with its
 // sha256 is already there (skipped); n is the number of bytes written,
-// took the time of the download.
-func (d *dirGet) file(e wire.ListEntry) (skipped bool, n int64, took time.Duration, err error) {
+// took the time of the download; f is its part of the live line.
+func (d *dirGet) file(e wire.ListEntry, f *liveFile) (skipped bool, n int64, took time.Duration, err error) {
 	if err := d.parents(e.Name); err != nil {
 		return false, 0, 0, err
 	}
@@ -288,7 +341,7 @@ func (d *dirGet) file(e wire.ListEntry) (skipped bool, n int64, took time.Durati
 		return false, 0, 0, err
 	}
 	start := d.now()
-	n, err = d.download(e.Name)
+	n, err = d.download(e.Name, f)
 	return false, n, d.now().Sub(start), err
 }
 
@@ -331,7 +384,7 @@ func (d *dirGet) sameSum(name, sum string) (bool, error) {
 // download writes the file name into a temporary file next to it, checks
 // it and puts it in place: renamed over an existing file with force, else
 // linked, so a file created meanwhile is never replaced.
-func (d *dirGet) download(name string) (int64, error) {
+func (d *dirGet) download(name string, f *liveFile) (int64, error) {
 	o := d.opts
 	o.URL = client.ChildURL(d.base, name)
 	dl, err := client.Get(d.ctx, o)
@@ -354,9 +407,15 @@ func (d *dirGet) download(name string) (int64, error) {
 	}
 	defer d.root.Remove(tmpName)
 	var src io.Reader = dl
-	if d.live != nil {
-		d.live.transfer(dl.Size)
-		src = &countReader{r: dl, add: d.live.add}
+	if f != nil {
+		d.mu.Lock()
+		f.transfer(dl.Size)
+		d.mu.Unlock()
+		src = &countReader{r: dl, add: func(n int) {
+			d.mu.Lock()
+			f.add(n)
+			d.mu.Unlock()
+		}}
 	}
 	n, err := io.Copy(tmp, src)
 	if err == nil {

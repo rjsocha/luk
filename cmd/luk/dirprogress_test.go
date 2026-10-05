@@ -99,36 +99,36 @@ func TestDirLiveLine(t *testing.T) {
 	sizes := []int64{mib(10), mib(45), -1}
 	l.init(sizes)
 	// A skipped file leaves the total.
-	l.begin(1, "first.bin", sizes[0])
+	f := l.begin(1, "first.bin", sizes[0])
 	if got := lastLine(&buf); got != "[1/3] first.bin  0.0/10.0 MiB  0 B/s   total 0.0/55.0 MiB" {
 		t.Fatalf("begin: %q", got)
 	}
-	l.end(true)
+	f.end(true)
 	l.clear()
 
-	l.begin(2, "2026/10/04/test-149.bin", sizes[1])
-	l.transfer(mib(45))
+	f = l.begin(2, "2026/10/04/test-149.bin", sizes[1])
+	f.transfer(mib(45))
 	clk.advance(time.Second)
-	l.add(int(mib(12)))
+	f.add(int(mib(12)))
 	if got := lastLine(&buf); got != "[2/3] 2026/10/04/test-149.bin  12.0/45.0 MiB  12.0 MiB/s   total 12.0/45.0 MiB" {
 		t.Fatalf("no ETA before 3s: %q", got)
 	}
 	// Within the interval no render.
 	n := buf.Len()
 	clk.advance(dirLiveInterval / 2)
-	l.add(1)
+	f.add(1)
 	if buf.Len() != n {
 		t.Fatalf("rendered within the interval: %q", buf.String()[n:])
 	}
 	clk.advance(2 * time.Second)
-	l.add(int(mib(3)) - 1)
+	f.add(int(mib(3)) - 1)
 	if got := lastLine(&buf); got != "[2/3] 2026/10/04/test-149.bin  15.0/45.0 MiB  4.8 MiB/s   total 15.0/45.0 MiB  ETA 0:06" {
 		t.Fatalf("ETA: %q", got)
 	}
 	// Narrow terminal: the name is cut in the middle to fit.
 	l.width = fixedWidth(80)
 	clk.advance(time.Second)
-	l.add(int(mib(15)))
+	f.add(int(mib(15)))
 	got := lastLine(&buf)
 	if got != "[2/3] 2026/1...49.bin  30.0/45.0 MiB  7.3 MiB/s   total 30.0/45.0 MiB  ETA 0:02" || len([]rune(got)) != 79 {
 		t.Fatalf("narrow: %q (%d)", got, len([]rune(got)))
@@ -136,15 +136,15 @@ func TestDirLiveLine(t *testing.T) {
 	// Narrower than the fields: the line is cut at the width.
 	l.width = fixedWidth(30)
 	clk.advance(time.Second)
-	l.add(1)
+	f.add(1)
 	if got := lastLine(&buf); got != "[2/3]   30.0/45.0 MiB  5.9 Mi" {
 		t.Fatalf("too narrow: %q", got)
 	}
 	// Unknown width: 80.
 	l.width = fixedWidth(0)
 	clk.advance(time.Second)
-	l.add(int(mib(15)) - 1)
-	l.end(false)
+	f.add(int(mib(15)) - 1)
+	f.end(false)
 	if got := lastLine(&buf); got != "[2/3] 2026/10/04/test-149.bin  45.0/45.0 MiB  7.4 MiB/s   total 45.0/45.0 MiB" {
 		t.Fatalf("width 0: %q", got)
 	}
@@ -154,24 +154,57 @@ func TestDirLiveLine(t *testing.T) {
 	}
 	// A size the listing did not give joins the total once known; a
 	// failed file counts with what it transferred.
-	l.begin(3, "c", sizes[2])
+	f = l.begin(3, "c", sizes[2])
 	if got := lastLine(&buf); got != "[3/3] c  0 B  0 B/s   total 45.0/45.0 MiB" {
 		t.Fatalf("unknown size: %q", got)
 	}
-	l.transfer(mib(5))
-	l.add(int(mib(1)))
-	l.end(false)
+	f.transfer(mib(5))
+	f.add(int(mib(1)))
+	f.end(false)
 	if l.total != mib(46) || l.done != mib(46) {
 		t.Fatalf("total %d done %d", l.total, l.done)
 	}
 	// A nil live line does nothing.
 	var none *dirLive
 	none.init(sizes)
-	none.begin(1, "x", 1)
-	none.transfer(1)
-	none.add(1)
-	none.end(false)
+	nf := none.begin(1, "x", 1)
+	nf.transfer(1)
+	nf.add(1)
+	nf.end(false)
 	none.clear()
+	none.redraw()
+}
+
+// With files in flight at once the line shows the first of them and the
+// number of the others; it is drawn again after a clear while any is.
+func TestDirLiveLineParallel(t *testing.T) {
+	clk := newManualClock()
+	var buf bytes.Buffer
+	l := newDirLive(&buf, fixedWidth(120), clk.now)
+	l.init([]int64{100, 200, 300})
+	a := l.begin(1, "a", 100)
+	b := l.begin(2, "b", 200)
+	if got := lastLine(&buf); got != "[1/3 +1] a  0/100 B  0 B/s   total 0/600 B" {
+		t.Fatalf("two: %q", got)
+	}
+	a.transfer(100)
+	b.transfer(200)
+	clk.advance(time.Second)
+	b.add(50)
+	a.add(100)
+	a.end(false)
+	l.clear()
+	l.redraw()
+	if got := lastLine(&buf); got != "[2/3] b  50/200 B  50 B/s   total 150/600 B" {
+		t.Fatalf("after a: %q", got)
+	}
+	b.end(true)
+	l.clear()
+	n := buf.Len()
+	l.redraw()
+	if buf.Len() != n || l.total != 400 {
+		t.Fatalf("redraw without files: %q, total %d", buf.String()[n:], l.total)
+	}
 }
 
 func TestDirGetLines(t *testing.T) {

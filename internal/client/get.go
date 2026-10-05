@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -223,6 +224,33 @@ func ValidListName(name string) error {
 		}
 	}
 	return nil
+}
+
+// ValidFileName reports whether name is a bare file name, safe to create
+// in the current directory: not empty, "." or "..", valid UTF-8, without
+// a slash or backslash and without characters Printable escapes (control
+// characters and NUL among them). The error says why, without the name.
+func ValidFileName(name string) error {
+	bad := errors.New
+	switch {
+	case name == "":
+		return bad("empty")
+	case name == "." || name == "..":
+		return bad("not a file")
+	case !utf8.ValidString(name):
+		return bad("not UTF-8")
+	case strings.ContainsAny(name, `/\`):
+		return bad("a path separator")
+	case strings.ContainsFunc(name, unsafeRune):
+		return bad("control or formatting characters")
+	}
+	return nil
+}
+
+// URLFileName is the last segment of the path of u, percent-decoded.
+func URLFileName(u *url.URL) (string, error) {
+	p := u.EscapedPath()
+	return url.PathUnescape(p[strings.LastIndex(p, "/")+1:])
 }
 
 // Head is what the server announces for a file without sending it.
