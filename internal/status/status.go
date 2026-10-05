@@ -61,6 +61,11 @@ type Entry struct {
 	Error           string `json:"error,omitempty"`
 	Size            int64  `json:"size"`
 	Failed          int    `json:"failed"`
+	// OlderSkipped counts the uploads a store step skipped because the
+	// stored file was accepted after them (conflict replace): with a sound
+	// clock only uploads that overlapped; a growing count points at an
+	// acceptance order gone wrong.
+	OlderSkipped int `json:"older_skipped"`
 }
 
 // Watch is the evaluation of one series a watch rule of a storage applies
@@ -229,6 +234,20 @@ func older(a, b string) bool {
 	}
 	tb, err := time.Parse(time.RFC3339, b)
 	return err == nil && ta.Before(tb)
+}
+
+// SkippedOlder counts an upload of the key skipped as older than the
+// stored file and rewrites the file.
+func (s *Store) SkippedOlder(k Key) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[k]
+	if !ok {
+		e = Entry{Pipeline: k.Pipeline, Sender: k.Sender, Tags: []string{}}
+	}
+	e.OlderSkipped++
+	s.entries[k] = e
+	return s.persist()
 }
 
 // SetFailed sets the failed count of every entry from counts (absent keys

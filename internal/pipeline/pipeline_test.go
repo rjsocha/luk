@@ -669,3 +669,37 @@ func TestStoreRefreshesWatch(t *testing.T) {
 		t.Fatalf("later: %+v", ws)
 	}
 }
+
+// TestStoreOlderWarned: an upload accepted before the stored file is
+// skipped under conflict replace with a warning, and the status counts it.
+func TestStoreOlderWarned(t *testing.T) {
+	e := newEnv(t, 1)
+	e.cfg.Storage["a"].Conflict = "replace"
+	st, _, err := status.Open(status.Path(e.root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := e.dispatcher()
+	d.SetStatus(st)
+	for _, c := range []struct {
+		id string
+		ns int64
+	}{{"new", 2000}, {"old", 1000}} {
+		j := e.enqueueWith(t, c.id, "up", func(j *Job) { j.Sidecar.Accepted = c.ns }, "tee")
+		if err := d.Submit(j); err != nil {
+			t.Fatal(err)
+		}
+		d.Wait()
+	}
+	if got := e.read(t, "a/file/robert.socha/f.txt"); got != "data-new" {
+		t.Fatalf("a: %q", got)
+	}
+	r := find(e.logs.records(t), "store: older upload skipped", "tee")
+	if r == nil || r["level"] != "WARN" || r["id"] != "old" || r["stored"] != "new" {
+		t.Fatalf("log %v", r)
+	}
+	es := st.Entries()
+	if len(es) != 1 || es[0].OlderSkipped != 1 {
+		t.Fatalf("status %+v", es)
+	}
+}

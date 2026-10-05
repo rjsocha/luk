@@ -2,6 +2,9 @@
 Description=luk server, process role (pipelines, status, storage maintenance)
 After=network-online.target
 Wants=network-online.target
+# Like the receive role, which takes the acceptance order of the uploads
+# from the wall clock, it starts after the clock is synchronized.
+After=time-sync.target
 # Started, stopped, restarted and reloaded with lukd.service, which also
 # runs lukd-receive.service.
 PartOf=lukd.service

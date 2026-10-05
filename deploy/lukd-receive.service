@@ -2,6 +2,10 @@
 Description=luk server, receive role (listeners, queue writes, downloads)
 After=network-online.target
 Wants=network-online.target
+# The acceptance order of the uploads comes from the wall clock: start
+# after the clock is synchronized (with systemd-time-wait-sync.service
+# enabled), so a clock still wrong at boot does not age new uploads.
+After=time-sync.target
 # Started, stopped, restarted and reloaded with lukd.service, which also
 # runs lukd-process.service.
 PartOf=lukd.service

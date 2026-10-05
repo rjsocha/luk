@@ -633,6 +633,20 @@ func (d *Dispatcher) report(j Job, name string, step int, err error, output stri
 	}
 }
 
+// older reports a store of the pipeline name skipped because the stored
+// file was accepted after the upload: a warning and a count in the
+// status, since a run of them means new uploads are not kept (an
+// acceptance order gone wrong).
+func (d *Dispatcher) older(j Job, name, storage string, res store.Stored) {
+	d.log.Warn("store: older upload skipped", "id", j.Entry.ID, "pipeline", name, "storage", storage, "path", res.Rel, "stored", res.Kept)
+	if d.status == nil {
+		return
+	}
+	if err := d.status.SkippedOlder(status.Key{Pipeline: name, Sender: j.Sidecar.Sender}); err != nil {
+		d.log.Warn("status not written", "id", j.Entry.ID, "pipeline", name, "error", err)
+	}
+}
+
 // skip records the pipeline name as not run (step 0) for the reason, a
 // failure in the status.
 func (d *Dispatcher) skip(j Job, name, reason string) Outcome {
@@ -756,7 +770,7 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, Outcome) {
 						return i + 1, fmt.Errorf("store %s: %w", sn, err)
 					}
 					if res.Older {
-						d.log.Info("store: older upload skipped", "id", j.Entry.ID, "pipeline", name, "storage", sn, "path", res.Rel, "stored", res.Kept)
+						d.older(j, name, sn, res)
 						stored = append(stored, sn+":"+res.Rel+" (older)")
 						continue
 					}
@@ -911,7 +925,7 @@ func (d *Dispatcher) runReplace(j Job, names []string) (bool, []Outcome) {
 				return false, fail(t.pipeline, t.step, fmt.Errorf("store %s: %w", t.storage, err))
 			}
 			if res.Older {
-				d.log.Info("store: older upload skipped", "id", j.Entry.ID, "pipeline", t.pipeline, "storage", t.storage, "path", res.Rel, "stored", res.Kept)
+				d.older(j, t.pipeline, t.storage, res)
 			}
 			if !res.Dedup && !res.Older && !last {
 				st, _ := localStorage(cfg, t.storage)

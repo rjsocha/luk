@@ -578,3 +578,41 @@ func TestRolesAlive(t *testing.T) {
 		})
 	}
 }
+
+// TestReceiveAcceptedAfterMark: the receive role continues the acceptance
+// order after the mark under the root, even with the wall clock behind
+// it, and moves the mark past the order it hands out.
+func TestReceiveAcceptedAfterMark(t *testing.T) {
+	e := newRoleEnv(t)
+	mark := time.Now().Add(time.Hour).UnixNano()
+	if err := os.WriteFile(queue.MarkPath(e.root), []byte(fmt.Sprintf(`{"mark":%d}`, mark)), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var logs syncBuf
+	e.start(t, Receive, &logs)
+	e.upload(t, "a.txt", false, "hello")
+	qdir := filepath.Join(e.root, "q/drop")
+	ents := entries(t, qdir)
+	if len(ents) != 1 {
+		t.Fatalf("queue %v", ents)
+	}
+	b, err := os.ReadFile(filepath.Join(qdir, ents[0], "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m pipeline.QueueMeta
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Sidecar.Accepted <= mark {
+		t.Fatalf("accepted %d, not after the mark %d", m.Sidecar.Accepted, mark)
+	}
+	b, err = os.ReadFile(queue.MarkPath(e.root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var now struct{ Mark int64 }
+	if err := json.Unmarshal(b, &now); err != nil || now.Mark < m.Sidecar.Accepted {
+		t.Fatalf("mark %s after accepted %d: %v", b, m.Sidecar.Accepted, err)
+	}
+}

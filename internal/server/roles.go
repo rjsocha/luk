@@ -106,6 +106,12 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if err := s.persistNonces(cfg.Auth.Nonces); err != nil {
 		return err
 	}
+	mark := queue.MarkPath(cfg.Root)
+	if err := s.accepted.Persist(mark, func(err error) {
+		s.log.Warn("acceptance mark not written", "file", mark, "error", err)
+	}); err != nil {
+		return fmt.Errorf("acceptance mark: %w", err)
+	}
 	aside, err := s.quota.Open(quota.Path(cfg.Root))
 	if err != nil {
 		return fmt.Errorf("quota state: %w", err)

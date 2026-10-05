@@ -495,3 +495,30 @@ func TestSetWatch(t *testing.T) {
 		t.Fatalf("table:\n%s\nwant:\n%s", out.String(), want)
 	}
 }
+
+// TestSkippedOlder: the count of skipped older uploads is written to the
+// file, survives a record of the key and a reopen.
+func TestSkippedOlder(t *testing.T) {
+	s, p := open(t)
+	s.Record(result("p", "a", "id1", "", 0))
+	for range 2 {
+		if err := s.SkippedOlder(Key{"p", "a"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SkippedOlder(Key{"q", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	s.Record(result("p", "a", "id2", "", 0))
+	es := readFile(t, p)
+	if len(es) != 2 || es[0].OlderSkipped != 2 || es[0].LastID != "id2" || es[1].OlderSkipped != 1 {
+		t.Fatalf("entries %+v", es)
+	}
+	r, _, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if es := r.Entries(); es[0].OlderSkipped != 2 {
+		t.Fatalf("reopened %+v", es)
+	}
+}
