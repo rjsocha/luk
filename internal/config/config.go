@@ -3087,14 +3087,19 @@ func (c *Config) ProtectURL(storage string) (string, *Listen, bool) {
 // PublicURL is the base of the URLs of the public files of a storage: the
 // URL of its expose (ExposeURL); for an expose with auth.ssh that URL with
 // the scheme luk and the first listener of the expose (as ProtectURL),
-// else no listener.
+// with auth.basic too that https URL and the first listener (a browser
+// opens it, luk get signs it), else no listener.
 func (c *Config) PublicURL(storage string) (string, *Listen, bool) {
 	st, ok := c.Storage[storage]
 	if !ok || st.Expose == "" {
 		return "", nil, false
 	}
 	if x := c.Expose[st.Expose]; x != nil && x.Auth.SSH != nil {
-		return c.signedURL(st.Expose)
+		base, l, ok := c.signedURL(st.Expose)
+		if ok && len(x.Auth.Basic) > 0 {
+			base = "https://" + strings.TrimPrefix(base, wire.SchemeLuk+"://")
+		}
+		return base, l, ok
 	}
 	base, ok := c.ExposeURL(st.Expose)
 	return base, nil, ok

@@ -834,7 +834,7 @@ endpoint:
   private upload (`access`) gets the `luk://` URL of the protect expose
   of that storage instead (see Private files); a public upload to a
   storage whose `expose` has `auth.ssh` the `luk://` URL of that expose
-  (see Signed expose). An upload of a permanent name gets the permanent
+  (`https://` when it has `auth.basic` too; see Signed expose). An upload of a permanent name gets the permanent
   URL as `url`, with `permanent` (the name) and `version_url` (the URL
   of the stored version) added (see Permanent names).
 
@@ -1804,7 +1804,8 @@ expose:
   every case. Downloads carry the headers of a direct download plus
   `Luk-Expires` and `Luk-Once`, and are logged as `signed download`
   with `auth=ssh`.
-- Portal uploads (`reveal`, `download`) have no landing page there: the
+- Portal uploads (`reveal`, `download`) have no landing page there for
+  signed requests: the
   file URL answers the stored content as a direct download (download
   headers, `Range`), and the action URLs (`<name>/reveal`,
   `<name>/download`, `<name>/get`) do not exist (404; `POST` is 405).
@@ -1813,7 +1814,8 @@ expose:
   them, so a directory download never claims one.
 - URLs: the upload answer, `luk link ls` and `lukd storage ls` give a
   public file of such a storage the `luk://` URL of the expose (with the
-  pin of a `self` or `files` certificate), as for a private file.
+  pin of a `self` or `files` certificate), as for a private file
+  (`https://` with `auth.basic` too, below).
 - Both methods: with `auth.basic` beside `auth.ssh` the expose serves
   the same public files to either (`auth` with more than one method,
   Server configuration). A signed request is answered as above, judged
@@ -1823,8 +1825,18 @@ expose:
   password, then the files, the portal pages and actions of portal
   uploads, and with `index` the HTML listing of the directory URLs
   (Expose); the `catalog` is not served. Its downloads are logged as
-  `basic download` with `auth=basic` and the user. Private files are
-  never served to it (404), on this expose or on `protect`.
+  `basic download` with `auth=basic` and the user when the content is
+  sent (not a landing page, not `HEAD`). A signed request takes only
+  `GET` and `HEAD` (405 otherwise) and never the index redirect of a
+  directory name without its slash (404, as for a missing file). Private
+  files are never served to an unsigned request (404), on this expose or
+  on `protect`.
+- URLs with both methods: the upload answer (`url`, `version_url`),
+  `luk link ls` and `lukd storage ls` give the public files the
+  `https://` URL of the expose instead of `luk://`, with the same pin
+  fragment (a `self` or `files` certificate of its first listener): a
+  browser opens it with the password, `luk get` signs it as a `luk://`
+  URL. An expose with `auth.ssh` alone keeps `luk://`.
 
 ```yaml
 expose:
@@ -3504,7 +3516,8 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   uploads through `hardlink`, versions, aliases, claimed copies), and
   `URL` (the expose URL of the name; for a private file the `luk://` URL
   of the protect expose, and for a file of an `expose` with `auth.ssh`
-  the `luk://` URL of that expose, with the pin when the certificate
+  the `luk://` URL of that expose (`https://` with `auth.basic` too),
+  with the pin when the certificate
   file is readable) when the storage has an `expose` or a `protect`; `-` for an
   empty value. Aliases
   and claimed files are not listed. `--owner` keeps the files whose

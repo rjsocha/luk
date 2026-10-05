@@ -370,8 +370,9 @@ func pinOf(l *config.Listen) string {
 // owner (when set) received more than age (when set) before now.
 func storageFiles(cfg *config.Config, name string, l store.Local, owner string, age time.Duration, now time.Time) ([]storageFile, error) {
 	// Private files have the luk:// URL of the protect expose, public
-	// files of an expose with auth.ssh one too, pinned as lukd answers it
-	// when the certificate file is readable.
+	// files of an expose with auth.ssh one too (https with auth.basic
+	// too), pinned as lukd answers it when the certificate file is
+	// readable.
 	base, bl, exposed := cfg.PublicURL(name)
 	pbase, pl, protected := cfg.ProtectURL(name)
 	ppin, bpin := "", ""

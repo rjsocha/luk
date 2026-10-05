@@ -1883,8 +1883,9 @@ func TestDualAuthExposeConfig(t *testing.T) {
 	if x := c.Expose["vault"]; x.Auth.SSH == nil || len(x.Auth.Basic) != 1 || !x.Index {
 		t.Fatalf("vault %+v", x)
 	}
-	if base, _, ok := c.PublicURL("archive"); !ok || base != "luk://lukd.vm:8443/v/" {
-		t.Fatalf("public url %q %v", base, ok)
+	// Its URLs are https, still with the listener for the pin.
+	if base, l, ok := c.PublicURL("archive"); !ok || base != "https://lukd.vm:8443/v/" || l == nil || l.Name != "main" {
+		t.Fatalf("public url %q %v %v", base, l, ok)
 	}
 	if w := strings.Join(c.Warnings(), "\n"); strings.Contains(w, "vault") {
 		t.Fatalf("warnings %s", w)

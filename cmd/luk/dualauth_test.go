@@ -22,6 +22,10 @@ func TestGetDualAuth(t *testing.T) {
 	if code, out, errs := runLuk(t, "get", strings.Replace(v.url, "/v/#", "/v/db.sql.gz#", 1), "-k", v.key, "-c"); code != 0 || out != "dump" {
 		t.Fatalf("luk get: exit %d %q %q", code, out, errs)
 	}
+	// The https URL lukd hands out for such an expose, pin included.
+	if code, out, errs := runLuk(t, "get", strings.Replace(strings.Replace(v.url, "/v/#", "/v/db.sql.gz#", 1), "luk://", "https://", 1), "-k", v.key, "-c"); code != 0 || out != "dump" {
+		t.Fatalf("luk get https: exit %d %q %q", code, out, errs)
+	}
 	if out := mustRun(t, "get", v.url, "-k", v.key, "--json"); !strings.Contains(out, `"name": "db.sql.gz"`) {
 		t.Fatalf("luk listing:\n%s", out)
 	}

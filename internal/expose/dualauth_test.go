@@ -128,3 +128,57 @@ func TestDualAuthListing(t *testing.T) {
 		t.Errorf("signed sub listing: %d %s", w.Code, w.Body)
 	}
 }
+
+func TestDualAuthSigned(t *testing.T) {
+	e := newDualEnv(t)
+	e.put(t, "b/f", "x", store.Sidecar{})
+	e.put(t, "reveal", "secret", store.Sidecar{Client: wire.Meta{Portal: wire.PortalReveal}})
+	e.put(t, "o", "one", store.Sidecar{Client: wire.Meta{Once: true}})
+	// A directory name without its slash: the index redirect is for
+	// unsigned requests only, a signer gets 404 whoever it is.
+	for _, id := range []string{"alice", "bob"} {
+		if w := e.do(t, "GET", "/d/b", as(id)); w.Code != 404 {
+			t.Errorf("%s: /d/b %d", id, w.Code)
+		}
+	}
+	if w := e.do(t, "GET", "/d/b", basic(nil, "alice", "pw")); w.Code != 301 {
+		t.Errorf("basic: /d/b %d", w.Code)
+	}
+	for _, p := range []string{"/d/reveal/reveal", "/d/reveal/get", "/d/o/download"} {
+		if w := e.do(t, "POST", p, as("alice")); w.Code != 405 || w.Header().Get("Allow") != "GET, HEAD" {
+			t.Errorf("signed POST %s: %d %v", p, w.Code, w.Header())
+		}
+	}
+	if w := e.do(t, "GET", "/d/o", as("alice")); w.Code != 200 || w.Body.String() != "one" {
+		t.Errorf("once: %d %q", w.Code, w.Body)
+	}
+	if w := e.do(t, "GET", "/d/o", as("alice")); w.Code != 404 {
+		t.Errorf("once again: %d", w.Code)
+	}
+}
+
+func TestDualAuthBasicOnceAndLog(t *testing.T) {
+	e := newDualEnv(t)
+	e.put(t, "dl", "one", store.Sidecar{Client: wire.Meta{Once: true, Portal: wire.PortalDownload}})
+	e.put(t, "pub.txt", "hello", store.Sidecar{})
+	for _, m := range []string{"GET", "HEAD"} {
+		if w := e.do(t, m, "/d/dl", basic(nil, "alice", "pw")); w.Code != 200 {
+			t.Errorf("%s landing: %d", m, w.Code)
+		}
+	}
+	if w := e.do(t, "HEAD", "/d/pub.txt", basic(nil, "alice", "pw")); w.Code != 200 {
+		t.Errorf("head: %d", w.Code)
+	}
+	if strings.Contains(e.logs.String(), "download") {
+		t.Errorf("landing pages and HEAD logged as downloads:\n%s", e.logs)
+	}
+	if w := e.do(t, "POST", "/d/dl/download", basic(nil, "alice", "pw")); w.Code != 200 || w.Body.String() != "one" {
+		t.Errorf("download: %d %q", w.Code, w.Body)
+	}
+	if w := e.do(t, "POST", "/d/dl/download", basic(nil, "alice", "pw")); w.Code != 404 {
+		t.Errorf("download again: %d", w.Code)
+	}
+	if logs := e.logs.String(); strings.Count(logs, "auth=basic") != 1 || !strings.Contains(logs, "action=download") {
+		t.Errorf("logs:\n%s", logs)
+	}
+}

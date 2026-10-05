@@ -249,6 +249,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// A signed request has no portal actions, so only GET and HEAD.
+	if id != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		methodNotAllowed(w, "GET, HEAD")
+		return
+	}
 	// A directory URL lists the directory; the expose path without its
 	// slash goes to the slash form.
 	if rt.index && id == nil && (rel == "" || strings.HasSuffix(rel, "/")) {
@@ -279,11 +284,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		name, act, ok := cutAction(rel)
 		if !ok || id != nil {
-			h.missing(w, r, rt, rel, err)
+			h.missing(w, r, rt, rel, id, err)
 			return
 		}
 		if f, sc, err = rt.st.Open(name); err != nil {
-			h.missing(w, r, rt, rel, err)
+			h.missing(w, r, rt, rel, id, err)
 			return
 		}
 		if !portalAction(act, sc.Client.Portal) {
@@ -329,14 +334,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveFile(w, r, rt, rel, f, sc)
 		return
 	}
-	// The unsigned requests to an expose with auth.ssh are logged as its
-	// signed ones are.
-	if rt.ssh {
-		user, _, _ := r.BasicAuth()
-		h.log.Info("basic download", "remote", r.RemoteAddr, "method", r.Method, "auth", "basic", "user", user, "expose", rt.name, "id", sc.ID, "file", rel, "action", action)
+	// The unsigned requests to an expose with auth.ssh that send the
+	// content are logged as its signed downloads are.
+	logged := func() {
+		if rt.ssh && r.Method != http.MethodHead {
+			user, _, _ := r.BasicAuth()
+			h.log.Info("basic download", "remote", r.RemoteAddr, "method", r.Method, "auth", "basic", "user", user, "expose", rt.name, "id", sc.ID, "file", rel, "action", action)
+		}
 	}
 	switch {
 	case action == wire.PortalReveal:
+		logged()
 		// The page script asks for the raw text, the form for the page.
 		w.Header().Set("Vary", "Accept")
 		if prefersText(r) {
@@ -345,14 +353,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.reveal(w, r, rt, rel, f, sc)
 		}
 	case action == actionGet && sc.Client.Portal == wire.PortalReveal:
+		logged()
 		h.raw(w, r, rt, rel, f, sc)
 	case action == wire.PortalDownload || action == actionGet:
+		logged()
 		h.serveFile(w, r, rt, rel, f, sc)
 	case r.Method == http.MethodPost:
 		methodNotAllowed(w, "GET, HEAD")
 	case sc.Client.Portal == wire.PortalReveal || sc.Client.Portal == wire.PortalDownload:
 		h.landing(w, rel, sc)
 	default:
+		logged()
 		h.serveFile(w, r, rt, rel, f, sc)
 	}
 }
@@ -568,10 +579,10 @@ func (h *handler) serveFile(w http.ResponseWriter, r *http.Request, rt *route, r
 }
 
 // missing answers a name that does not open: on an expose with index a
-// directory with a listing redirects to its slash form, anything else is
-// 404.
-func (h *handler) missing(w http.ResponseWriter, r *http.Request, rt *route, rel string, err error) {
-	if rt.index && r.Method != http.MethodPost && rt.st.HasEntries(rel+"/", h.listed(rt)) {
+// directory with a listing redirects an unsigned request (id nil) to its
+// slash form, anything else is 404.
+func (h *handler) missing(w http.ResponseWriter, r *http.Request, rt *route, rel string, id *wire.Identity, err error) {
+	if rt.index && id == nil && r.Method != http.MethodPost && rt.st.HasEntries(rel+"/", h.listed(rt)) {
 		toDir(w, r)
 		return
 	}

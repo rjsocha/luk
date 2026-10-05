@@ -834,9 +834,9 @@ func (s *Server) downloadURL(cfg *config.Config, storage string, v store.Vars, a
 
 // fileURL is the URL of the stored name rel of storage: on its expose,
 // or for a private file (access set) on its protect expose. The URL of
-// an expose with auth.ssh has the scheme luk and, when the first listener
-// of that expose uses a certificate of mode self or files, its pin as the
-// fragment.
+// an expose with auth.ssh has the scheme luk (https with auth.basic too)
+// and, when the first listener of that expose uses a certificate of mode
+// self or files, its pin as the fragment.
 func (s *Server) fileURL(cfg *config.Config, storage, rel, access string) (string, bool) {
 	urlOf := cfg.PublicURL
 	if access != "" {

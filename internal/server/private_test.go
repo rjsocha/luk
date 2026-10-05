@@ -466,8 +466,8 @@ func newDualFixture(t *testing.T) *privateFixture {
 func TestDualAuthExposeGet(t *testing.T) {
 	f := newDualFixture(t)
 	link := f.drop(t, f.user, wire.Meta{File: "a.txt"}, "open")
-	if !strings.HasPrefix(link, "luk://secure.vm/v/") {
-		t.Fatalf("url %s", link)
+	if u := mustURL(t, link); u.Scheme != "https" || u.Host != "secure.vm" || !strings.HasPrefix(u.Path, "/v/") || u.Fragment != f.pin {
+		t.Fatalf("url %s, want https://secure.vm/v/<name>#%s", link, f.pin)
 	}
 	for name, r := range map[string]getReq{
 		"basic":  {link: link, unsigned: true, user: "dev", pass: "pw"},
@@ -478,9 +478,22 @@ func TestDualAuthExposeGet(t *testing.T) {
 		}
 	}
 	// A signed request never falls back to basic.
-	wantStatus(t, "unknown key with basic", f.get(t, getReq{signer: newSigner(t), link: link, user: "dev", pass: "pw"}), http.StatusUnauthorized)
+	rec := f.get(t, getReq{signer: newSigner(t), link: link, user: "dev", pass: "pw"})
+	if rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("unknown key with basic: %d %v", rec.Code, rec.Header())
+	}
+	// Some of the signature headers: a signed request, never basic.
+	hr := httptest.NewRequest("GET", "https://secure.vm"+mustURL(t, link).Path, nil)
+	hr.Host = "secure.vm"
+	hr.Header.Set(wire.HeaderNonce, wire.NewNonce())
+	hr.SetBasicAuth("dev", "pw")
+	rec = httptest.NewRecorder()
+	f.srv.Handler("127.0.0.1:443").ServeHTTP(rec, hr)
+	if rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("partial headers with basic: %d %v", rec.Code, rec.Header())
+	}
 	wantStatus(t, "not allowed with basic", f.get(t, getReq{signer: f.other, link: link, user: "dev", pass: "pw"}), http.StatusNotFound)
-	rec := f.get(t, getReq{link: link, unsigned: true})
+	rec = f.get(t, getReq{link: link, unsigned: true})
 	if rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") != `Basic realm="luk"` {
 		t.Errorf("no auth: %d %v", rec.Code, rec.Header())
 	}
