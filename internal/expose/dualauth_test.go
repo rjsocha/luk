@@ -1,7 +1,9 @@
 package expose
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -181,4 +183,43 @@ func TestDualAuthBasicOnceAndLog(t *testing.T) {
 	if logs := e.logs.String(); strings.Count(logs, "auth=basic") != 1 || !strings.Contains(logs, "action=download") {
 		t.Errorf("logs:\n%s", logs)
 	}
+}
+
+// A basic download is logged only when content goes out: not for a 304,
+// a 416 or a once file claimed by another request meanwhile.
+func TestDualAuthBasicLogOnlySent(t *testing.T) {
+	e := newDualEnv(t)
+	e.put(t, "pub.txt", "hello", store.Sidecar{SHA256: sumHex("hello")})
+	e.put(t, "o", "one", store.Sidecar{Client: wire.Meta{Once: true}})
+	if w := e.do(t, "GET", "/d/pub.txt", basic(map[string]string{"If-None-Match": `"` + sumHex("hello") + `"`}, "alice", "pw")); w.Code != 304 {
+		t.Errorf("if-none-match: %d", w.Code)
+	}
+	if w := e.do(t, "GET", "/d/pub.txt", basic(map[string]string{"Range": "bytes=100-"}, "alice", "pw")); w.Code != 416 {
+		t.Errorf("range: %d", w.Code)
+	}
+	orig := beforeClaim
+	defer func() { beforeClaim = orig }()
+	beforeClaim = func() {
+		beforeClaim = func() {}
+		if w := e.do(t, "GET", "/d/o", as("alice")); w.Code != 200 {
+			t.Errorf("other claim: %d", w.Code)
+		}
+	}
+	if w := e.do(t, "GET", "/d/o", basic(nil, "alice", "pw")); w.Code != 404 {
+		t.Errorf("claimed meanwhile: %d", w.Code)
+	}
+	if logs := e.logs.String(); strings.Contains(logs, "auth=basic") {
+		t.Errorf("logged without content:\n%s", logs)
+	}
+	if w := e.do(t, "GET", "/d/pub.txt", basic(map[string]string{"Range": "bytes=1-2"}, "alice", "pw")); w.Code != 206 || w.Body.String() != "el" {
+		t.Errorf("partial: %d %q", w.Code, w.Body)
+	}
+	if logs := e.logs.String(); strings.Count(logs, "auth=basic") != 1 {
+		t.Errorf("partial content not logged once:\n%s", logs)
+	}
+}
+
+func sumHex(s string) string {
+	b := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(b[:])
 }

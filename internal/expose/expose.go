@@ -335,11 +335,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The unsigned requests to an expose with auth.ssh that send the
-	// content are logged as its signed downloads are.
+	// content are logged as its signed downloads are, once the content
+	// goes out (200 or 206): not for a 304, a 416 or a once file claimed
+	// meanwhile.
 	logged := func() {
 		if rt.ssh && r.Method != http.MethodHead {
 			user, _, _ := r.BasicAuth()
-			h.log.Info("basic download", "remote", r.RemoteAddr, "method", r.Method, "auth", "basic", "user", user, "expose", rt.name, "id", sc.ID, "file", rel, "action", action)
+			w = &sendLog{ResponseWriter: w, log: func() {
+				h.log.Info("basic download", "remote", r.RemoteAddr, "method", r.Method, "auth", "basic", "user", user, "expose", rt.name, "id", sc.ID, "file", rel, "action", action)
+			}}
 		}
 	}
 	switch {
@@ -367,6 +371,40 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveFile(w, r, rt, rel, f, sc)
 	}
 }
+
+// sendLog calls log once when the answer starts with 200 or 206.
+type sendLog struct {
+	http.ResponseWriter
+	log  func()
+	done bool
+}
+
+func (s *sendLog) WriteHeader(code int) {
+	if !s.done {
+		s.done = true
+		if code == http.StatusOK || code == http.StatusPartialContent {
+			s.log()
+		}
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *sendLog) Write(p []byte) (int, error) {
+	if !s.done {
+		s.WriteHeader(http.StatusOK)
+	}
+	return s.ResponseWriter.Write(p)
+}
+
+// ReadFrom keeps the ReaderFrom (sendfile) of the writer for io.Copy.
+func (s *sendLog) ReadFrom(r io.Reader) (int64, error) {
+	if !s.done {
+		s.WriteHeader(http.StatusOK)
+	}
+	return io.Copy(s.ResponseWriter, r)
+}
+
+func (s *sendLog) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 // signed verifies the signature of a request to an expose with auth.ssh;
 // an unsigned one is left to auth.basic (nil, true) when the expose has

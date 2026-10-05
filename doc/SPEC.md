@@ -1798,7 +1798,8 @@ expose:
   would serve (not expired, not claimed, not private, not a reserved
   name, not under a nested expose), to an identity its `allow` admits.
   Private files (`access`) are 404 there; they belong to `protect`.
-- Answers: as for a private file (Wire format): no signature 404; a bad
+- Answers: as for a private file (Wire format): no signature 404 (401
+  with the basic challenge when the expose has `auth.basic` too); a bad
   signature or an unknown key 401; an identity not in `allow`, or a
   missing, expired, claimed or private file 404, the same answer in
   every case. Downloads carry the headers of a direct download plus
@@ -1826,7 +1827,9 @@ expose:
   uploads, and with `index` the HTML listing of the directory URLs
   (Expose); the `catalog` is not served. Its downloads are logged as
   `basic download` with `auth=basic` and the user when the content is
-  sent (not a landing page, not `HEAD`). A signed request takes only
+  sent: an answer `200` or `206` with the content (not a landing page,
+  not `HEAD`, not a `304`, `416` or `404`, so not a `once` file another
+  request claimed meanwhile). A signed request takes only
   `GET` and `HEAD` (405 otherwise) and never the index redirect of a
   directory name without its slash (404, as for a missing file). Private
   files are never served to an unsigned request (404), on this expose or
