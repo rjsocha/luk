@@ -57,8 +57,8 @@ type route struct {
 	// ssh marks an expose with auth.ssh: signed requests, judged by their
 	// signature alone; allow is its allow list. As a protect it serves
 	// private files only; as the expose of its storage (signed) it serves
-	// the public files to the identities of allow and answers the signed
-	// listing. With users too, an unsigned request is judged by auth.basic
+	// the public files and the catalog to the identities of allow and
+	// answers the signed listing. With users too, an unsigned request is judged by auth.basic
 	// and served as on an expose without auth.ssh.
 	ssh    bool
 	signed bool
@@ -275,7 +275,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.notFound(w, r)
 		return
 	}
-	if rel == store.CatalogName && rt.st.Catalog && !rt.ssh {
+	if rel == store.CatalogName && rt.st.Catalog && (!rt.ssh || rt.signed) {
+		if id != nil && !auth.Allowed(id, rt.allow) {
+			h.notFound(w, r)
+			return
+		}
 		h.serveCatalog(w, r, rt)
 		return
 	}
@@ -461,7 +465,10 @@ func (h *handler) serves(rt *route, id *wire.Identity, sc store.Sidecar) bool {
 	return rt.permits(id, sc) && !expired(sc, h.now())
 }
 
-// serveCatalog answers the storage catalog, never cached.
+// serveCatalog answers the storage catalog, never cached. Every expose of
+// the storage but a protect serves it: one with auth.ssh to the identities
+// of its allow list and, with auth.basic too, to the unsigned requests
+// auth.basic admits.
 func (h *handler) serveCatalog(w http.ResponseWriter, r *http.Request, rt *route) {
 	if r.Method == http.MethodPost {
 		methodNotAllowed(w, "GET, HEAD")

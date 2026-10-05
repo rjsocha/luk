@@ -98,13 +98,6 @@ func TestDualAuthPrivateAndPortal(t *testing.T) {
 	if w := e.do(t, "GET", "/d/reveal", as("alice")); w.Code != 200 || w.Body.String() != "secret" {
 		t.Errorf("signed: %d %q", w.Code, w.Body)
 	}
-	// No expose with auth.ssh serves the catalog.
-	if err := e.st.RebuildCatalog(); err != nil {
-		t.Fatal(err)
-	}
-	if w := e.do(t, "GET", "/d/"+store.CatalogName, basic(nil, "alice", "pw")); w.Code != 404 {
-		t.Errorf("catalog via basic: %d", w.Code)
-	}
 }
 
 func TestDualAuthListing(t *testing.T) {

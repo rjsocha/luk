@@ -36,6 +36,13 @@ func newVaultEnv(t *testing.T) *vaultEnv {
 // newVaultEnvAuth is the vault env with auth as the auth of the expose.
 func newVaultEnvAuth(t *testing.T, auth string) *vaultEnv {
 	t.Helper()
+	return newVaultEnvStorage(t, auth, false)
+}
+
+// newVaultEnvStorage is the vault env with auth as the auth of the expose
+// and, with catalog, a storage catalog.
+func newVaultEnvStorage(t *testing.T, auth string, catalog bool) *vaultEnv {
+	t.Helper()
 	tempConfig(t)
 	addr, saddr := freeAddr(t), freeAddr(t)
 	e := &privateEnv{lukdEnv: &lukdEnv{base: "http://" + addr}, root: t.TempDir(), secure: "https://" + saddr}
@@ -59,12 +66,12 @@ endpoint:
 pipeline:
   drop: {endpoint: [drop], steps: [{store: vault}]}
 storage:
-  vault: {type: local, base: s/vault, path: "{{ .File }}", expose: vault}
+  vault: {type: local, base: s/vault, path: "{{ .File }}", expose: vault, catalog: %t}
 expose:
   vault: {listen: secure, path: /v/, index: %t, auth: %s}
-`, e.root, addr, addr, saddr, saddr, pub, otherPub, strings.Contains(auth, "basic"), auth)
+`, e.root, addr, addr, saddr, saddr, pub, otherPub, catalog, strings.Contains(auth, "basic"), auth)
 	startLukd(t, filepath.Join(t.TempDir(), "config.yaml"), text, saddr)
-	return &vaultEnv{privateEnv: e, st: store.Local{Base: filepath.Join(e.root, "s/vault"), Conflict: "replace"},
+	return &vaultEnv{privateEnv: e, st: store.Local{Base: filepath.Join(e.root, "s/vault"), Conflict: "replace", Catalog: catalog},
 		url: "luk://" + saddr + "/v/#" + e.pin}
 }
 
@@ -311,5 +318,32 @@ func TestGetDirPartialFailure(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(dest, "gone")); err == nil {
 		t.Fatal("gone written")
+	}
+}
+
+func TestGetCatalog(t *testing.T) {
+	v := newVaultEnvStorage(t, "{ssh: {allow: [robert.socha]}}", true)
+	v.put(t, "db.sql.gz", "dump", "2026-10-03T10:00:00Z")
+	own := filepath.Join(t.TempDir(), "own")
+	os.WriteFile(own, []byte("mine"), 0o600)
+	if _, err := v.st.Put(own, "own", store.Sidecar{ID: "own", SHA256: sumOf("mine"), Size: 4, Client: wire.Meta{Access: wire.AccessAny}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.st.RebuildCatalog(); err != nil {
+		t.Fatal(err)
+	}
+	u := v.in(store.CatalogName)
+	code, out, errs := runLuk(t, "get", u, "-k", v.key, "-c")
+	var c struct {
+		Files []struct{ Name string } `json:"files"`
+	}
+	if code != 0 || json.Unmarshal([]byte(out), &c) != nil || len(c.Files) != 1 || c.Files[0].Name != "db.sql.gz" {
+		t.Fatalf("catalog: exit %d %q %q", code, out, errs)
+	}
+	if out := mustRun(t, "get", u, "-k", v.key, "--head"); !strings.Contains(out, "content_type: application/json\n") {
+		t.Fatalf("head:\n%s", out)
+	}
+	if code, _, errs := runLuk(t, "get", u, "-k", v.other, "-c"); code != 2 || !strings.Contains(errs, "404") {
+		t.Fatalf("other: exit %d %q", code, errs)
 	}
 }

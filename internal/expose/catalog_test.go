@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"luk/internal/store"
+	"luk/internal/wire"
 )
 
 func newCatalogEnv(t *testing.T) *env {
@@ -142,5 +143,87 @@ func TestExpiryRebuildsCatalog(t *testing.T) {
 	w := e.do(t, "GET", "/d/catalog.json", nil)
 	if strings.Contains(w.Body.String(), `"gone"`) || !strings.Contains(w.Body.String(), `"kept"`) {
 		t.Fatalf("catalog after expiry %s", w.Body)
+	}
+}
+
+// catalogNames GETs the catalog at p with h and returns the names it lists.
+func (e *env) catalogNames(t *testing.T, p string, h map[string]string) string {
+	t.Helper()
+	w := e.do(t, "GET", p, h)
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/json" || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("%s: %d %v %s", p, w.Code, w.Header(), w.Body)
+	}
+	var c struct {
+		Files []struct{ Name string } `json:"files"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
+		t.Fatalf("%s: %v", p, err)
+	}
+	var out []string
+	for _, f := range c.Files {
+		out = append(out, f.Name)
+	}
+	return strings.Join(out, " ")
+}
+
+// fillCatalog stores a public and two private files and rebuilds the
+// catalog.
+func (e *env) fillCatalog(t *testing.T) {
+	t.Helper()
+	e.put(t, "pub.txt", "hello", store.Sidecar{})
+	e.put(t, "own", "mine", store.Sidecar{Client: wire.Meta{Access: wire.AccessPrivate}, OwnerKey: "key:alice"})
+	e.put(t, "any", "shared", store.Sidecar{Client: wire.Meta{Access: wire.AccessAny}})
+	if err := e.st.RebuildCatalog(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCatalogSigned(t *testing.T) {
+	e := newSignedEnv(t)
+	e.cfg.Storage["drop"].Catalog, e.st.Catalog = true, true
+	e.h = New(e.cfg, e.log(), func() time.Time { return e.now }, "l", fakeVerify)
+	e.fillCatalog(t)
+	if got := e.catalogNames(t, "/d/"+store.CatalogName, as("alice")); got != "pub.txt" {
+		t.Errorf("signed catalog: %q", got)
+	}
+	if w := e.do(t, "HEAD", "/d/"+store.CatalogName, as("alice")); w.Code != 200 || w.Body.Len() != 0 {
+		t.Errorf("signed head: %d", w.Code)
+	}
+	for name, h := range map[string]map[string]string{"unsigned": nil, "not allowed": as("bob")} {
+		if w := e.do(t, "GET", "/d/"+store.CatalogName, h); w.Code != 404 {
+			t.Errorf("%s: %d", name, w.Code)
+		}
+	}
+	if w := e.do(t, "GET", "/d/"+store.CatalogName, as("bad")); w.Code != 401 {
+		t.Errorf("bad signature: %d", w.Code)
+	}
+	if w := e.do(t, "POST", "/d/"+store.CatalogName, as("alice")); w.Code != 405 {
+		t.Errorf("signed post: %d", w.Code)
+	}
+	// A protect never serves the catalog.
+	if w := e.do(t, "GET", "/s/"+store.CatalogName, as("alice")); w.Code != 404 {
+		t.Errorf("catalog on the protect: %d", w.Code)
+	}
+}
+
+func TestCatalogDualAuth(t *testing.T) {
+	e := newDualEnv(t)
+	e.fillCatalog(t)
+	if got := e.catalogNames(t, "/d/"+store.CatalogName, basic(nil, "alice", "pw")); got != "pub.txt" {
+		t.Errorf("catalog via basic: %q", got)
+	}
+	if got := e.catalogNames(t, "/d/"+store.CatalogName, as("alice")); got != "pub.txt" {
+		t.Errorf("signed catalog: %q", got)
+	}
+	for name, h := range map[string]map[string]string{"none": nil, "wrong password": basic(nil, "alice", "bad")} {
+		if w := e.do(t, "GET", "/d/"+store.CatalogName, h); w.Code != 401 || w.Header().Get("WWW-Authenticate") != `Basic realm="luk"` {
+			t.Errorf("%s: %d %v", name, w.Code, w.Header())
+		}
+	}
+	if w := e.do(t, "GET", "/d/"+store.CatalogName, basic(as("bob"), "alice", "pw")); w.Code != 404 {
+		t.Errorf("signer not allowed with basic: %d", w.Code)
+	}
+	if w := e.do(t, "GET", "/s/"+store.CatalogName, basic(nil, "alice", "pw")); w.Code != 404 {
+		t.Errorf("catalog via basic on the protect: %d", w.Code)
 	}
 }

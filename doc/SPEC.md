@@ -1677,7 +1677,8 @@ expose:
   even with the exact name, and also through an alias (an alias has the
   sidecar of its target). A protect expose never serves a public file
   (404), no request authenticated by `auth.basic` gets a private file
-  (404), and no expose with `auth.ssh` serves the catalog. Private files are never listed in the
+  (404), and a protect expose never serves the catalog (the storage
+  `expose` with `auth.ssh` does, see Signed expose). Private files are never listed in the
   catalog, never the target of an alias and never deduplicated by
   `dedup` (their space is shared through `hardlink` like any file's).
 - The storage keeps the mode for every copy: a private upload stored into
@@ -1792,8 +1793,12 @@ expose:
   public URL, as for `protect` (`luk://` URLs mean https); `index`
   without `auth.basic` stays refused (`expose <n>: index excludes
   auth.ssh alone`): the signed listing below is the listing of such an
-  expose. A `catalog` on its storage is not served, also with
-  `auth.basic` (no `lukd check` warning either).
+  expose. A `catalog` on its storage is served at `<url>catalog.json`
+  to the identities its `allow` admits (and with `auth.basic` too to
+  the unsigned requests it admits), with the answers of a signed file
+  request and the headers of the catalog (Phase 4), not logged as a
+  download; the `lukd check` warning for a catalog without auth does
+  not apply.
 - Files: the expose serves exactly what a public expose of the storage
   would serve (not expired, not claimed, not private, not a reserved
   name, not under a nested expose), to an identity its `allow` admits.
@@ -1825,7 +1830,7 @@ expose:
   `auth.basic` only: 401 with the basic challenge without the right
   password, then the files, the portal pages and actions of portal
   uploads, and with `index` the HTML listing of the directory URLs
-  (Expose); the `catalog` is not served. Its downloads are logged as
+  (Expose), and the `catalog`. Its downloads are logged as
   `basic download` with `auth=basic` and the user when the content is
   sent: an answer `200` or `206` with the content (not a landing page,
   not `HEAD`, not a `304`, `416` or `404`, so not a `once` file another
@@ -3494,7 +3499,9 @@ purpose.
   and their `.meta.json`, rebuilt after every `store` and every cleanup:
   server fields at the top level (`name`, `size`, `sha256`, `created`,
   `tags`), pipeline meta nested under `meta`. The sender is not listed:
-  the catalog is public wherever its expose is.
+  the catalog is served to whoever its expose serves the public files
+  (also signed requests on an expose with `auth.ssh`, see Signed
+  expose); a protect expose never serves it.
 - `alias` in a file's meta: lukd keeps a hardlink `<alias>` to the newest
   file declaring it (by acceptance order, see Acceptance order), and a `latest` map (`alias -> name`) in the catalog.
   The alias goes when its target goes.
@@ -5504,7 +5511,7 @@ disk. Test on lukd.vm / luk.vm.
   the alias moves to the newest remaining file declaring it, or goes too.
 - Details:
   - The catalog file is `<base>/.db/catalog.json` (outside the data
-    tree); expose maps `<url>catalog.json` to it and
+    tree); the storage `expose` (never a `protect`) maps `<url>catalog.json` to it and
     serves it with `Content-Type: application/json`,
     `Cache-Control: no-store` and `nosniff`. Without `catalog` the name
     is an ordinary file name.
