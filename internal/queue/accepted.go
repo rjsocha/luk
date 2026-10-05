@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -42,6 +43,10 @@ func MarkPath(root string) string { return filepath.Join(root, "accepted.json") 
 // markWindow is how far past the value handed out the persisted mark is
 // moved, so the mark is written about once per window, not per upload.
 var markWindow = time.Minute
+
+// maxMarkAhead is how far past the wall clock a stored mark may be before
+// it is taken for corruption.
+const maxMarkAhead = 100 * 365 * 24 * time.Hour
 
 // Accepted hands out acceptance orders that never go backwards while the
 // process runs: the wall clock read once at the start plus the time
@@ -140,6 +145,13 @@ func readMark(path string) (int64, error) {
 	var m markFile
 	if err := json.Unmarshal(b, &m); err != nil {
 		return 0, err
+	}
+	// A mark that no earlier process could have written (negative, beyond
+	// any plausible clock, or so large that moving it past the window
+	// overflows) would send the orders backwards; fail closed.
+	if m.Mark < 0 || m.Mark > math.MaxInt64-int64(markWindow)-1 ||
+		m.Mark > time.Now().Add(maxMarkAhead).UnixNano() {
+		return 0, fmt.Errorf("implausible mark %d", m.Mark)
 	}
 	return m.Mark, nil
 }

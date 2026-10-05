@@ -233,7 +233,9 @@ func TestOpRedial(t *testing.T) {
 // newer attempt, however often, after the usual wait.
 func TestPartOlderAttemptIgnored(t *testing.T) {
 	srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+	old := partBackoff
 	partBackoff = []time.Duration{50 * time.Millisecond}
+	t.Cleanup(func() { partBackoff = old })
 	srv.PartAnswer = func(n channel.Nonce, _ []byte) *chantest.Answer {
 		if n.Number == 1 && n.Attempt <= partAttempts {
 			return &chantest.Answer{Status: http.StatusConflict, Body: wire.ErrorResponse{Error: "older attempt"}}
