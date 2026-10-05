@@ -117,6 +117,9 @@ type Config struct {
 	// IdentityPath is the identity key file next to the main file; empty
 	// after Parse.
 	IdentityPath string `yaml:"-"`
+	// PasswordDir is the password.d directory next to the main file;
+	// empty after Parse.
+	PasswordDir string `yaml:"-"`
 }
 
 // Log configures the lukd log: Level is debug, info (the default), warn or
@@ -827,11 +830,42 @@ type Step struct {
 // Encrypt encrypts every file of the set to the recipients: WKD addresses
 // are looked up through the Web Key Directory, Key addresses in gpg.keys.
 // Strict fails the step when any recipient is unusable. Addresses are
-// lowercased by validation.
+// lowercased by validation. Insecure adds password based encryption.
 type Encrypt struct {
-	WKD    StringList `yaml:"wkd"`
-	Key    StringList `yaml:"key"`
-	Strict bool       `yaml:"strict"`
+	WKD      StringList `yaml:"wkd"`
+	Key      StringList `yaml:"key"`
+	Strict   bool       `yaml:"strict"`
+	Insecure *Insecure  `yaml:"insecure"`
+}
+
+// Insecure is the password based encryption of an encrypt step, weaker
+// than the recipients' keys: the passwords sit in password.d on the
+// server. Symmetric names passwords that also decrypt the .gpg file;
+// OpenSSL writes the matching files in the openssl enc format instead.
+type Insecure struct {
+	Symmetric StringList `yaml:"symmetric"`
+	OpenSSL   *OpenSSL   `yaml:"openssl"`
+}
+
+// OpenSSL encrypts the files whose name (as it enters the step) matches
+// one of the Files globs (path.Match) with the password Key, as
+// <name>.enc in the format of openssl enc -aes-256-cbc -pbkdf2.
+type OpenSSL struct {
+	Key   string     `yaml:"key"`
+	Files StringList `yaml:"files"`
+}
+
+// Match reports whether the file name goes to the openssl format.
+func (o *OpenSSL) Match(name string) bool {
+	if o == nil {
+		return false
+	}
+	for _, g := range o.Files {
+		if ok, _ := path.Match(g, name); ok {
+			return true
+		}
+	}
+	return false
 }
 
 type Storage struct {
@@ -2380,6 +2414,64 @@ func (c *Config) validateEncrypt(bad func(string, ...any), who string, e *Encryp
 			seen[addr] = l.name
 		}
 	}
+	if in := e.Insecure; in != nil {
+		validateInsecure(bad, who+": insecure", in)
+	}
+}
+
+func validateInsecure(bad func(string, ...any), who string, in *Insecure) {
+	if len(in.Symmetric) == 0 && in.OpenSSL == nil {
+		bad("%s: needs symmetric or openssl", who)
+	}
+	seen := map[string]bool{}
+	for _, n := range in.Symmetric {
+		if !ValidPasswordName(n) {
+			bad("%s: symmetric %q: invalid password name", who, n)
+		} else if seen[n] {
+			bad("%s: symmetric %s is listed twice", who, n)
+		}
+		seen[n] = true
+	}
+	o := in.OpenSSL
+	if o == nil {
+		return
+	}
+	switch {
+	case o.Key == "":
+		bad("%s: openssl needs key", who)
+	case !ValidPasswordName(o.Key):
+		bad("%s: openssl key %q: invalid password name", who, o.Key)
+	}
+	if len(o.Files) == 0 {
+		bad("%s: openssl needs files", who)
+	}
+	for _, g := range o.Files {
+		// A file name of the set never holds a slash.
+		if _, err := path.Match(g, ""); g == "" || err != nil || strings.Contains(g, "/") {
+			bad("%s: openssl files %q: invalid glob", who, g)
+		}
+	}
+}
+
+// PasswordNames lists the passwords the encrypt steps name, sorted, each
+// once.
+func (c *Config) PasswordNames() []string {
+	seen := map[string]bool{}
+	for _, p := range c.Pipeline {
+		for _, s := range p.Steps {
+			if s.Encrypt == nil || s.Encrypt.Insecure == nil {
+				continue
+			}
+			in := s.Encrypt.Insecure
+			for _, n := range in.Symmetric {
+				seen[n] = true
+			}
+			if in.OpenSSL != nil {
+				seen[in.OpenSSL.Key] = true
+			}
+		}
+	}
+	return sortedKeys(seen)
 }
 
 // validAddress accepts a bare local@domain address that is safe as a file
@@ -2491,6 +2583,10 @@ func ValidJobName(n string) bool { return len(n) <= maxJobName && jobName.MatchS
 // not starting with a dot or a dash. lukd run refuses a work directory of
 // any other pipeline name.
 func ValidPipelineName(n string) bool { return pipelineName.MatchString(n) }
+
+// ValidPasswordName reports whether n may name a password: the file of it
+// in password.d follows the name rule of a job file in run.d.
+func ValidPasswordName(n string) bool { return ValidJobName(n) }
 
 // Warnings lists valid but suspicious settings.
 func (c *Config) Warnings() []string {

@@ -23,6 +23,9 @@ const (
 	SSHDir = "ssh.d"
 	// GPGDir, next to the main file, is the default gpg.keys.
 	GPGDir = "gpg.d"
+	// PasswordDir, next to the main file, holds one file per password of
+	// the insecure encryption (see ReadPassword).
+	PasswordDir = "password.d"
 	// IdentityFile, next to the main file, is the identity key of lukd (see
 	// lukd key).
 	IdentityFile = "identity.key"
@@ -89,6 +92,9 @@ func Load(p string) (*Config, error) {
 	}
 	c.Path = p
 	c.IdentityPath = IdentityPath(p)
+	if abs, err := filepath.Abs(filepath.Join(dir, PasswordDir)); err == nil {
+		c.PasswordDir = abs
+	}
 	c.Files = append([]string{p}, snippets...)
 	for _, k := range c.Auth.Keys {
 		if k.File != "" {
