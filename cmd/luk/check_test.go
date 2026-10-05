@@ -3,11 +3,26 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"luk/internal/channel"
+	"luk/internal/client"
 )
 
-const goodPin = "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+// goodPin and keyPin are channel pins in words and key form; tlsPin is a
+// certificate pin, which an endpoint refuses.
+const (
+	goodPin = "lusab-babad-gutih-tugad-hajop-kizof"
+	keyPin  = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	tlsPin  = "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+)
+
+// sameEndpoint reports whether two endpoint entries are the same.
+func sameEndpoint(a, b client.EndpointConfig) bool {
+	return a.URL == b.URL && a.Key == b.Key && slices.Equal(a.Pins, b.Pins)
+}
 
 func writeFile(t *testing.T, body string) string {
 	t.Helper()
@@ -28,7 +43,7 @@ func TestCheckFile(t *testing.T) {
 	ep := func(url, pin string) string {
 		s := "endpoint:\n  a:\n    url: " + url + "\n"
 		if pin != "" {
-			s += "    pin: " + pin + "\n"
+			s += "    pin: [" + pin + "]\n"
 		}
 		return s
 	}
@@ -41,10 +56,10 @@ func TestCheckFile(t *testing.T) {
 		{"bad url", ep("ftp://h/x", ""), "invalid URL"},
 		{"no host", ep("https:///x", ""), "invalid URL"},
 		{"fragment", ep("https://h/x#"+goodPin, ""), "fragment"},
-		{"pin http", ep("http://h/x", goodPin), "https"},
-		{"pin prefix", ep("https://h/x", "sha1//AAAA"), "sha256//"},
-		{"pin base64", ep("https://h/x", "sha256//!!!"), "32 bytes"},
-		{"pin length", ep("https://h/x", "sha256//AAAA"), "32 bytes"},
+		{"pin http", ep("http://h/x", goodPin+", "+keyPin), ""},
+		{"pin form", ep("https://h/x", "sha1//AAAA"), "neither a 43-character key nor 6 words"},
+		{"pin word", ep("https://h/x", "lusab-babad-gutih-tugad-hajop-kizox"), "not a proquint word"},
+		{"pin tls", ep("https://h/x", tlsPin), channel.ErrTLSPin.Error()},
 		{"default missing", "default: nope\n" + ep("http://h/x", ""), `default "nope"`},
 		{"relative key", "key: k.pub\n", "absolute path"},
 		{"fingerprint key", "key: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n" + ep("http://h/x", "") + "    key: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s\n", ""},
@@ -114,26 +129,62 @@ func TestCheckLayers(t *testing.T) {
 
 func TestEndpointAddSplitsPinFragment(t *testing.T) {
 	up := tempConfig(t)
-	other := "sha256//BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
-	for i, frag := range []string{"#" + goodPin, "#pin=" + goodPin} {
-		name := string(rune('a' + i))
-		mustRun(t, "config", "endpoint", "add", "-e", name, "--url", "https://h:8443/x"+frag)
-	}
+	mustRun(t, "config", "endpoint", "add", "-e", "a", "--url", "https://h:8443/x#"+goodPin)
+	mustRun(t, "config", "endpoint", "add", "-e", "b", "--url", "http://h:8080/x#"+goodPin+","+keyPin)
 	mustRun(t, "config", "endpoint", "add", "-e", "c", "--url", "https://h/x#"+goodPin, "--pin", goodPin)
+	mustRun(t, "config", "endpoint", "add", "-e", "d", "--url", "https://h/x", "--pin", goodPin, "--pin", keyPin)
 	data, _ := os.ReadFile(up)
-	if strings.Contains(string(data), "#") || strings.Count(string(data), "pin: "+goodPin) != 3 {
-		t.Fatalf("fragment stored:\n%s", data)
+	c, err := client.LoadConfig(up)
+	if err != nil || strings.Contains(string(data), "#") {
+		t.Fatalf("%v, fragment stored:\n%s", err, data)
+	}
+	for n, want := range map[string][]string{"a": {goodPin}, "b": {goodPin, keyPin}, "c": {goodPin}, "d": {goodPin, keyPin}} {
+		if !slices.Equal(c.Endpoint[n].Pins, want) {
+			t.Errorf("%s: pins %v, want %v", n, c.Endpoint[n].Pins, want)
+		}
 	}
 	if code, _, errs := runLuk(t, "config", "check", "--file", up); code != 0 {
 		t.Errorf("check: %d %q", code, errs)
 	}
-	for _, args := range [][]string{
-		{"--url", "https://h/x#" + goodPin, "--pin", other},
-		{"--endpoint", "https://h/x#frag"},
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--url", "https://h/x#" + goodPin, "--pin", keyPin}, "pin given twice"},
+		{[]string{"--url", "https://h/x#" + tlsPin}, channel.ErrTLSPin.Error()},
+		{[]string{"--url", "https://h/x#pin=" + goodPin}, "pin"},
+		{[]string{"--url", "https://h/x", "--pin", tlsPin}, channel.ErrTLSPin.Error()},
+		{[]string{"--endpoint", "https://h/x#frag"}, ""},
 	} {
-		code, _, errs := runLuk(t, append([]string{"config", "endpoint", "add", "-e", "z"}, args...)...)
-		if code != 1 || errs == "" {
-			t.Errorf("%v: exit %d %q", args, code, errs)
+		code, _, errs := runLuk(t, append([]string{"config", "endpoint", "add", "-e", "z"}, c.args...)...)
+		if code != 1 || errs == "" || !strings.Contains(errs, c.want) {
+			t.Errorf("%v: exit %d %q", c.args, code, errs)
 		}
+	}
+}
+
+func TestEndpointLsPinFormat(t *testing.T) {
+	tempConfig(t)
+	k, err := channel.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, words := channel.KeyString(k.Public), channel.Words(k.Public)
+	mustRun(t, "config", "endpoint", "add", "-e", "a", "--url", "https://h/a", "--pin", key, "--pin", goodPin)
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, words + "," + goodPin},
+		{[]string{"--pin-format", "words"}, words + "," + goodPin},
+		{[]string{"--pin-format", "key"}, key + "," + goodPin},
+	} {
+		out := mustRun(t, append([]string{"config", "endpoint", "ls"}, c.args...)...)
+		if !strings.Contains(out, " "+c.want+" ") {
+			t.Errorf("%v:\n%s", c.args, out)
+		}
+	}
+	if code, _, errs := runLuk(t, "config", "endpoint", "ls", "--pin-format", "sha256"); code != 1 || !strings.Contains(errs, "--pin-format") {
+		t.Errorf("bad format: exit %d %q", code, errs)
 	}
 }

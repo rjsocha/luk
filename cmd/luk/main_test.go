@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -15,12 +16,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
 
+	"luk/internal/channel"
 	"luk/internal/client"
 	"luk/internal/tlsself"
 	"luk/internal/wire"
@@ -109,7 +112,7 @@ func TestConfigRoundTrip(t *testing.T) {
 		}
 		return out
 	}
-	ok("config", "endpoint", "add", "-e", "drop", "--url", "https://h:8443/drop", "--pin", "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	ok("config", "endpoint", "add", "-e", "drop", "--url", "https://h:8443/drop", "--pin", goodPin)
 	ok("config", "endpoint", "add", "-e", "bk", "--url", "http://h/bk")
 	ok("config", "default", "-e", "drop")
 	ok("config", "key", "-k", "~/.ssh/id.pub")
@@ -117,7 +120,7 @@ func TestConfigRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Default != "drop" || c.Key != "~/.ssh/id.pub" || c.Endpoint["drop"].Pin != "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" || c.Endpoint["bk"].URL != "http://h/bk" {
+	if c.Default != "drop" || c.Key != "~/.ssh/id.pub" || !slices.Equal(c.Endpoint["drop"].Pins, []string{goodPin}) || c.Endpoint["bk"].URL != "http://h/bk" {
 		t.Fatalf("saved %+v", c)
 	}
 	out := ok("config", "show")
@@ -141,6 +144,7 @@ func TestConfigErrorsExitOne(t *testing.T) {
 	for _, args := range [][]string{
 		{"config", "endpoint", "add", "-e", "a", "--url", "ftp://h"},
 		{"config", "endpoint", "add", "-e", "a", "--url", "http://h", "--pin", "sha256//x"},
+		{"config", "endpoint", "add", "-e", "a", "--url", "https://h", "--pin", tlsPin},
 		{"config", "endpoint", "add", "-e", "a", "--url", "https://h", "--pin", "nope"},
 		{"config", "endpoint", "rm", "-e", "a"},
 		{"config", "default", "--endpoint", "a"},
@@ -571,7 +575,7 @@ func TestConfigMalformedLayerNamesFile(t *testing.T) {
 func TestConfigShowSources(t *testing.T) {
 	up := tempConfig(t)
 	gp := globalConfig(t)
-	mustRun(t, "config", "--global", "endpoint", "add", "-e", "g", "--url", "https://g/x", "--pin", "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	mustRun(t, "config", "--global", "endpoint", "add", "-e", "g", "--url", "https://g/x", "--pin", goodPin, "--pin", keyPin)
 	mustRun(t, "config", "--global", "key", "-k", "gk.pub")
 	mustRun(t, "config", "endpoint", "add", "-e", "u", "--url", "http://u/x")
 	mustRun(t, "config", "default", "-e", "u")
@@ -579,7 +583,7 @@ func TestConfigShowSources(t *testing.T) {
 	for _, want := range []string{
 		"# global: " + gp + " (exists)", "# user:   " + up + " (exists)",
 		"default: u  # user", "key: gk.pub  # global",
-		"  g:  # global", "    pin: sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "  u:  # user",
+		"  g:  # global", "    pin: " + goodPin + "," + keyPin + "\n", "  u:  # user",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
@@ -658,7 +662,7 @@ func twoLayers(t *testing.T) {
 endpoint:
   zeta:
     url: https://g.example/zeta
-    pin: sha256//gpin
+    pin: [`+goodPin+`]
     key: SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
   shared:
     url: http://g.example/shared
@@ -668,8 +672,18 @@ endpoint:
     url: http://u.example/alpha
   shared:
     url: https://u.example/shared
-    pin: sha256//upin
+    pin: [`+keyPin+`]
 `)
+}
+
+// keyWords is keyPin in words form.
+func keyWords(t *testing.T) string {
+	t.Helper()
+	k, err := base64.RawURLEncoding.DecodeString(keyPin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return channel.Words(k)
 }
 
 func TestEndpointLs(t *testing.T) {
@@ -680,8 +694,8 @@ func TestEndpointLs(t *testing.T) {
 	}
 	want := [][]string{
 		{"alpha", "http://u.example/alpha", "-", "-", "user"},
-		{"shared", "https://u.example/shared", "pin", "-", "user"},
-		{"zeta", "https://g.example/zeta", "pin", "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "global", "*"},
+		{"shared", "https://u.example/shared", keyWords(t), "-", "user"},
+		{"zeta", "https://g.example/zeta", goodPin, "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "global", "*"},
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != len(want) {
@@ -732,7 +746,7 @@ func TestEndpointShow(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	for _, w := range []string{"name:    zeta", "url:     https://g.example/zeta\n         https://g.example/zeta#sha256//gpin\npin:     sha256//gpin", "key:     SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "source:  global", "default: true"} {
+	for _, w := range []string{"name:    zeta", "url:     https://g.example/zeta\n         https://g.example/zeta#" + goodPin + "\npin:     " + goodPin, "key:     SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "source:  global", "default: true"} {
 		if !strings.Contains(out, w) {
 			t.Errorf("missing %q:\n%s", w, out)
 		}
@@ -747,7 +761,7 @@ func TestEndpointShow(t *testing.T) {
 		}
 	}
 	_, out, _ = runLuk(t, "config", "endpoint", "show", "-e", "shared")
-	for _, w := range []string{"url:     https://u.example/shared", "pin:     sha256//upin", "source:  user"} {
+	for _, w := range []string{"url:     https://u.example/shared", "pin:     " + keyPin, "source:  user"} {
 		if !strings.Contains(out, w) {
 			t.Errorf("override: missing %q:\n%s", w, out)
 		}

@@ -9,12 +9,14 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,6 +24,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"luk/internal/channel"
 	"luk/internal/config"
 	"luk/internal/server"
 	"luk/internal/tlsself"
@@ -39,6 +42,12 @@ func newSigner(t *testing.T) ssh.Signer {
 }
 
 func testHandler(t *testing.T, user ssh.PublicKey) http.Handler {
+	t.Helper()
+	return newLukd(t, user).Handler("127.0.0.1:0")
+}
+
+// newLukd is the lukd of the client tests, without an identity key.
+func newLukd(t *testing.T, user ssh.PublicKey) *server.Server {
 	t.Helper()
 	root := t.TempDir()
 	cfg, err := config.Parse([]byte(`
@@ -66,8 +75,7 @@ expose:
 			t.Fatal(err)
 		}
 	}
-	srv := server.New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	return srv.Handler("127.0.0.1:0")
+	return server.New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func testServer(t *testing.T, user ssh.PublicKey, tlsOn bool) (*httptest.Server, string) {
@@ -189,18 +197,25 @@ func TestPinnedHTTP2(t *testing.T) {
 }
 
 func TestResolve(t *testing.T) {
-	c := &Config{Default: "drop", Endpoint: map[string]EndpointConfig{"drop": {URL: "https://h/drop", Pin: "sha256//p"}}}
+	c := &Config{Default: "drop", Endpoint: map[string]EndpointConfig{
+		"drop": {URL: "https://h/drop", Pins: []string{testWords}},
+		"bad":  {URL: "https://h/bad", Pins: []string{"sha256//p"}},
+	}}
 	u, p, err := c.Resolve("")
-	if err != nil || u != "https://h/drop" || p != "sha256//p" {
+	if err != nil || u != "https://h/drop" || !slices.Equal(p, []string{testWords}) {
 		t.Fatalf("%s %s %v", u, p, err)
 	}
-	u, p, err = c.Resolve("https://h:8443/backup#pin=sha256//ab+c/d=")
-	if err != nil || u != "https://h:8443/backup" || p != "sha256//ab+c/d=" {
+	u, p, err = c.Resolve("http://h:8080/backup#" + testKey + "," + testWords)
+	if err != nil || u != "http://h:8080/backup" || !slices.Equal(p, []string{testKey, testWords}) {
 		t.Fatalf("%s %s %v", u, p, err)
 	}
-	u, p, err = c.Resolve("https://h:8443/backup#sha256//ab+c/d=")
-	if err != nil || u != "https://h:8443/backup" || p != "sha256//ab+c/d=" {
-		t.Fatalf("short form: %s %s %v", u, p, err)
+	for _, arg := range []string{"https://h:8443/backup#sha256//ab+c/d=", "https://h:8443/backup#pin=sha256//ab+c/d=", "bad"} {
+		if _, _, err := c.Resolve(arg); !errors.Is(err, channel.ErrTLSPin) && !strings.Contains(fmt.Sprint(err), "pin") {
+			t.Fatalf("%s: %v", arg, err)
+		}
+	}
+	if _, _, err := c.Resolve("https://h:8443/backup#sha256//x"); !errors.Is(err, channel.ErrTLSPin) {
+		t.Fatalf("sha256 fragment: %v", err)
 	}
 	if _, _, err := c.Resolve("https://h:8443/backup#md5//x"); err == nil {
 		t.Fatal("fragment that is not a pin accepted")

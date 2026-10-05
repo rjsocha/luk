@@ -286,7 +286,7 @@ func TestEndpointKeyOverlay(t *testing.T) {
 	mustRun(t, "config", "--global", "endpoint", "add", "-e", "plain", "--url", "http://g/plain")
 	mustRun(t, "config", "endpoint", "key", "-e", "g", "-k", fpB)
 	u, _ := client.LoadConfig(up)
-	if u.Endpoint["g"] != (client.EndpointConfig{Key: fpB}) {
+	if !sameEndpoint(u.Endpoint["g"], client.EndpointConfig{Key: fpB}) {
 		t.Fatalf("user layer %+v", u.Endpoint)
 	}
 	if data, _ := os.ReadFile(up); strings.Contains(string(data), "url") {
@@ -306,7 +306,7 @@ func TestEndpointKeyOverlay(t *testing.T) {
 		}
 	}
 	out = mustRun(t, "config", "endpoint", "ls")
-	if !regexp.MustCompile(`(?m)^g +https://g/x +pin +` + fpB + ` +global,key:user *$`).MatchString(out) {
+	if !regexp.MustCompile(`(?m)^g +https://g/x +` + goodPin + ` +` + fpB + ` +global,key:user *$`).MatchString(out) {
 		t.Errorf("ls:\n%s", out)
 	}
 	if !regexp.MustCompile(`(?m)^plain +http://g/plain +- +- +global *$`).MatchString(out) {
@@ -328,13 +328,13 @@ func TestEndpointKeyOverlay(t *testing.T) {
 	mustRun(t, "config", "endpoint", "add", "-e", "plain", "--url", "http://u/plain")
 	mustRun(t, "config", "endpoint", "key", "-e", "plain", "-k", "~/.ssh/u.pub")
 	u, _ = client.LoadConfig(up)
-	if u.Endpoint["plain"] != (client.EndpointConfig{URL: "http://u/plain", Key: "~/.ssh/u.pub"}) {
+	if !sameEndpoint(u.Endpoint["plain"], client.EndpointConfig{URL: "http://u/plain", Key: "~/.ssh/u.pub"}) {
 		t.Fatalf("own entry %+v", u.Endpoint["plain"])
 	}
 	mustRun(t, "config", "endpoint", "key", "-e", "plain", "--clear")
 	mustRun(t, "config", "endpoint", "key", "-e", "g", "--clear")
 	u, _ = client.LoadConfig(up)
-	if _, ok := u.Endpoint["g"]; ok || u.Endpoint["plain"] != (client.EndpointConfig{URL: "http://u/plain"}) {
+	if _, ok := u.Endpoint["g"]; ok || !sameEndpoint(u.Endpoint["plain"], client.EndpointConfig{URL: "http://u/plain"}) {
 		t.Fatalf("after clear %+v", u.Endpoint)
 	}
 	if out := mustRun(t, "config", "endpoint", "show", "-e", "g"); !strings.Contains(out, "key:     "+fpA) || !strings.Contains(out, "source:  global\n") {
@@ -348,7 +348,7 @@ func TestEndpointKeyGlobal(t *testing.T) {
 	mustRun(t, "config", "--global", "endpoint", "add", "-e", "g", "--url", "http://g/x")
 	mustRun(t, "config", "endpoint", "add", "-e", "u", "--url", "http://u/x")
 	mustRun(t, "config", "endpoint", "key", "--global", "-e", "g", "-k", fpA)
-	if g, _ := client.LoadConfig(gp); g.Endpoint["g"] != (client.EndpointConfig{URL: "http://g/x", Key: fpA}) {
+	if g, _ := client.LoadConfig(gp); !sameEndpoint(g.Endpoint["g"], client.EndpointConfig{URL: "http://g/x", Key: fpA}) {
 		t.Fatalf("global %+v", g.Endpoint)
 	}
 	code, _, errs := runLuk(t, "config", "endpoint", "key", "-e", "g", "--clear")
@@ -360,7 +360,7 @@ func TestEndpointKeyGlobal(t *testing.T) {
 		t.Errorf("user endpoint with --global: exit %d: %s", code, errs)
 	}
 	mustRun(t, "config", "endpoint", "key", "--global", "-e", "g", "--clear")
-	if g, _ := client.LoadConfig(gp); g.Endpoint["g"] != (client.EndpointConfig{URL: "http://g/x"}) {
+	if g, _ := client.LoadConfig(gp); !sameEndpoint(g.Endpoint["g"], client.EndpointConfig{URL: "http://g/x"}) {
 		t.Fatalf("global after clear %+v", g.Endpoint)
 	}
 	if u, _ := client.LoadConfig(up); len(u.Endpoint) != 1 {
@@ -390,7 +390,7 @@ func TestEndpointKeyErrors(t *testing.T) {
 			t.Errorf("%v: exit %d: %s", c.args, code, errs)
 		}
 	}
-	if u, _ := client.LoadConfig(up); u.Endpoint["u"] != (client.EndpointConfig{URL: "http://u/x"}) || len(u.Endpoint) != 1 {
+	if u, _ := client.LoadConfig(up); !sameEndpoint(u.Endpoint["u"], client.EndpointConfig{URL: "http://u/x"}) || len(u.Endpoint) != 1 {
 		t.Errorf("refused edits changed the layer: %+v", u.Endpoint)
 	}
 }
@@ -420,7 +420,7 @@ func TestEndpointKeyUnmatched(t *testing.T) {
 func TestCheckOverlayLayers(t *testing.T) {
 	up := tempConfig(t)
 	writeCfg(t, client.GlobalConfigPath(), "endpoint:\n  g:\n    key: "+fpA+"\n")
-	writeCfg(t, up, "endpoint:\n  h:\n    pin: "+goodPin+"\n")
+	writeCfg(t, up, "endpoint:\n  h:\n    pin: ["+goodPin+"]\n")
 	code, _, errs := runLuk(t, "config", "check")
 	if code != 1 || !strings.Contains(errs, `endpoint "g": url is missing`) || !strings.Contains(errs, `endpoint "h": pin without url`) {
 		t.Errorf("exit %d: %s", code, errs)

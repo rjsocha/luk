@@ -3,18 +3,21 @@ package client
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"luk/internal/channel"
 )
 
 type Config struct {
@@ -28,10 +31,11 @@ type Config struct {
 
 // EndpointConfig is one endpoint entry. In the user layer an entry without
 // URL is an overlay: it sets only Key on the global endpoint of its name.
+// Pins are the lukd keys the channel accepts, in key or words form.
 type EndpointConfig struct {
-	URL string `yaml:"url,omitempty"`
-	Pin string `yaml:"pin,omitempty"`
-	Key string `yaml:"key,omitempty"`
+	URL  string   `yaml:"url,omitempty"`
+	Pins []string `yaml:"pin,omitempty"`
+	Key  string   `yaml:"key,omitempty"`
 }
 
 // GlobalConfigPath is the system-wide layer; $LUK_GLOBAL_CONFIG overrides it.
@@ -195,30 +199,33 @@ func UnmatchedError(userPath string, src Sources) error {
 }
 
 // Resolve turns an endpoint argument (a config name, a URL, or empty for
-// the default) into a URL and a pin. A URL may carry the pin as a fragment:
-// "#sha256//..." or "#pin=sha256//...".
-func (c *Config) Resolve(arg string) (string, string, error) {
+// the default) into a URL and its channel pins. A URL may carry the pins
+// as its fragment, comma-separated: "#lusab-babad-...,<key>".
+func (c *Config) Resolve(arg string) (string, []string, error) {
 	if arg == "" {
 		arg = c.Default
 		if arg == "" {
-			return "", "", errors.New("no endpoint: pass --endpoint or set default in the config")
+			return "", nil, errors.New("no endpoint: pass --endpoint or set default in the config")
 		}
 	}
 	if !strings.Contains(arg, "://") {
 		e, ok := c.Endpoint[arg]
 		if !ok {
-			return "", "", fmt.Errorf("unknown endpoint %q", arg)
+			return "", nil, fmt.Errorf("unknown endpoint %q", arg)
 		}
-		arg, pin, err := splitPin(e.URL)
+		u, pins, err := splitPins(e.URL)
 		if err != nil {
-			return "", "", err
+			return "", nil, err
 		}
-		if e.Pin != "" {
-			pin = e.Pin
+		if len(e.Pins) > 0 {
+			if err := checkPins(e.Pins); err != nil {
+				return "", nil, fmt.Errorf("endpoint %q: %w", arg, err)
+			}
+			pins = e.Pins
 		}
-		return arg, pin, nil
+		return u, pins, nil
 	}
-	return splitPin(arg)
+	return splitPins(arg)
 }
 
 // KeyFor picks the signing key for an endpoint argument (as Resolve takes
@@ -237,20 +244,69 @@ func (c *Config) KeyFor(arg, flag string) string {
 	return c.Key
 }
 
-func splitPin(raw string) (string, string, error) {
+// splitPins splits an endpoint URL from the channel pins of its fragment.
+func splitPins(raw string) (string, []string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", "", fmt.Errorf("invalid endpoint URL %q", raw)
+		return "", nil, fmt.Errorf("invalid endpoint URL %q", raw)
 	}
-	var pin string
+	var pins []string
 	if u.Fragment != "" {
-		pin = strings.TrimPrefix(u.Fragment, "pin=")
-		if !strings.HasPrefix(pin, "sha256//") {
-			return "", "", fmt.Errorf("endpoint URL fragment must be a pin, sha256//...: %q", raw)
+		if _, err := channel.ParsePins(u.Fragment); err != nil {
+			return "", nil, err
 		}
+		pins = strings.Split(u.Fragment, ",")
 	}
 	u.Fragment, u.RawFragment = "", ""
-	return u.String(), pin, nil
+	return u.String(), pins, nil
+}
+
+// checkPins checks that each of pins is a channel pin.
+func checkPins(pins []string) error {
+	for _, p := range pins {
+		if _, err := channel.ParsePin(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PinsFor is the channel pins for the endpoint URL u: those of fragment,
+// else those of the first config endpoint (by name) with the scheme, host
+// and port of u, else none. Endpoints of one origin are one lukd, so they
+// share its key.
+func PinsFor(cfg *Config, u *url.URL, fragment string) ([]channel.Pin, error) {
+	if fragment != "" {
+		return channel.ParsePins(fragment)
+	}
+	if cfg == nil {
+		return nil, nil
+	}
+	names := make([]string, 0, len(cfg.Endpoint))
+	for n := range cfg.Endpoint {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	want := origin(u)
+	for _, n := range names {
+		e := cfg.Endpoint[n]
+		eu, err := url.Parse(e.URL)
+		if err != nil || len(e.Pins) == 0 || origin(eu) != want {
+			continue
+		}
+		return channel.ParsePins(strings.Join(e.Pins, ","))
+	}
+	return nil, nil
+}
+
+// origin is the scheme, lowercase host and port of u, the default port
+// made explicit.
+func origin(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+	}
+	return u.Scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
 }
 
 // SaveConfig writes c to path atomically, creating the directory (0700)
@@ -295,22 +351,24 @@ func SaveConfigMode(path string, c *Config, dirMode, fileMode os.FileMode) error
 	return os.Rename(tmp.Name(), path)
 }
 
-// AddEndpoint adds or replaces an endpoint after validating it.
-func (c *Config) AddEndpoint(name, rawURL, pin, key string) error {
+// AddEndpoint adds or replaces an endpoint after validating it. The pins
+// may come as the fragment of rawURL or as pins, not as two different
+// lists.
+func (c *Config) AddEndpoint(name, rawURL string, pins []string, key string) error {
 	if strings.Contains(rawURL, "#") {
-		u, fragPin, err := splitPin(rawURL)
+		u, fragPins, err := splitPins(rawURL)
 		if err != nil {
 			return err
 		}
-		if fragPin != "" && pin != "" && pin != fragPin {
+		if len(fragPins) > 0 && len(pins) > 0 && !slices.Equal(pins, fragPins) {
 			return errors.New("pin given twice with different values")
 		}
-		if fragPin != "" {
-			pin = fragPin
+		if len(fragPins) > 0 {
+			pins = fragPins
 		}
 		rawURL = u
 	}
-	e := EndpointConfig{URL: rawURL, Pin: pin, Key: key}
+	e := EndpointConfig{URL: rawURL, Pins: pins, Key: key}
 	if err := validateEndpoint(name, e); err != nil {
 		return err
 	}
@@ -335,19 +393,8 @@ func validateEndpoint(name string, e EndpointConfig) error {
 	if err := ValidateKey(e.Key); err != nil {
 		return fmt.Errorf("endpoint %q: %w", name, err)
 	}
-	if e.Pin == "" {
-		return nil
-	}
-	if u.Scheme != "https" {
-		return fmt.Errorf("endpoint %q: a pin needs an https endpoint", name)
-	}
-	b64, ok := strings.CutPrefix(e.Pin, "sha256//")
-	if !ok {
-		return fmt.Errorf("endpoint %q: pin must start with sha256//", name)
-	}
-	raw, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil || len(raw) != 32 {
-		return fmt.Errorf("endpoint %q: pin must be sha256// and base64 of 32 bytes", name)
+	if err := checkPins(e.Pins); err != nil {
+		return fmt.Errorf("endpoint %q: %w", name, err)
 	}
 	return nil
 }
@@ -422,7 +469,7 @@ func ValidateConfig(c *Config, layer Layer) error {
 }
 
 func validateOverlay(name string, e EndpointConfig) error {
-	if e.Pin != "" {
+	if len(e.Pins) > 0 {
 		return fmt.Errorf("endpoint %q: pin without url; an entry without url sets only key (url and pin come from the global config)", name)
 	}
 	if e.Key == "" {

@@ -144,6 +144,11 @@ func (s *Server) apply(cfg *config.Config) {
 
 func (s *Server) SetClock(now func() time.Time) { s.now = now }
 
+// SetIdentity makes k the identity key of the channel handshakes, for a
+// server built from a configuration that was not read from a file and so
+// has no key file next to it.
+func (s *Server) SetIdentity(k channel.Key) { s.key.Store(&k) }
+
 // Handler serves one address: it picks the listener of the address by the
 // request Host (port ignored, case-insensitive) and answers 421 when none
 // of them serves that host. A listener without a host list serves every

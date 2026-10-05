@@ -3,14 +3,17 @@ package client
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"luk/internal/channel"
 )
 
 func TestSaveConfigCreatesAndRoundTrips(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", "luk", "config.yaml")
 	want := &Config{Default: "a", Key: "k.pub", Endpoint: map[string]EndpointConfig{
-		"a": {URL: "https://h:1/x", Pin: "sha256//abc", Key: "SHA256:x"},
+		"a": {URL: "https://h:1/x", Pins: []string{testWords}, Key: "SHA256:x"},
 		"b": {URL: "http://h/y"},
 	}}
 	if err := SaveConfig(path, want); err != nil {
@@ -20,7 +23,7 @@ func TestSaveConfigCreatesAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Default != "a" || got.Key != "k.pub" || got.Endpoint["a"] != want.Endpoint["a"] || got.Endpoint["b"] != want.Endpoint["b"] {
+	if got.Default != "a" || got.Key != "k.pub" || !sameEP(got.Endpoint["a"], want.Endpoint["a"]) || !sameEP(got.Endpoint["b"], want.Endpoint["b"]) {
 		t.Fatalf("got %+v", got)
 	}
 	st, _ := os.Stat(path)
@@ -51,39 +54,65 @@ func TestSaveConfigKeepsExistingMode(t *testing.T) {
 	}
 }
 
+// testWords and testKey are pins in words and key form.
+const testWords = "lusab-babad-gutih-tugad-hajop-kizof"
+
+var testKey = strings.Repeat("A", 43)
+
+// sameEP reports whether two endpoint entries are the same.
+func sameEP(a, b EndpointConfig) bool {
+	return a.URL == b.URL && a.Key == b.Key && slices.Equal(a.Pins, b.Pins)
+}
+
 func TestAddEndpoint(t *testing.T) {
 	c := &Config{}
-	bad := []struct{ name, url, pin string }{
-		{"", "https://h/x", ""},
-		{"a", "ftp://h/x", ""},
-		{"a", "https:///x", ""},
-		{"a", "h/x", ""},
-		{"a", "http://h/x", "sha256//abc"},
-		{"a", "https://h/x", "abc"},
+	const tlsPin = "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	bad := []struct {
+		name, url string
+		pins      []string
+		want      string
+	}{
+		{"", "https://h/x", nil, "name is empty"},
+		{"a", "ftp://h/x", nil, "invalid URL"},
+		{"a", "https:///x", nil, "invalid URL"},
+		{"a", "h/x", nil, "invalid"},
+		{"a", "https://h/x", []string{tlsPin}, channel.ErrTLSPin.Error()},
+		{"a", "https://h/x#" + tlsPin, nil, channel.ErrTLSPin.Error()},
+		{"a", "https://h/x", []string{"abc"}, "abc"},
+		{"a", "https://h/x#" + testWords, []string{testKey}, "pin given twice"},
 	}
 	for _, b := range bad {
-		if err := c.AddEndpoint(b.name, b.url, b.pin, ""); err == nil {
-			t.Errorf("%+v accepted", b)
+		if err := c.AddEndpoint(b.name, b.url, b.pins, ""); err == nil || !strings.Contains(err.Error(), b.want) {
+			t.Errorf("%+v: %v", b, err)
 		}
 	}
 	if len(c.Endpoint) != 0 {
 		t.Fatalf("invalid input stored: %v", c.Endpoint)
 	}
-	if err := c.AddEndpoint("a", "https://h/x", "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", ""); err != nil {
+	if err := c.AddEndpoint("a", "http://h/x", []string{testWords, testKey}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.AddEndpoint("a", "http://h/y", "", ""); err != nil {
+	if !sameEP(c.Endpoint["a"], EndpointConfig{URL: "http://h/x", Pins: []string{testWords, testKey}}) {
+		t.Errorf("%+v", c.Endpoint["a"])
+	}
+	if err := c.AddEndpoint("a", "https://h/x#"+testKey+","+testWords, []string{testKey, testWords}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if c.Endpoint["a"] != (EndpointConfig{URL: "http://h/y"}) {
+	if !sameEP(c.Endpoint["a"], EndpointConfig{URL: "https://h/x", Pins: []string{testKey, testWords}}) {
+		t.Errorf("fragment: %+v", c.Endpoint["a"])
+	}
+	if err := c.AddEndpoint("a", "http://h/y", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !sameEP(c.Endpoint["a"], EndpointConfig{URL: "http://h/y"}) {
 		t.Errorf("not replaced: %+v", c.Endpoint["a"])
 	}
 }
 
 func TestRemoveEndpointAndDefault(t *testing.T) {
 	c := &Config{}
-	_ = c.AddEndpoint("a", "http://h/a", "", "")
-	_ = c.AddEndpoint("b", "http://h/b", "", "")
+	_ = c.AddEndpoint("a", "http://h/a", nil, "")
+	_ = c.AddEndpoint("b", "http://h/b", nil, "")
 	if err := c.SetDefault("nope"); err == nil {
 		t.Error("unknown default accepted")
 	}
@@ -103,7 +132,7 @@ func TestRemoveEndpointAndDefault(t *testing.T) {
 
 func TestMerge(t *testing.T) {
 	g := &Config{Default: "a", Key: "gk", Endpoint: map[string]EndpointConfig{
-		"a":      {URL: "https://g/a", Pin: "sha256//g", Key: "/g/a.pub"},
+		"a":      {URL: "https://g/a", Pins: []string{testWords}, Key: "/g/a.pub"},
 		"only-g": {URL: "http://g/x"},
 	}}
 	u := &Config{Default: "b", Endpoint: map[string]EndpointConfig{
@@ -117,7 +146,7 @@ func TestMerge(t *testing.T) {
 	if m.Key != "gk" || src.Key != "global" {
 		t.Errorf("key %q from %q", m.Key, src.Key)
 	}
-	if m.Endpoint["a"] != (EndpointConfig{URL: "http://u/a"}) || src.Endpoint["a"] != "user" {
+	if !sameEP(m.Endpoint["a"], EndpointConfig{URL: "http://u/a"}) || src.Endpoint["a"] != "user" {
 		t.Errorf("a: %+v from %q (pin and key must not leak from global)", m.Endpoint["a"], src.Endpoint["a"])
 	}
 	if src.Endpoint["only-g"] != "global" || src.Endpoint["b"] != "user" || len(m.Endpoint) != 3 {
@@ -173,12 +202,12 @@ const testFP = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 func TestAddEndpointKey(t *testing.T) {
 	c := &Config{}
 	for _, k := range []string{"SHA256:short", "SHA256:" + strings.Repeat("!", 43), "rel.pub"} {
-		if err := c.AddEndpoint("a", "http://h/x", "", k); err == nil {
+		if err := c.AddEndpoint("a", "http://h/x", nil, k); err == nil {
 			t.Errorf("key %q accepted", k)
 		}
 	}
 	for _, k := range []string{testFP, "~/.ssh/id.pub", "/k/id"} {
-		if err := c.AddEndpoint("a", "http://h/x", "", k); err != nil {
+		if err := c.AddEndpoint("a", "http://h/x", nil, k); err != nil {
 			t.Fatalf("key %q: %v", k, err)
 		}
 		if c.Endpoint["a"].Key != k {
@@ -230,7 +259,7 @@ func TestValidateConfigKeys(t *testing.T) {
 
 func TestMergeOverlay(t *testing.T) {
 	g := &Config{Endpoint: map[string]EndpointConfig{
-		"a": {URL: "https://g/a", Pin: "sha256//g", Key: "/g/a.pub"},
+		"a": {URL: "https://g/a", Pins: []string{testWords}, Key: "/g/a.pub"},
 		"b": {URL: "http://g/b"},
 	}}
 	u := &Config{Endpoint: map[string]EndpointConfig{
@@ -239,13 +268,13 @@ func TestMergeOverlay(t *testing.T) {
 		"gone": {Key: testFP},
 	}}
 	m, src := Merge(g, u)
-	if m.Endpoint["a"] != (EndpointConfig{URL: "https://g/a", Pin: "sha256//g", Key: testFP}) {
+	if !sameEP(m.Endpoint["a"], EndpointConfig{URL: "https://g/a", Pins: []string{testWords}, Key: testFP}) {
 		t.Errorf("overlay a: %+v", m.Endpoint["a"])
 	}
 	if src.Endpoint["a"] != "global" || src.EndpointKey["a"] != "user" {
 		t.Errorf("sources of a: %q key %q", src.Endpoint["a"], src.EndpointKey["a"])
 	}
-	if m.Endpoint["b"] != (EndpointConfig{URL: "http://u/b"}) || src.Endpoint["b"] != "user" || src.EndpointKey["b"] != "" {
+	if !sameEP(m.Endpoint["b"], EndpointConfig{URL: "http://u/b"}) || src.Endpoint["b"] != "user" || src.EndpointKey["b"] != "" {
 		t.Errorf("whole b: %+v %q %q", m.Endpoint["b"], src.Endpoint["b"], src.EndpointKey["b"])
 	}
 	if _, ok := m.Endpoint["gone"]; ok || len(src.Unmatched) != 1 || src.Unmatched[0] != "gone" {
@@ -281,12 +310,16 @@ func TestValidateOverlay(t *testing.T) {
 			t.Errorf("layer %d: %v", l, err)
 		}
 	}
-	for e, want := range map[EndpointConfig]string{
-		{}:                       "neither url nor key",
-		{Key: "rel.pub"}:         "absolute path",
-		{Key: testFP, Pin: "x"}:  "pin without url",
-		{Key: "SHA256:tooshort"}: "SHA256:tooshort",
+	for _, c := range []struct {
+		e    EndpointConfig
+		want string
+	}{
+		{EndpointConfig{}, "neither url nor key"},
+		{EndpointConfig{Key: "rel.pub"}, "absolute path"},
+		{EndpointConfig{Key: testFP, Pins: []string{testWords}}, "pin without url"},
+		{EndpointConfig{Key: "SHA256:tooshort"}, "SHA256:tooshort"},
 	} {
+		e, want := c.e, c.want
 		c := &Config{Endpoint: map[string]EndpointConfig{"a": e}}
 		if err := ValidateConfig(c, UserLayer); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%+v: %v, want %q", e, err, want)
@@ -302,7 +335,7 @@ func TestSetClearEndpointKey(t *testing.T) {
 	if err := c.SetEndpointKey("own", "~/.ssh/id.pub"); err != nil {
 		t.Fatal(err)
 	}
-	if c.Endpoint["g"] != (EndpointConfig{Key: testFP}) || c.Endpoint["own"] != (EndpointConfig{URL: "http://h/own", Key: "~/.ssh/id.pub"}) {
+	if !sameEP(c.Endpoint["g"], EndpointConfig{Key: testFP}) || !sameEP(c.Endpoint["own"], EndpointConfig{URL: "http://h/own", Key: "~/.ssh/id.pub"}) {
 		t.Fatalf("%+v", c.Endpoint)
 	}
 	for _, k := range []string{"", "rel.pub", "SHA256:x"} {
@@ -316,7 +349,7 @@ func TestSetClearEndpointKey(t *testing.T) {
 	if !c.ClearEndpointKey("g") || !c.ClearEndpointKey("own") || c.ClearEndpointKey("own") || c.ClearEndpointKey("none") {
 		t.Error("clear results")
 	}
-	if _, ok := c.Endpoint["g"]; ok || c.Endpoint["own"] != (EndpointConfig{URL: "http://h/own"}) {
+	if _, ok := c.Endpoint["g"]; ok || !sameEP(c.Endpoint["own"], EndpointConfig{URL: "http://h/own"}) {
 		t.Errorf("after clear %+v", c.Endpoint)
 	}
 }
@@ -331,7 +364,7 @@ func TestOverlayRoundTrip(t *testing.T) {
 		t.Errorf("overlay written with url:\n%s", data)
 	}
 	c, err := LoadConfig(path)
-	if err != nil || c.Endpoint["g"] != (EndpointConfig{Key: testFP}) {
+	if err != nil || !sameEP(c.Endpoint["g"], EndpointConfig{Key: testFP}) {
 		t.Fatalf("%+v %v", c, err)
 	}
 }

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,7 +132,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 			if err != nil {
 				return usageError{err}
 			}
-			url, pin, err := resolve(cfg, endpoint)
+			url, _, err := resolve(cfg, endpoint)
 			if err != nil {
 				return err
 			}
@@ -170,7 +169,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 			}
 			ctx, stop := interruptContext()
 			defer stop()
-			opts := client.Options{URL: url, Pin: pin, Signer: signer, Meta: meta, Body: body, Size: size, BWLimit: limit}
+			opts := client.Options{URL: url, Signer: signer, Meta: meta, Body: body, Size: size, BWLimit: limit}
 			if progress && term.IsTerminal(int(os.Stderr.Fd())) {
 				opts.Progress = os.Stderr
 			}
@@ -233,7 +232,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 	}
 	f := cmd.Flags()
 	f.StringVarP(&file, "file", "f", "", "file to upload; a pipe or device is streamed")
-	f.StringVarP(&endpoint, "endpoint", "e", "", "endpoint name from the config, or a URL (may end with #sha256//... as the pin)")
+	f.StringVarP(&endpoint, "endpoint", "e", "", "endpoint name from the config, or a URL (may end with #PIN[,PIN...], the lukd pins)")
 	f.StringVarP(&key, "key", "k", "", "private key file (uses PATH-cert.pub when present), a .pub file of an agent key, or SHA256:... fingerprint of an agent key")
 	f.StringArrayVarP(&tags, "tag", "t", nil, "tag (repeatable)")
 	f.BoolVar(&backup, "backup", false, "add backup meta: hostname, absolute path, mtime")
@@ -356,16 +355,13 @@ func parseBWLimit(s string) (int64, error) {
 	return limit, nil
 }
 
-// resolve turns an endpoint argument into its URL and pin.
-func resolve(cfg *client.Config, endpoint string) (string, string, error) {
-	url, pin, err := cfg.Resolve(endpoint)
+// resolve turns an endpoint argument into its URL and channel pins.
+func resolve(cfg *client.Config, endpoint string) (string, []string, error) {
+	url, pins, err := cfg.Resolve(endpoint)
 	if err != nil {
-		return "", "", usageError{err}
+		return "", nil, usageError{err}
 	}
-	if u, perr := neturl.Parse(url); pin != "" && (perr != nil || u.Scheme != "https") {
-		return "", "", usageError{errors.New("a pin needs an https endpoint")}
-	}
-	return url, pin, nil
+	return url, pins, nil
 }
 
 // signerFor loads the signing key for an endpoint argument: --key, the key

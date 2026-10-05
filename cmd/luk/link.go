@@ -91,7 +91,7 @@ replace prints the URL; --json prints the server answer instead. Exit codes as f
 			if err != nil {
 				return usageError{err}
 			}
-			url, pin, err := resolve(cfg, ep)
+			url, _, err := resolve(cfg, ep)
 			if err != nil {
 				return err
 			}
@@ -99,7 +99,7 @@ replace prints the URL; --json prints the server answer instead. Exit codes as f
 			if err != nil {
 				return err
 			}
-			o := client.LinkOptions{Options: client.Options{URL: url, Pin: pin, Signer: signer, BWLimit: limit}, Link: link}
+			o := client.LinkOptions{Options: client.Options{URL: url, Signer: signer, BWLimit: limit}, Link: link}
 			switch {
 			case rm:
 				o.Action = wire.LinkRemove
@@ -194,7 +194,7 @@ otherwise.`,
 			if err != nil {
 				return usageError{err}
 			}
-			url, pin, err := resolve(cfg, endpoint)
+			url, _, err := resolve(cfg, endpoint)
 			if err != nil {
 				return err
 			}
@@ -204,7 +204,7 @@ otherwise.`,
 			}
 			ctx, stop := interruptContext()
 			defer stop()
-			a, err := client.LinkList(ctx, client.Options{URL: url, Pin: pin, Signer: signer})
+			a, err := client.LinkList(ctx, client.Options{URL: url, Signer: signer})
 			if err != nil {
 				return unknownKeyHint(err, agentKeys)
 			}

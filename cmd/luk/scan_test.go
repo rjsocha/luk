@@ -134,10 +134,8 @@ func TestScanPrint(t *testing.T) {
 			t.Errorf("%q, want %q", out, want)
 		}
 	}
-	// The printed command adds the endpoint; the listing then trusts its
-	// pin and signs with its key.
-	add := strings.Fields(strings.ReplaceAll(mustRun(t, "scan", "-k", e.key, "--print", e.url), "'", ""))
-	mustRun(t, add[1:]...)
+	// A config endpoint is listed by its name and signs with its key.
+	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", e.url+"/drop", "--key", e.key)
 	if out := mustRun(t, "scan", "--endpoints", "drop"); !strings.Contains(out, "drop  "+e.url+"/drop") {
 		t.Fatalf("by name: %s", out)
 	}
@@ -156,12 +154,6 @@ func TestScanListingFails(t *testing.T) {
 	code, out, errs := runLuk(t, "scan", "-k", stranger, e.url)
 	if code != 2 || out != e.pin+"\n" || !strings.Contains(errs, "luk: listing endpoints of "+e.host+": rejected (401 Unauthorized): unknown key") {
 		t.Fatalf("exit %d %q %q", code, out, errs)
-	}
-	// A config pin that does not match fails the listing.
-	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", e.url+"/drop", "--pin", "sha256//"+strings.Repeat("A", 43)+"=", "-k", e.key)
-	code, _, errs = runLuk(t, "scan", "--endpoints", e.url+"/drop")
-	if code != 3 || !strings.Contains(errs, "pin mismatch") {
-		t.Fatalf("pin mismatch: exit %d %q", code, errs)
 	}
 }
 

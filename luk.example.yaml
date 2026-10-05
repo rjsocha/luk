@@ -3,7 +3,7 @@ key: ~/.ssh/id_ed25519.pub
 endpoint:
   drop:
     url: https://lukd.vm:8443/drop
-    pin: sha256//REPLACE-WITH-lukd-tls-pin
+    pin: [REPLACE-WITH-luk-scan-pin]   # the lukd key: words or key form, see luk scan
   backup:
     url: http://lukd.vm:8080/backup
     key: SHA256:REPLACE-WITH-ssh-add-l-fingerprint

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"luk/internal/channel"
 	"luk/internal/client"
 )
 
@@ -93,8 +95,8 @@ func newShowCmd(out io.Writer) *cobra.Command {
 			for _, n := range names {
 				e := cfg.Endpoint[n]
 				fmt.Fprintf(out, "  %s:  # %s\n    url: %s\n", n, src.Endpoint[n], e.URL)
-				if e.Pin != "" {
-					fmt.Fprintf(out, "    pin: %s\n", e.Pin)
+				if len(e.Pins) > 0 {
+					fmt.Fprintf(out, "    pin: %s\n", strings.Join(e.Pins, ","))
 				}
 				if ks := src.EndpointKey[n]; ks != "" {
 					fmt.Fprintf(out, "    key: %s  # %s\n", e.Key, ks)
@@ -250,17 +252,18 @@ or the SHA256:... fingerprint of an agent key.`
 }
 
 func newEndpointCmd(out io.Writer, global *bool) *cobra.Command {
-	var name, url, pin, key string
+	var name, url, key string
+	var pins []string
 	ep := &cobra.Command{
 		Use:   "endpoint",
 		Short: "List, show, add or remove endpoints, or set their keys",
 	}
 	add := edit(global, "add", "Add or replace an endpoint",
-		"  luk config endpoint add -e drop --url https://lukd.vm:8443/drop --pin sha256//Xk9...\n  luk config endpoint add -e backup --url http://lukd.vm:8080/backup --key SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
-		func(layer, _ *client.Config) error { return layer.AddEndpoint(name, url, pin, key) })
+		"  luk config endpoint add -e drop --url https://lukd.vm:8443/drop --pin lusab-babad-gutih-tugad-hajop-kizof\n  luk config endpoint add -e backup --url http://lukd.vm:8080/backup#lusab-babad-gutih-tugad-hajop-kizof --key SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
+		func(layer, _ *client.Config) error { return layer.AddEndpoint(name, url, pins, key) })
 	add.Flags().StringVarP(&name, "endpoint", "e", "", "endpoint name")
-	add.Flags().StringVar(&url, "url", "", "endpoint URL, http or https (may end with #sha256//... as the pin)")
-	add.Flags().StringVar(&pin, "pin", "", "server certificate pin, sha256//... (https only; see luk scan)")
+	add.Flags().StringVar(&url, "url", "", "endpoint URL, http or https (may end with #PIN[,PIN...], the pins)")
+	add.Flags().StringArrayVar(&pins, "pin", nil, "lukd key the endpoint accepts, in words or key form (see luk scan); repeat for more")
 	add.Flags().StringVarP(&key, "key", "k", "", "signing key for this endpoint: key file path or SHA256:... fingerprint of an agent key")
 	add.MarkFlagRequired("endpoint")
 	add.MarkFlagRequired("url")
@@ -324,16 +327,24 @@ func edit(global *bool, use, short, example string, fn func(layer, merged *clien
 }
 
 func newEndpointLsCmd(out io.Writer) *cobra.Command {
-	var layer string
+	var layer, pinFormat string
 	cmd := &cobra.Command{
 		Use:   "ls",
-		Short: "List endpoints: name, URL, pin, key, source, default marker",
-		Long: `List endpoints, one per line: name, URL, pin or -, key or -, source, and
-* for the default. The source is global or user; an endpoint whose key comes
-from a user overlay on a global endpoint shows global,key:user.`,
-		Example: "  luk config endpoint ls\n  luk config endpoint ls --layer global",
+		Short: "List endpoints: name, URL, pins, key, source, default marker",
+		Long: `List endpoints, one per line: name, URL, pins (comma-separated) or -, key
+or -, source, and * for the default. The source is global or user; an
+endpoint whose key comes from a user overlay on a global endpoint shows
+global,key:user.
+
+--pin-format words (the default) shows each pin as its six words; key
+shows a pin stored as a key as that key. A pin stored as words is shown as
+words in both formats: the key cannot be recovered from its words.`,
+		Example: "  luk config endpoint ls\n  luk config endpoint ls --layer global\n  luk config endpoint ls --pin-format key",
 		Args:    noArgs,
 		RunE: func(*cobra.Command, []string) error {
+			if pinFormat != "words" && pinFormat != "key" {
+				return usageError{fmt.Errorf("--pin-format must be words or key, got %q", pinFormat)}
+			}
 			var cfg *client.Config
 			src := client.Sources{Endpoint: map[string]string{}, EndpointKey: map[string]string{}}
 			if layer != "" {
@@ -368,8 +379,8 @@ from a user overlay on a global endpoint shows global,key:user.`,
 				if ks := src.EndpointKey[n]; ks != "" {
 					source += ",key:" + ks
 				}
-				if e.Pin != "" {
-					pin = "pin"
+				if len(e.Pins) > 0 {
+					pin = formatPins(e.Pins, pinFormat)
 				}
 				if e.Key != "" {
 					key = e.Key
@@ -383,8 +394,30 @@ from a user overlay on a global endpoint shows global,key:user.`,
 		},
 	}
 	cmd.Flags().StringVar(&layer, "layer", "", "list one raw layer: global or user")
-	completeFlags(cmd, map[string]cobra.CompletionFunc{"layer": completeLayer})
+	cmd.Flags().StringVar(&pinFormat, "pin-format", "words", "show pins as words or key (a pin stored as words stays words)")
+	completeFlags(cmd, map[string]cobra.CompletionFunc{"layer": completeLayer, "pin-format": completePinFormat})
 	return cmd
+}
+
+// formatPins renders stored pins in a --pin-format, comma-separated. A pin
+// stored as a key can be shown either way; one stored as words only as
+// words; one that is not a pin as it is stored.
+func formatPins(pins []string, format string) string {
+	out := make([]string, len(pins))
+	for i, p := range pins {
+		out[i] = client.Printable(p)
+		if _, err := channel.ParsePin(p); err != nil {
+			continue
+		}
+		if key, err := base64.RawURLEncoding.DecodeString(p); err == nil && len(p) == 43 {
+			out[i], _ = channel.FormatPin(key, format)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+func completePinFormat(*cobra.Command, []string, string) ([]cobra.Completion, cobra.ShellCompDirective) {
+	return []cobra.Completion{"words", "key"}, cobra.ShellCompDirectiveNoFileComp
 }
 
 func newEndpointShowCmd(out io.Writer) *cobra.Command {
@@ -403,7 +436,7 @@ func newEndpointShowCmd(out io.Writer) *cobra.Command {
 			if !ok {
 				return usageError{fmt.Errorf("unknown endpoint %q", name)}
 			}
-			pin, key := e.Pin, e.Key
+			pin, key := strings.Join(e.Pins, ","), e.Key
 			if pin == "" {
 				pin = "-"
 			}
@@ -411,9 +444,9 @@ func newEndpointShowCmd(out io.Writer) *cobra.Command {
 				key = "-"
 			}
 			fmt.Fprintf(out, "name:    %s\nurl:     %s\n", name, e.URL)
-			if e.Pin != "" {
-				// The URL with the pin as its fragment, as endpoint add takes it.
-				fmt.Fprintf(out, "         %s#%s\n", e.URL, e.Pin)
+			if len(e.Pins) > 0 {
+				// The URL with the pins as its fragment, as endpoint add takes it.
+				fmt.Fprintf(out, "         %s#%s\n", e.URL, pin)
 			}
 			source := src.Endpoint[name]
 			if ks := src.EndpointKey[name]; ks != "" {

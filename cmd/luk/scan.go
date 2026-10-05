@@ -54,9 +54,8 @@ and, when an endpoint has one, QUOTA (your upload quota: the rate, the
 largest upload and what you may send now).
 The key is --key, else the key of the config endpoint the URL names, else
 the config key, else each key of the SSH agent in turn until the server
-knows one. The server is trusted by the pin of the config endpoint (or
-of the URL fragment), else by the system CAs, else by the pin scanned in
-the same run.
+knows one. The server is trusted by the system CAs, else by the pin
+scanned in the same run.
 
 An http URL has no pin: --pin is a usage error and the default does the
 listing only. When the listing fails the pin is still printed, the error
@@ -96,7 +95,7 @@ last path segment, or by the first label of the host for an origin
 			if err != nil {
 				return usageError{err}
 			}
-			raw, pin, err := cfg.Resolve(args[0])
+			raw, _, err := cfg.Resolve(args[0])
 			if err != nil {
 				return usageError{err}
 			}
@@ -106,12 +105,7 @@ last path segment, or by the first label of the host for an origin
 			}
 			name := args[0]
 			if strings.Contains(name, "://") {
-				name = matchEndpoint(cfg, u, false)
-			}
-			if pin == "" {
-				if n := matchEndpoint(cfg, u, true); n != "" {
-					pin = cfg.Endpoint[n].Pin
-				}
+				name = matchEndpoint(cfg, u)
 			}
 			https := u.Scheme == "https"
 			if !https && pinOnly {
@@ -136,8 +130,8 @@ last path segment, or by the first label of the host for an origin
 			var listErr error
 			var usedKey string
 			if wantList {
-				trust := pin
-				if trust == "" && cert != nil && !cert.Verified {
+				trust := ""
+				if cert != nil && !cert.Verified {
 					trust = cert.Pin
 				}
 				list, usedKey, listErr = listEndpoints(ctx, cfg, u, trust, name, key)
@@ -253,9 +247,8 @@ func listEndpoints(ctx context.Context, cfg *client.Config, u *neturl.URL, pin, 
 }
 
 // matchEndpoint is the name of the first config endpoint (by name) whose
-// URL equals u, or with origin only has the scheme, host and port of u
-// and a pin; empty for none.
-func matchEndpoint(cfg *client.Config, u *neturl.URL, origin bool) string {
+// URL equals u; empty for none.
+func matchEndpoint(cfg *client.Config, u *neturl.URL) string {
 	names := make([]string, 0, len(cfg.Endpoint))
 	for n := range cfg.Endpoint {
 		names = append(names, n)
@@ -268,11 +261,7 @@ func matchEndpoint(cfg *client.Config, u *neturl.URL, origin bool) string {
 		if err != nil {
 			continue
 		}
-		got := endpointKey(eu)
-		if origin && e.Pin != "" && got[0] == want[0] {
-			return n
-		}
-		if !origin && got == want {
+		if endpointKey(eu) == want {
 			return n
 		}
 	}
