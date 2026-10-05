@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/term"
+
 	"luk/internal/channel"
 	"luk/internal/wire"
 )
@@ -36,6 +38,18 @@ var (
 	// completeWait bounds each attempt of a COMPLETE: lukd answers one
 	// sent again from the answer it kept, or once the first one is done.
 	completeWait = 2 * time.Minute
+	// signNotice is how long a signature may take before luk says it
+	// waits for it, signLimit how long before it is too late to send.
+	signNotice = time.Second
+	signLimit  = 55 * time.Second
+	// signNoticeOut is where the notice goes: stderr when a terminal,
+	// else nowhere.
+	signNoticeOut = func() io.Writer {
+		if term.IsTerminal(int(os.Stderr.Fd())) {
+			return os.Stderr
+		}
+		return nil
+	}
 )
 
 const (
@@ -108,7 +122,7 @@ func opSession(ctx context.Context, u *url.URL, pins []channel.Pin, op opFunc) (
 		if err != nil {
 			return nil, nil, err
 		}
-		req, err := op(c)
+		req, err := signOp(c, op)
 		if err != nil {
 			c.Close()
 			return nil, nil, err
@@ -123,6 +137,24 @@ func opSession(ctx context.Context, u *url.URL, pins []channel.Pin, op opFunc) (
 			return nil, nil, err
 		}
 	}
+}
+
+// signOp is the OP that op signs for c, which just finished its
+// handshake. A signature still pending after signNotice (a hardware key
+// waiting for a touch) is announced once on a terminal. One that took
+// longer than signLimit is not sent: lukd drops a session without its OP
+// after limits.channel.auth (60s), and the OP would come too late.
+func signOp(c *Channel, op opFunc) (channel.Request, error) {
+	start := time.Now()
+	if w := signNoticeOut(); w != nil {
+		t := time.AfterFunc(signNotice, func() { fmt.Fprintln(w, "waiting for the signature (touch the key)") })
+		defer t.Stop()
+	}
+	req, err := op(c)
+	if err == nil && time.Since(start) > signLimit {
+		err = fmt.Errorf("the signature took longer than %s; lukd drops a session that waits longer than 60s (limits.channel.auth): run it again", signLimit)
+	}
+	return req, err
 }
 
 // uploadOnce is one session of an upload.
