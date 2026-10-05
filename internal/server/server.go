@@ -49,7 +49,8 @@ type Server struct {
 	floor atomic.Int64
 	log   *slog.Logger
 	queue *queue.Queue
-	// accepted hands out the acceptance order of committed entries.
+	// accepted hands out the acceptance order of the uploads, as they
+	// start; Receive keeps its mark under the root.
 	accepted *queue.Accepted
 	// quota holds the buckets of the endpoint quotas; it survives a
 	// reload, the limits come from the configuration of each upload.
@@ -985,9 +986,10 @@ func (s *Server) accept(u *upload, e queue.Entry, n int64, sum string, dedup boo
 	if u.version != "" {
 		sc.PermanentPath = u.ep.Permanent.Path
 	}
-	// The acceptance order, taken right before the commit: the order in
-	// which the entries are committed, whatever their start. An upload in
-	// parts took it when it was admitted.
+	// The acceptance order orders uploads by their start: an upload in
+	// parts took it when its OP was admitted, so a long one that commits
+	// after a newer one stays the older. An upload committed at its OP
+	// (a deduplicated one) starts now.
 	var acc queue.Acceptance
 	if u.accepted != nil {
 		acc = *u.accepted

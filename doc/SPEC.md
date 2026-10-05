@@ -182,10 +182,10 @@ Frames: plaintext chunks of 65536 bytes; the final frame carries 0..65536
   listener of its handshake: anything else is 404 `unknown session`, in
   the clear. A request of another session fails on its first frame.
 - lukd acts on a message only once it opened: an OP, a COMPLETE, an
-  ABORT and a KEEPALIVE once the whole message opened, a PART once its first frame
-  opened. Nothing is written or cancelled for a message that does not
-  open (400 `bad channel message` in the clear); only the checks of a
-  PART from its clear nonce answer before it opened (see Uploads in
+  ABORT and a KEEPALIVE once the whole message opened, a PART once its
+  first frame opened. Nothing is written or cancelled for a message that
+  does not open (400 `bad channel message` in the clear); only the checks
+  of a PART from its clear nonce answer before it opened (see Uploads in
   parts), and they change nothing.
 - Every message of a session is taken once by its nonce without the
   frame bits (kind, number, attempt): a message under a nonce taken
@@ -253,7 +253,12 @@ limits:
 - `limits.channel.auth`: the time from the handshake to the OP. It
   covers a touch of a hardware key or unlocking an agent, which happen
   in exactly this window, as the signature covers `h`. The OP, once its
-  clear header arrived, must arrive within it too (408).
+  clear header arrived, must arrive within it too (408). luk prints
+  `waiting for the signature (touch the key)` on stderr, once and only
+  when it is a terminal, when the signature of the OP takes over 1s; one
+  that took over 55s from the handshake is not sent: luk fails with `the
+  signature took longer than 55s; lukd drops a session that waits longer
+  than 60s (limits.channel.auth): run it again`.
 - `limits.channel.pending`: the sessions that have no OP yet, over all
   listeners. When it is full the oldest of them is dropped for the new
   handshake (as `MaxStartups` in sshd, evicting the oldest rather than
@@ -878,6 +883,10 @@ endpoint:
 - `parts.size` is the size of every part but the last; `parts.parallel`
   is the most parts a client sends at once (`luk send --parallel N`
   sends up to N, at most this). A reload applies both to new uploads.
+- luk takes only an offer lukd can make: `size` a multiple of 64 KiB
+  from 64 KiB to 2 GiB - 64 KiB, `parallel` 1 to 64, `idle` at least 1
+  and `rate` not negative. Any other offer fails the upload with `bad
+  parts offer: <the offer>`, after an ABORT.
 - `idle` is `limits.body.idle` in seconds (at least 1), `rate` is
   `limits.body.rate` in bytes per second (0: off), so luk keeps the
   upload alive and paces no part below the rate (see below).
@@ -962,8 +971,7 @@ States: open, then finalizing (the COMPLETE), then committed, aborted
 
 - An open upload whose session has no activity (bytes of a part that
   opened, a message, a KEEPALIVE among them) for `limits.body.idle`
-  expires (logged `upload
-  expired`): the staging goes, as for an ABORT.
+  expires (logged `upload expired`): the staging goes, as for an ABORT.
 - A restart of the receive role drops every session; the staging
   directories (without `meta.json`) are removed at start like any half
   received entry (see Service). luk sends a file once more from the
@@ -975,6 +983,9 @@ States: open, then finalizing (the COMPLETE), then committed, aborted
   session at its end; check whether it arrived before sending it again`
   (exit 3). It never sends such an upload again by itself; there is no
   idempotency key and no record of it on disk.
+- Only lukd's 404 `unknown session` (its message, not the status alone)
+  counts as a session lukd lost, to a part or a COMPLETE: any other 404
+  in the clear, such as one of a proxy on the way, is a transfer error.
 
 luk sends the parts with `--parallel` workers (default 1):
 
@@ -985,8 +996,8 @@ luk sends the parts with `--parallel` workers (default 1):
   counts no attempt; a 408 also takes one worker away (down to one); any
   other refusal ends the upload. 404 `unknown session` to a part is the
   restart above. A 409 `older attempt` counts no attempt: the part goes
-  again under a newer one. A 413 in the clear is a proxy limit (see
-  Carrier) and is not sent again.
+  again under a newer one, after the wait an attempt would have. A 413
+  in the clear is a proxy limit (see Carrier) and is not sent again.
 - Before the COMPLETE luk checks that a file has the size and
   modification time its hash pass saw: else `file changed while sending:
   send it again` (exit 3, after an ABORT). A 422 of a file whose content
@@ -995,9 +1006,13 @@ luk sends the parts with `--parallel` workers (default 1):
   stream cannot send a part again (an error). A COMPLETE whose answer is
   lost, or does not come within 2m, is sent again (5 attempts): lukd
   answers it from the kept answer, or once the first one is done. A
-  COMPLETE without an answer after its attempts fails the upload (`the
-  server gave no answer within 120s`, exit 3); only a 404 `unknown
-  session` to it leaves the result unknown.
+  COMPLETE without an answer after its attempts (each timed out or
+  failed in transport, other than a 404 in the clear) leaves the result
+  unknown too: `result unknown: the server gave no answer within 120s at
+  the end of the upload; check whether it arrived before sending it
+  again` (exit 3, not sent again). luk still sends an ABORT; when lukd
+  answers it 409 `upload committed`, the error says that lukd reports
+  the upload as committed, but its answer with the URL was lost.
 - A stream is read ahead into two buffers of `parts.size` per worker,
   so the next part is read while one goes. While luk waits on the
   source it sends a KEEPALIVE every `idle`/3 of the offer, and not
@@ -1366,7 +1381,8 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   (rolled back as above), leaves the entry in the queue; it runs again
   at the next start. A link that declares an alias
   is not changed in place (409 for `ttl`, a failed store for
-  `replace`).
+  `replace`). Replaces are not ordered by acceptance: of two replaces of
+  one link, the content of the one processed last stays.
 
 - `list`: the files of the respond storage of the endpoint (the link
   storage) and of its secret storage (see Volatile secrets) whose sidecar has `endpoint` equal to the endpoint receiving
@@ -2612,6 +2628,14 @@ the upload again, a new upload with its own id and acceptance order.
 
 ### Acceptance order
 
+Changed in the release with the channel: an upload was ordered by when
+it arrived (the commit of its entry); it is now ordered by when it
+starts. So a long upload that finishes after a shorter one started
+later is the older of the two: it no longer replaces the newer one's
+file under `conflict: replace` (skipped), becomes a version instead of
+`<name>` under `conflict: version`, and moves no alias, `latest` or
+permanent name past the newer one (see the table below).
+
 An upload is ordered by its start: `lukd receive` takes its acceptance
 order when it admits the OP, before the first part (a deduplicated
 upload, committed at its OP, at the commit). A dump started at 01:00
@@ -2631,10 +2655,19 @@ finishes after a newer one.
   `accepted_seq` orders acceptances of one process within the same
   nanosecond (0, 1, 2, ...); it is omitted when 0. The order is
   `accepted`, then `accepted_seq`.
-- A new `lukd receive` starts from the wall clock again: a wall clock
-  moved back by more than the restart took can order the first uploads
-  after the restart before the last ones before it (an administrative
-  action; nothing else reorders).
+- The receive role keeps a mark of the order in `<root>/accepted.json`
+  (`{"mark": <ns>}`, mode 0640, replaced atomically and synced): a new
+  `lukd receive` starts after the mark whatever the wall clock says, so
+  a clock moved back between restarts (or one that ran ahead for a
+  while) never makes new uploads older than the stored files. The mark
+  is moved a minute past an order before that order is handed out, so a
+  crash reuses none (a restart may skip up to a minute of order). A
+  missing file starts from the wall clock; one that does not read stops
+  the receive role (remove it to start from the wall clock); a failed
+  write of the mark is logged (`acceptance mark not written`, WARN) and
+  tried again with the next upload. The role units start after
+  `time-sync.target`: with `systemd-time-wait-sync.service` enabled, a
+  clock still wrong at boot neither orders uploads nor moves the mark.
 - The queue entry keeps both at the top of `meta.json` and in its
   sidecar (`sidecar.accepted`, `sidecar.accepted_seq`); every stored
   file of the upload carries them in its sidecar. `received` stays the
@@ -2650,14 +2683,14 @@ finishes after a newer one.
   `received` time (whole seconds), then by id (and, where files of one
   upload tie, by stored name).
 
-An upload that is older by acceptance never replaces a newer one, however
-late it finishes:
+An upload that is older by acceptance does not replace a newer one in a
+store step, however late it finishes:
 
 | stored under the name | incoming is newer | incoming is older (late) |
 |---|---|---|
 | nothing | stored | stored |
 | a file, `conflict: version` | becomes `<name>`, the previous file a version | stored as the version `<name>.<its received ts>`; `<name>` stays |
-| a file, `conflict: replace` | replaces it | skipped: nothing is written, logged `store: older upload skipped`, the step succeeds |
+| a file, `conflict: replace` | replaces it | skipped: nothing is written, logged `store: older upload skipped` (WARN) and counted in `older_skipped` of `status.json`, the step succeeds |
 | a file, `conflict: reject` | the store fails | the store fails |
 | an alias, `latest`, a permanent name | moves to it | stays where it is |
 
@@ -2666,6 +2699,14 @@ late it finishes:
   at the store step.
 - A store run again for the upload that holds the name (the same id, after
   an interruption) is never older.
+- A deduplicated store (`dedup`, see Storage and catalog) of an upload
+  newer than the kept file gives the kept file (`<name>`) the acceptance
+  order of that upload: it holds the content of the newest upload, so an
+  upload accepted in between that finishes later goes to the versions.
+  The alias the file declares follows.
+- A replace through a link (`luk link --file`, see Links) is not
+  ordered: of two replaces of one link, the one processed last wins,
+  whichever started first.
 
 ### Scheduling
 
@@ -3219,8 +3260,9 @@ pipeline:
   as `<base>/file/<random>`; two uploads with the same `--name` get two
   independent random names.
 - `conflict` - what a write does when the target path exists:
-  `version` (default; keep both: `<name>` always holds the newest
-  content, and the previous content is renamed to `<name>.<unix ts>`,
+  `version` (default; keep both: `<name>` holds the content of the
+  newest upload by acceptance order, and the previous content is renamed
+  to `<name>.<unix ts>`,
   the ts being that previous version's own `received` time from its
   sidecar (its data mtime when it has none), then `<name>.<unix ts>.000001`
   and so on when that name is taken, so the name tells when the old
@@ -3247,7 +3289,9 @@ pipeline:
   compared by size and sha256 from its sidecar with the incoming file (no
   re-hashing).
   When they match nothing is placed: the store keeps the existing file,
-  sidecar, aliases and catalog, and the pipeline logs `deduplicated` with
+  sidecar (it only takes the acceptance order of a newer upload, see
+  Acceptance order), aliases and catalog, and the pipeline logs
+  `deduplicated` with
   the existing path (`<storage>:<path> (dedup)` in its stored list); it
   counts as a success. Only the newest version is compared, so A, B, A
   keeps three files (`<name>` is A, with two dated versions). Once, portal and expiring files are never shared.
@@ -3743,7 +3787,8 @@ watched series and per rule no series matches:
     {"pipeline": "devdb", "sender": "hosts:replica.aws.example.net",
      "tags": ["prod", "devdump"], "last_id": "...", "last_received": "...",
      "last_accepted": 1791100800123456789, "last_success": "...", "last_failure": "...", "failed_step": 2,
-     "error": "dbdump exit 1", "size": 314572800, "failed": 0}
+     "error": "dbdump exit 1", "size": 314572800, "failed": 0,
+     "older_skipped": 0}
   ],
   "watch": [
     {"storage": "archive", "rule": 1, "pipeline": "nightly",
@@ -3762,7 +3807,11 @@ watched series and per rule no series matches:
 `last_id`, `last_received` and `last_accepted` (with `last_accepted_seq`
 when not 0) are of the upload accepted last (see Acceptance order); an
 entry or result without an acceptance order compares by
-`last_received`.
+`last_received`. `older_skipped` counts the stores of the pipeline and
+sender skipped under `conflict: replace` because the stored file was
+accepted later (`store: older upload skipped`): uploads that overlap
+make a few; a count that keeps growing means new uploads are not kept
+(an acceptance order gone wrong, see Acceptance order). It only grows.
 
 A watch record holds `storage`, `rule` (1-based), the series
 (`pipeline`, `origin`, `file`; empty for a rule no series matches),
@@ -4067,7 +4116,8 @@ at 0 and every catalog is rebuilt). A base must be on a local filesystem
   `root:luk`, mode 0750, their `*.pub` files 0640 (never writable by group
   or others); `identity.key` owned `root:luk`, mode 0640, created by the
   package (see Identity key).
-- State: `/var/lib/luk` (`quota.json` of the quotas among it), shared by
+- State: `/var/lib/luk` (`quota.json` of the quotas and `accepted.json`
+  of the acceptance order among it), shared by
   both role units and created by tmpfiles.d (`deploy/luk.tmpfiles.conf`, installed as
   `/etc/tmpfiles.d/luk.conf`).
   `lukd` creates the subdirectories (`tls`, `queue/<endpoint>`, `gpg-cache`,
