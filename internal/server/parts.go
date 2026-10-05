@@ -169,6 +169,13 @@ func (s *Server) openUpload(cs *chanSession, r *http.Request, u *upload, max int
 	s.log.Debug("upload opened", "id", u.vars.Id, "sender", u.id.Name, "endpoint", ep.Name, "size", size, "part", partSize)
 	var offer wire.PartsOffer
 	offer.Parts.Size, offer.Parts.Parallel = partSize, pu.parallel
+	// The client keeps the upload open with KEEPALIVEs within idle while it
+	// waits on its source, and paces no part below rate.
+	offer.Parts.Idle = int64(pu.idle / time.Second)
+	if offer.Parts.Idle < 1 {
+		offer.Parts.Idle = 1
+	}
+	offer.Parts.Rate = ep.Limits.Body.BytesPerSecond()
 	return http.StatusOK, &offer, nil
 }
 
@@ -292,12 +299,17 @@ func (pu *partsUpload) limitsLocked(n uint32) (max int64, exact bool) {
 }
 
 // take makes w the writer of part n once its first frame opened: it
-// replaces an older writer, whose writes stop at their next frame.
+// replaces an older writer, whose writes stop at their next frame. An
+// older attempt arriving late (held up on the way) is refused instead, so
+// it never cuts the newer attempt the client waits for.
 func (pu *partsUpload) take(n uint32, w *partWriter) *answer {
 	pu.mu.Lock()
 	defer pu.mu.Unlock()
 	if a := pu.admitLocked(n); a != nil {
 		return a
+	}
+	if cur := pu.writers[n]; cur != nil && w.n.Attempt < cur.n.Attempt {
+		return refused(http.StatusConflict, "older attempt")
 	}
 	for int(n) >= len(pu.states) {
 		pu.states = append(pu.states, partAbsent)

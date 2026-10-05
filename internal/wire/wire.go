@@ -717,10 +717,14 @@ type LinkAnswer struct {
 // PartsOffer is the answer to an upload or a link replace inside the
 // channel that passed every check before the body: the content goes in
 // parts of Size bytes (the last one shorter), at most Parallel at once.
+// Idle (seconds) is the time the upload stays open without activity, Rate
+// (bytes per second, 0: none) the least rate a part must arrive at.
 type PartsOffer struct {
 	Parts struct {
 		Size     int64 `json:"size"`
 		Parallel int   `json:"parallel"`
+		Idle     int64 `json:"idle"`
+		Rate     int64 `json:"rate"`
 	} `json:"parts"`
 }
 

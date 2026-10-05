@@ -43,14 +43,20 @@ type Server struct {
 	// Part, when set, runs when a PART arrives, before it is read; true
 	// lets the PART go on.
 	Part func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool
+	// Message, when set, runs when any message arrives, before it is read
+	// and before Part; true lets the message go on.
+	Message func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool
 	// Header is set on every outer response, Date for instance.
 	Header http.Header
 	// Fallback, when set, serves the requests that are not of the
 	// channel.
 	Fallback http.Handler
-	// PartSize and Parallel are the offer; zero is 64KiB and 4.
+	// PartSize and Parallel are the offer; zero is 64KiB and 4. Idle
+	// (seconds) and Rate (bytes per second) go into the offer as they are.
 	PartSize int64
 	Parallel int
+	Idle     int64
+	Rate     int64
 
 	mu    sync.Mutex
 	sess  map[[16]byte]*session
@@ -124,6 +130,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"unknown session"}`, http.StatusNotFound)
 		return
 	}
+	if s.Message != nil && !s.Message(w, r, n) {
+		return
+	}
 	if n.Kind == channel.KindPart && s.Part != nil && !s.Part(w, r, n) {
 		return
 	}
@@ -147,6 +156,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		var offer wire.PartsOffer
 		offer.Parts.Size, offer.Parts.Parallel = s.PartSize, s.Parallel
+		offer.Parts.Idle, offer.Parts.Rate = s.Idle, s.Rate
 		if offer.Parts.Size == 0 {
 			offer.Parts.Size = 64 << 10
 		}

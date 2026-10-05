@@ -148,8 +148,8 @@ Transport request body:  0x02 || channel id (16) || nonce (8, big-endian) || fra
 Transport response body: 0x02 || counter (8, big-endian) || frames
 
 Request nonce (uint64):
-    bits 63..60 kind     1 OP, 2 PART, 3 COMPLETE, 4 ABORT (5 reserved)
-    bits 59..28 number   part number (PART), sequence (COMPLETE, ABORT), 0 (OP)
+    bits 63..60 kind     1 OP, 2 PART, 3 COMPLETE, 4 ABORT, 6 KEEPALIVE (5 reserved)
+    bits 59..28 number   part number (PART), sequence (COMPLETE, ABORT, KEEPALIVE), 0 (OP)
     bits 27..16 attempt  0..4095, incremented by the client on every resend
     bits 15..1  frame    frame index within the message
     bit  0      last     1 on the final frame of the message
@@ -173,8 +173,8 @@ Frames: plaintext chunks of 65536 bytes; the final frame carries 0..65536
 - A session is found by its channel id, and only on the host, path and
   listener of its handshake: anything else is 404 `unknown session`, in
   the clear. A request of another session fails on its first frame.
-- lukd acts on a message only once it opened: an OP, a COMPLETE and an
-  ABORT once the whole message opened, a PART once its first frame
+- lukd acts on a message only once it opened: an OP, a COMPLETE, an
+  ABORT and a KEEPALIVE once the whole message opened, a PART once its first frame
   opened. Nothing is written or cancelled for a message that does not
   open (400 `bad channel message` in the clear); only the checks of a
   PART from its clear nonce answer before it opened (see Uploads in
@@ -193,7 +193,7 @@ Inner messages (the plaintext of the frames):
 OP:             uint32 BE n || JSON {"method","target","header"} (n bytes) || body
 Every answer:   uint32 BE n || JSON {"status","header"} (n bytes) || body
 PART:           the raw bytes of the part
-COMPLETE, ABORT: empty
+COMPLETE, ABORT, KEEPALIVE: empty
 ```
 
 - `header` is a map of lists of strings (HTTP header form); the JSON
@@ -222,8 +222,9 @@ COMPLETE, ABORT: empty
 - A bad signature or any other refusal is the answer to the OP. The
   session ends with that answer, and with every answer to an OP that did
   not open an upload in parts. An upload (and a link replace) keeps the
-  session for its PART, COMPLETE and ABORT messages, and only for them:
-  a session has exactly one upload, and the messages carry no upload id.
+  session for its PART, COMPLETE, ABORT and KEEPALIVE messages, and only
+  for them: a session has exactly one upload, and the messages carry no
+  upload id.
 - luk signs with the one key it was told to use and does not try
   another one in the session; `luk scan` tries the keys of the agent in
   sessions of their own.
@@ -865,6 +866,9 @@ endpoint:
 - `parts.size` is the size of every part but the last; `parts.parallel`
   is the most parts a client sends at once (`luk send --parallel N`
   sends up to N, at most this). A reload applies both to new uploads.
+- `idle` is `limits.body.idle` in seconds (at least 1), `rate` is
+  `limits.body.rate` in bytes per second (0: off), so luk keeps the
+  upload alive and paces no part below the rate (see below).
 - At the OP lukd takes the place of the upload (`limits.uploads`), the
   quota and the queue space of a signed size, then the acceptance order
   of the upload (see Acceptance order), and creates its staging file
@@ -890,7 +894,9 @@ none), a stream ends with its first part shorter than `parts.size`
   can scatter ahead of the hash.
 - Once its first frame opened the part is taken. One writer per part: a
   newer attempt of a part replaces an older one still running, whose
-  writes stop at its next frame (409). Bytes land in the staging at
+  writes stop at its next frame (409). An older attempt that arrives
+  while a newer one is being written (held up on the way) is 409 `older
+  attempt` and leaves the newer one alone. Bytes land in the staging at
   their offsets as their frames open.
 - A part is verified once the whole message opened and its length is
   right: exactly `parts.size`, the rest of a file for its last part
@@ -933,11 +939,18 @@ the quota and the queue space go back; 200 `{}` (also for an upload that
 had ended without a commit), 409 `upload committed` after a commit. luk
 sends it on Ctrl-C and on a failure, waiting at most 5s for the answer.
 
+KEEPALIVE (kind 6, number: its own sequence from 0) keeps an upload
+open while luk waits on a slow source; its plaintext is empty (400
+otherwise). Once it opened it counts as activity of the session and is
+answered 200 `{}`. A KEEPALIVE in a session without its OP is 409 `the
+session has no operation`, in the clear, and changes nothing.
+
 States: open, then finalizing (the COMPLETE), then committed, aborted
 (ABORT, a refusal, the session dropped) or expired.
 
 - An open upload whose session has no activity (bytes of a part that
-  opened, a message) for `limits.body.idle` expires (logged `upload
+  opened, a message, a KEEPALIVE among them) for `limits.body.idle`
+  expires (logged `upload
   expired`): the staging goes, as for an ABORT.
 - A restart of the receive role drops every session; the staging
   directories (without `meta.json`) are removed at start like any half

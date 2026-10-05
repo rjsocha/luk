@@ -708,3 +708,99 @@ func TestUploadDroppedWhileFinishing(t *testing.T) {
 		t.Fatalf("%d open uploads", n)
 	}
 }
+
+// TestOlderAttemptRefused: an older attempt of a part that arrives while a
+// newer one is receiving is refused and leaves the newer one alone.
+func TestOlderAttemptRefused(t *testing.T) {
+	f, srvURL, pin := partsFixture(t, "4", nil)
+	data := content(2 * testPart)
+	c, _ := create(t, f, srvURL, pin, fileMeta(data))
+	pu := uploadOf(t, f, c)
+
+	n1 := channel.Nonce{Kind: channel.KindPart, Number: 1, Attempt: 1}
+	msg := c.seal(t, n1, partOf(data, 1))
+	pr, pw := io.Pipe()
+	type result struct {
+		resp *http.Response
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := http.Post(srvURL+"/drop", channel.ContentType, pr)
+		done <- result{resp, err}
+	}()
+	if _, err := pw.Write(msg[:25+channel.FrameSize+16]); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for pu.partState(1) != partReceiving {
+		if time.Now().After(deadline) {
+			t.Fatal("the newer attempt is not receiving")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	head, body := c.part(t, 1, 0, partOf(data, 1))
+	wantInner(t, "older attempt", head, body, http.StatusConflict)
+	if !strings.Contains(string(body), "older attempt") {
+		t.Fatalf("%s", body)
+	}
+	if _, err := pw.Write(msg[25+channel.FrameSize+16:]); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	r := <-done
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	defer r.resp.Body.Close()
+	head, body = c.inner(t, r.resp, n1)
+	wantInner(t, "newer attempt", head, body, http.StatusOK)
+	head, body = c.part(t, 0, 0, partOf(data, 0))
+	wantInner(t, "part 0", head, body, http.StatusOK)
+	head, body = c.control(t, channel.KindComplete, 0, 0)
+	wantInner(t, "complete", head, body, http.StatusCreated)
+}
+
+// TestKeepalive: a KEEPALIVE keeps an idle upload open, carries nothing
+// and is taken only in a session that has its OP.
+func TestKeepalive(t *testing.T) {
+	f, srvURL, pin := partsFixture(t, "4", func(s string) string {
+		return strings.Replace(s, `parts: {size: 64K`, `limits: {body: {idle: 10s, rate: 32K}}, parts: {size: 64K`, 1)
+	})
+	var mu sync.Mutex
+	now := time.Now()
+	f.srv.SetClock(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	})
+	advance := func(d time.Duration) {
+		mu.Lock()
+		now = now.Add(d)
+		mu.Unlock()
+	}
+	fresh := chanOpen(t, srvURL, "/drop", pin)
+	wantOuter(t, "keepalive before the OP", fresh.post(t, fresh.path, channel.Nonce{Kind: channel.KindKeepalive}, nil), http.StatusConflict)
+
+	data := content(testPart)
+	c, offer := create(t, f, srvURL, pin, fileMeta(data))
+	if offer.Parts.Idle != 10 || offer.Parts.Rate != 32<<10 {
+		t.Fatalf("offer %+v", offer)
+	}
+	pu := uploadOf(t, f, c)
+	for seq := range uint32(3) {
+		advance(8 * time.Second)
+		head, body := c.control(t, channel.KindKeepalive, seq, 0)
+		wantInner(t, "keepalive", head, body, http.StatusOK)
+		f.srv.sweepChannels()
+		if pu.stateOf() != upOpen {
+			t.Fatalf("expired despite keepalives: %s", pu.stateOf())
+		}
+	}
+	n := channel.Nonce{Kind: channel.KindKeepalive, Number: 3}
+	head, body := c.inner(t, c.post(t, c.path, n, []byte("x")), n)
+	wantInner(t, "keepalive with a payload", head, body, http.StatusBadRequest)
+	head, body = sendAll(t, c, data)
+	wantInner(t, "complete", head, body, http.StatusCreated)
+}
+

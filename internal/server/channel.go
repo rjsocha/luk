@@ -376,11 +376,39 @@ func (s *Server) chanTransport(w http.ResponseWriter, r *http.Request, sn *snaps
 		chanFail(w, http.StatusConflict, "repeated nonce")
 		return
 	}
-	if n.Kind == channel.KindPart {
+	switch n.Kind {
+	case channel.KindPart:
 		s.servePart(w, r, rc, cs, n, hdr, body)
+	case channel.KindKeepalive:
+		s.serveKeepalive(w, r, cs, n, hdr, body)
+	default:
+		s.serveControl(w, r, cs, n, hdr, body)
+	}
+}
+
+// serveKeepalive answers a KEEPALIVE: an empty message that, once it
+// opened, counts as activity of a session that has its OP, so an upload
+// whose client waits on a slow source does not expire. Before the OP it is
+// refused and changes nothing: the time to the OP stays bounded.
+func (s *Server) serveKeepalive(w http.ResponseWriter, r *http.Request, cs *chanSession, n channel.Nonce, hdr []byte, body io.Reader) {
+	if !cs.hasOp() {
+		chanFail(w, http.StatusConflict, "the session has no operation")
 		return
 	}
-	s.serveControl(w, r, cs, n, hdr, body)
+	plain, err := io.ReadAll(io.LimitReader(cs.sess.OpenRequest(body, hdr, n), 1))
+	if err != nil {
+		chanFail(w, readStatus(err), "bad channel message")
+		return
+	}
+	if !cs.claimNonce(n, s.now()) {
+		chanFail(w, http.StatusConflict, "repeated nonce")
+		return
+	}
+	if len(plain) > 0 {
+		s.seal(w, r, cs, n, *refused(http.StatusBadRequest, "a control message carries nothing"), true)
+		return
+	}
+	s.seal(w, r, cs, n, answer{code: http.StatusOK, body: struct{}{}}, false)
 }
 
 // chanOp runs the OP of a session: the whole message is read and

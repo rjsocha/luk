@@ -10,6 +10,9 @@ const (
 	KindPart     Kind = 2
 	KindComplete Kind = 3
 	KindAbort    Kind = 4
+	// KindKeepalive keeps the session of an upload active while the
+	// client waits on a slow source; 5 is reserved for a later FETCH.
+	KindKeepalive Kind = 6
 )
 
 const (
@@ -46,7 +49,7 @@ func (n Nonce) Uint64() uint64 {
 // are accepted; 5 is reserved for a later FETCH.
 func ParseNonce(v uint64) (Nonce, error) {
 	k := Kind(v >> 60)
-	if k < KindOp || k > KindAbort {
+	if (k < KindOp || k > KindAbort) && k != KindKeepalive {
 		return Nonce{}, fmt.Errorf("channel: unknown request kind %d", k)
 	}
 	return Nonce{
