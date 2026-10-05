@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -648,5 +649,62 @@ func TestPartWindowRetryAfter(t *testing.T) {
 	wantInner(t, "ahead of the window", head, body, http.StatusTooManyRequests)
 	if ra := head.Header.Get("Retry-After"); ra != "1" {
 		t.Fatalf("Retry-After %q", ra)
+	}
+}
+
+// A session that leaves the table while its OP opens an upload (evicted,
+// swept) takes nothing of the upload with it.
+func TestUploadSessionGoneBeforeAttach(t *testing.T) {
+	f, srvURL, pin := partsFixture(t, "4", nil)
+	testHookAttach = func(cs *chanSession) { f.srv.chans.drop(cs) }
+	t.Cleanup(func() { testHookAttach = nil })
+	c := chanOpen(t, srvURL, "/drop", pin)
+	head, body := c.op(t, c.putReq(t, f.user, fileMeta(content(100))), nil)
+	wantInner(t, "create in a dropped session", head, body, http.StatusNotFound)
+	if v := visible(t, filepath.Join(f.root, "q/drop")); len(v) != 0 {
+		t.Fatalf("queue holds %v", v)
+	}
+	if n := openUploads(f); n != 0 {
+		t.Fatalf("%d open uploads", n)
+	}
+}
+
+// An OP is not taken by a session that left the table while it was read.
+func TestClaimOpSessionGone(t *testing.T) {
+	f, srvURL, pin := partsFixture(t, "4", nil)
+	c := chanOpen(t, srvURL, "/drop", pin)
+	cs := f.srv.chans.get(c.sess.ID())
+	f.srv.chans.drop(cs)
+	if ok, gone := f.srv.chans.claim(cs, channel.Nonce{Kind: channel.KindOp}, f.srv.now()); ok || !gone {
+		t.Fatalf("claimed %v, gone %v", ok, gone)
+	}
+}
+
+// A session dropped while a complete holds its upload (here one that
+// answers missing parts) ends the upload once the complete is done.
+func TestUploadDroppedWhileFinishing(t *testing.T) {
+	f, srvURL, pin := partsFixture(t, "4", nil)
+	data := content(2 * testPart)
+	c, _ := create(t, f, srvURL, pin, fileMeta(data))
+	pu := uploadOf(t, f, c)
+	dir := pu.stage.Entry.Dir
+	pu.finish.Lock()
+	f.srv.chans.drop(f.srv.chans.get(c.sess.ID()))
+	if pu.stateOf() != upOpen {
+		t.Fatalf("state %s while finishing", pu.stateOf())
+	}
+	a := pu.completeLocked(f.srv, httptest.NewRequest(http.MethodPut, "/drop", nil))
+	if a.code != http.StatusConflict {
+		t.Fatalf("complete %d", a.code)
+	}
+	pu.releaseFinish()
+	if pu.stateOf() != upAborted {
+		t.Fatalf("state %s", pu.stateOf())
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("staging left: %v", err)
+	}
+	if n := openUploads(f); n != 0 {
+		t.Fatalf("%d open uploads", n)
 	}
 }

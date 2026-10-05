@@ -65,7 +65,11 @@ type partsUpload struct {
 	release func()
 
 	// finish orders complete, abort and expiry: one ends the upload.
+	// Release it with releaseFinish.
 	finish sync.Mutex
+	// orphaned marks an upload whose session went while finish was held:
+	// the holder ends it on release.
+	orphaned bool
 
 	mu      sync.Mutex
 	states  []partState
@@ -152,9 +156,14 @@ func (s *Server) openUpload(cs *chanSession, r *http.Request, u *upload, max int
 	if size >= 0 {
 		pu.states = make([]partState, (size+partSize-1)/partSize)
 	}
-	if !cs.setUpload(pu) {
+	if testHookAttach != nil {
+		testHookAttach(cs)
+	}
+	// The session may have left the table while its OP was served; an
+	// upload attached to it then would never be swept.
+	if err := s.chans.attach(cs, pu); err != nil {
 		st.Abort()
-		return 0, nil, fail(http.StatusConflict, "the session has an upload")
+		return 0, nil, err
 	}
 	ok = true
 	s.log.Debug("upload opened", "id", u.vars.Id, "sender", u.id.Name, "endpoint", ep.Name, "size", size, "part", partSize)
@@ -162,6 +171,10 @@ func (s *Server) openUpload(cs *chanSession, r *http.Request, u *upload, max int
 	offer.Parts.Size, offer.Parts.Parallel = partSize, pu.parallel
 	return http.StatusOK, &offer, nil
 }
+
+// testHookAttach, when set, runs right before an upload is attached to
+// its session.
+var testHookAttach func(cs *chanSession)
 
 // uploadSlots counts the open uploads in parts, in all and per identity
 // (limits.uploads).
@@ -544,7 +557,12 @@ func (s *Server) serveControl(w http.ResponseWriter, r *http.Request, cs *chanSe
 // complete.
 func (s *Server) complete(r *http.Request, pu *partsUpload) answer {
 	pu.finish.Lock()
-	defer pu.finish.Unlock()
+	defer pu.releaseFinish()
+	return pu.completeLocked(s, r)
+}
+
+// completeLocked is complete with pu.finish held.
+func (pu *partsUpload) completeLocked(s *Server, r *http.Request) answer {
 	pu.mu.Lock()
 	switch {
 	case pu.tomb != nil:
@@ -619,7 +637,7 @@ func (s *Server) complete(r *http.Request, pu *partsUpload) answer {
 // once, and what the upload holds goes back.
 func (s *Server) abort(pu *partsUpload) answer {
 	pu.finish.Lock()
-	defer pu.finish.Unlock()
+	defer pu.releaseFinish()
 	pu.mu.Lock()
 	defer pu.mu.Unlock()
 	switch pu.state {
@@ -651,7 +669,7 @@ func (pu *partsUpload) expire(now, last time.Time) bool {
 	if !pu.finish.TryLock() {
 		return false
 	}
-	defer pu.finish.Unlock()
+	defer pu.releaseFinish()
 	pu.mu.Lock()
 	defer pu.mu.Unlock()
 	if pu.state != upOpen || now.Sub(last) <= pu.idle {
@@ -662,17 +680,31 @@ func (pu *partsUpload) expire(now, last time.Time) bool {
 }
 
 // discard ends the upload when it is still open, as its session goes.
-// A complete in progress ends it itself.
+// It never waits: while finish is held the upload is marked orphaned and
+// the holder ends it on release. Both look under pu.mu, so one of them
+// sees the other.
 func (pu *partsUpload) discard(now time.Time) {
+	pu.mu.Lock()
+	defer pu.mu.Unlock()
+	pu.orphaned = true
 	if !pu.finish.TryLock() {
 		return
 	}
 	defer pu.finish.Unlock()
-	pu.mu.Lock()
-	defer pu.mu.Unlock()
 	if pu.state == upOpen {
 		pu.endLocked(upAborted, now)
 	}
+}
+
+// releaseFinish releases pu.finish, ending the upload first when its
+// session went meanwhile and it is still open.
+func (pu *partsUpload) releaseFinish() {
+	pu.mu.Lock()
+	defer pu.mu.Unlock()
+	if pu.orphaned && pu.state == upOpen {
+		pu.endLocked(upAborted, time.Now())
+	}
+	pu.finish.Unlock()
 }
 
 // gone reports whether the upload ended long enough ago for its session

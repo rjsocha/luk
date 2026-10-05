@@ -158,6 +158,31 @@ func (t *chanTable) get(id [16]byte) *chanSession {
 	return t.m[id]
 }
 
+// claim takes the authenticated OP of nonce n for cs while cs is in the
+// table; gone when it left it (evicted or swept while the OP was read).
+func (t *chanTable) claim(cs *chanSession, n channel.Nonce, now time.Time) (ok, gone bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.m[cs.sess.ID()] != cs {
+		return false, true
+	}
+	return cs.claimOp(n, now), false
+}
+
+// attach makes pu the upload of cs while cs is in the table, so that the
+// sweep and the drop of cs always reach it.
+func (t *chanTable) attach(cs *chanSession, pu *partsUpload) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.m[cs.sess.ID()] != cs {
+		return fail(http.StatusNotFound, "unknown session")
+	}
+	if !cs.setUpload(pu) {
+		return fail(http.StatusConflict, "the session has an upload")
+	}
+	return nil
+}
+
 // opened takes cs off the pending list once it has its OP.
 func (t *chanTable) opened(cs *chanSession) {
 	t.mu.Lock()
@@ -381,7 +406,12 @@ func (s *Server) chanOp(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 	}
 	// A copy of the OP that got past the check above is refused alone:
 	// the session may be opening an upload with the first one.
-	if !cs.claimOp(n, s.now()) {
+	ok, gone := s.chans.claim(cs, n, s.now())
+	if gone {
+		chanFail(w, http.StatusNotFound, "unknown session")
+		return
+	}
+	if !ok {
 		chanFail(w, http.StatusConflict, "the session has had its operation")
 		return
 	}
