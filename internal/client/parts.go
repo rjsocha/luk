@@ -197,11 +197,13 @@ func uploadOnce(ctx context.Context, o Options, u *url.URL, op opFunc, meter *pa
 		return &partsResult{resp: resp}, nil
 	}
 	var offer wire.PartsOffer
-	if err := json.Unmarshal(resp.Body, &offer); err != nil || offer.Parts.Size <= 0 || offer.Parts.Parallel <= 0 {
-		return nil, fmt.Errorf("bad parts offer: %s", Printable(string(resp.Body)))
-	}
+	jerr := json.Unmarshal(resp.Body, &offer)
 	r := &partsRun{c: c, o: &o, host: u.Host, partSize: offer.Parts.Size, meter: meter, pace: newPacer(o.BWLimit),
 		idle: time.Duration(offer.Parts.Idle) * time.Second, attempts: map[channel.Nonce]uint16{}, done: map[uint32]bool{}}
+	if jerr != nil || !soundOffer(offer) {
+		r.abort()
+		return nil, fmt.Errorf("bad parts offer: %s", Printable(string(resp.Body)))
+	}
 	r.limit = partsWorkers(o.Parallel, offer.Parts.Parallel, o.BWLimit, offer.Parts.Rate)
 	if o.NoBody || (o.Source == nil && o.Body == nil) {
 		r.abort()
@@ -214,6 +216,23 @@ func uploadOnce(ctx context.Context, o Options, u *url.URL, op opFunc, meter *pa
 		return nil, fmt.Errorf("--bwlimit %s/s is below the minimum rate of this endpoint (%s/s)", HumanBytes(o.BWLimit), HumanBytes(rate))
 	}
 	return r.run(ctx)
+}
+
+// The bounds of an offer, those of parts in the configuration of lukd: a
+// part of whole 64KiB frames whose frame index fits its nonce, and the
+// parallel parts luk buffers a stream for.
+const (
+	minOfferPart     = 64 << 10
+	maxOfferPart     = 2<<30 - 64<<10
+	maxOfferParallel = 64
+)
+
+// soundOffer reports whether the offer is one lukd can make: luk sizes
+// its buffers and timers by it.
+func soundOffer(o wire.PartsOffer) bool {
+	p := o.Parts
+	return p.Size >= minOfferPart && p.Size <= maxOfferPart && p.Size%minOfferPart == 0 &&
+		p.Parallel >= 1 && p.Parallel <= maxOfferParallel && p.Idle >= 1 && p.Rate >= 0
 }
 
 // partsWorkers is the number of workers of an upload: --parallel (at

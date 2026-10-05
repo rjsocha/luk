@@ -53,8 +53,8 @@ type Server struct {
 	// Fallback, when set, serves the requests that are not of the
 	// channel.
 	Fallback http.Handler
-	// PartSize and Parallel are the offer; zero is 64KiB and 4. Idle
-	// (seconds) and Rate (bytes per second) go into the offer as they are.
+	// PartSize, Parallel and Idle (seconds) are the offer; zero is 64KiB,
+	// 4 and 120. Rate (bytes per second) goes into the offer as it is.
 	PartSize int64
 	Parallel int
 	Idle     int64
@@ -164,6 +164,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if offer.Parts.Parallel == 0 {
 			offer.Parts.Parallel = 4
+		}
+		if offer.Parts.Idle == 0 {
+			offer.Parts.Idle = 120
 		}
 		a = Answer{Status: http.StatusOK, Body: offer}
 	case channel.KindPart:

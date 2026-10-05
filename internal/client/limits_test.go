@@ -304,3 +304,41 @@ func TestDialHandshakeHint(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// An offer outside what lukd can offer (part size, parallel parts, idle,
+// rate) is refused before any part, with an ABORT.
+func TestBadOffer(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		size     int64
+		parallel int
+		idle     int64
+		rate     int64
+	}{
+		{"small part", 32 << 10, 4, 60, 0},
+		{"part not of whole frames", 64<<10 + 1, 4, 60, 0},
+		{"large part", 2 << 30, 4, 60, 0},
+		{"parallel", 64 << 10, 65, 60, 0},
+		{"no parallel", 64 << 10, -1, 60, 0},
+		{"idle", 64 << 10, 4, -1, 0},
+		{"rate", 64 << 10, 4, 60, -1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+			srv.PartSize, srv.Parallel, srv.Idle, srv.Rate = c.size, c.parallel, c.idle, c.rate
+			_, err := Upload(context.Background(), fakeOpts(t, srv, patterned(3<<16)))
+			if err == nil || !strings.HasPrefix(err.Error(), "bad parts offer: ") {
+				t.Fatalf("%v", err)
+			}
+			if srv.Count(channel.KindPart) != 0 || srv.Count(channel.KindAbort) != 1 {
+				t.Fatalf("%d parts, %d aborts", srv.Count(channel.KindPart), srv.Count(channel.KindAbort))
+			}
+		})
+	}
+	// The largest offer lukd makes is taken.
+	srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+	srv.PartSize, srv.Parallel, srv.Idle = 2<<30-64<<10, 64, 1
+	if _, err := Upload(context.Background(), fakeOpts(t, srv, patterned(3<<16))); err != nil {
+		t.Fatal(err)
+	}
+}
