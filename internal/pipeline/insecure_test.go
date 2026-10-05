@@ -222,6 +222,10 @@ printf other > "$LUK_OUT/db-2026.sql.zst"
 	if !slices.Equal(names, []string{"db-2026.sql.zst.gpg", "db-latest.sql.zst.enc"}) {
 		t.Fatalf("stored %v", names)
 	}
+	rec := find(g.logs.records(t), "encrypted", "p")
+	if rec == nil || rec["openssl"] != float64(1) || rec["openssl_key"] != "pw-b" || rec["passwords"] == nil || rec["recipients"] == nil {
+		t.Fatalf("encrypted log %v", rec)
+	}
 	enc := g.raw(t, "a/file/robert.socha/db-latest.sql.zst.enc")
 	if got := string(opensslDecrypt(t, enc, "second secret")); got != "dump" {
 		t.Fatalf("openssl decrypted %q", got)
@@ -265,6 +269,16 @@ func TestEncryptOpenSSLOnlyNeedsNoRecipient(t *testing.T) {
 	g.run(t, "id1")
 	if find(g.logs.records(t), "pipeline done", "p") == nil {
 		t.Fatalf("logs %v", g.logs.records(t))
+	}
+	// Nothing went the gpg way, so the log names no recipients or passwords.
+	rec := find(g.logs.records(t), "encrypted", "p")
+	if rec == nil || rec["openssl"] != float64(1) || rec["openssl_key"] != "pw" {
+		t.Fatalf("encrypted log %v", rec)
+	}
+	for _, k := range []string{"recipients", "passwords"} {
+		if _, ok := rec[k]; ok {
+			t.Fatalf("encrypted log has %s: %v", k, rec)
+		}
 	}
 	if got := string(opensslDecrypt(t, g.raw(t, "a/file/robert.socha/f.txt.enc"), "secret")); got != "data-id1" {
 		t.Fatalf("decrypted %q", got)

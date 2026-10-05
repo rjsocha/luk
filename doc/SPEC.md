@@ -3050,7 +3050,12 @@ key reads as a warning in the configuration on purpose.
   the password, or takes it with `--batch --pinentry-mode loopback
   --passphrase-file password.txt`. The meta
   of the file gets `"passwords"`: the names (never the passwords), next
-  to `"recipients"`.
+  to `"recipients"`. Key holders: gpg tries the password packet first, so
+  `gpg --batch -d` with a recipient key prints the plaintext but exits 2
+  (problem with the agent); scripts must use `gpg --batch --pinentry-mode
+  cancel -d f.txt.gpg`, which decrypts with the key and exits 0
+  (verified on GnuPG 2.4.7). Interactive gpg asks for the password first
+  and uses the key once the prompt is cancelled.
 - `openssl`: a file whose name (as it enters the step) matches one of
   the `files` globs (`path.Match`: `*`, `?`, `[...]`, never across a
   slash) is written only as `out/<name>.enc`, never as `.gpg`, in the

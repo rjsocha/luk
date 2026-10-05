@@ -156,12 +156,17 @@ func (d *Dispatcher) encryptStep(j Job, keys *gpgkeys.Resolver, passwordDir, nam
 		}
 		next = append(next, o)
 	}
-	attrs := []any{"id", j.Entry.ID, "pipeline", name, "step", step, "files", len(next), "recipients", fps}
-	if len(symmetric) > 0 {
-		attrs = append(attrs, "passwords", symmetric)
+	// The log names what was applied: recipients and passwords only when a
+	// file went the gpg way, the openssl key only when one went the openssl way.
+	attrs := []any{"id", j.Entry.ID, "pipeline", name, "step", step, "files", len(next)}
+	if nossl < len(set) {
+		attrs = append(attrs, "recipients", fps)
+		if len(symmetric) > 0 {
+			attrs = append(attrs, "passwords", symmetric)
+		}
 	}
-	if ossl != nil {
-		attrs = append(attrs, "openssl", nossl)
+	if nossl > 0 {
+		attrs = append(attrs, "openssl", nossl, "openssl_key", ossl.Key)
 	}
 	d.log.Info("encrypted", attrs...)
 	return next, nil
