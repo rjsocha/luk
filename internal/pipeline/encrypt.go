@@ -115,11 +115,10 @@ func (d *Dispatcher) encryptStep(j Job, keys *gpgkeys.Resolver, passwordDir, nam
 		}
 		osslPassword = pw
 	}
-	// The recipients are looked up only for a set that has a file for
-	// them.
+	// A set that goes to the openssl format alone needs no recipient.
 	var ents []*openpgp.Entity
 	var fps []string
-	if slices.ContainsFunc(set, func(f file) bool { return !ossl.Match(f.name) }) {
+	if ossl == nil || slices.ContainsFunc(set, func(f file) bool { return !ossl.Match(f.name) }) {
 		var err error
 		if ents, fps, err = d.recipients(j, keys, name, step, e); err != nil {
 			return nil, err
