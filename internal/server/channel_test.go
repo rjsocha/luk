@@ -1,10 +1,13 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -315,15 +318,144 @@ func TestChannelWrongPath(t *testing.T) {
 	wantOuter(t, "transport to another path", resp, http.StatusNotFound)
 }
 
-func TestChannelSecondOp(t *testing.T) {
-	_, srvURL, pin := chanFixture(t, nil)
+func TestChannelSessionEndsAfterOp(t *testing.T) {
+	f, srvURL, pin := chanFixture(t, nil)
 	c := chanOpen(t, srvURL, wire.EndpointsPath, pin)
 	req := channel.Request{Method: http.MethodGet, Target: wire.EndpointsPath}
 	if head, body := c.op(t, req, nil); head.Status != http.StatusUnauthorized {
 		t.Fatalf("unsigned list: %d %s", head.Status, body)
 	}
-	wantOuter(t, "second OP", c.opRaw(t, req, nil), http.StatusConflict)
-	wantOuter(t, "after the second OP", c.opRaw(t, req, nil), http.StatusNotFound)
+	if f.srv.chans.get(c.sess.ID()) != nil {
+		t.Fatal("session kept after its OP was answered")
+	}
+	wantOuter(t, "after the OP", c.opRaw(t, req, nil), http.StatusNotFound)
+}
+
+// A forged OP to a session that has had its OP, with the channel id
+// from the clear header, is refused without ending the session.
+func TestChannelForgedSecondOp(t *testing.T) {
+	f, srvURL, pin := chanFixture(t, nil)
+	c := chanOpen(t, srvURL, "/drop", pin)
+	cs := f.srv.chans.get(c.sess.ID())
+	if !cs.claimOp(channel.Nonce{Kind: channel.KindOp, Attempt: 9}, f.srv.now()) {
+		t.Fatal("claim")
+	}
+	f.srv.chans.opened(cs)
+	var buf bytes.Buffer
+	if err := c.sess.SealRequest(&buf, channel.Nonce{Kind: channel.KindOp}, bytes.NewReader(nil)); err != nil {
+		t.Fatal(err)
+	}
+	forged := append(buf.Bytes()[:25:25], bytes.Repeat([]byte{7}, 40)...)
+	resp, err := http.Post(srvURL+"/drop", channel.ContentType, bytes.NewReader(forged))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	wantOuter(t, "forged second OP", resp, http.StatusConflict)
+	if f.srv.chans.get(c.sess.ID()) != cs {
+		t.Fatal("a forged OP ended the session")
+	}
+}
+
+func TestChannelConcurrentOps(t *testing.T) {
+	_, srvURL, pin := chanFixture(t, nil)
+	c := chanOpen(t, srvURL, wire.EndpointsPath, pin)
+	var bodies [2][]byte
+	for i := range bodies {
+		var buf bytes.Buffer
+		plain := opPlain(t, channel.Request{Method: http.MethodGet, Target: wire.EndpointsPath}, nil)
+		if err := c.sess.SealRequest(&buf, channel.Nonce{Kind: channel.KindOp, Attempt: uint16(i)}, bytes.NewReader(plain)); err != nil {
+			t.Fatal(err)
+		}
+		bodies[i] = buf.Bytes()
+	}
+	var codes [2]int
+	var wg sync.WaitGroup
+	for i := range bodies {
+		wg.Go(func() {
+			resp, err := http.Post(srvURL+wire.EndpointsPath, channel.ContentType, bytes.NewReader(bodies[i]))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			codes[i] = resp.StatusCode
+		})
+	}
+	wg.Wait()
+	won := 0
+	for _, code := range codes {
+		switch code {
+		case http.StatusOK:
+			won++
+		case http.StatusConflict, http.StatusNotFound:
+		default:
+			t.Errorf("status %d", code)
+		}
+	}
+	if won != 1 {
+		t.Fatalf("%v: %d OPs ran, want 1", codes, won)
+	}
+}
+
+// stalled sends the head of a POST with a body of n bytes and only
+// prefix of it, and returns the status lukd answers before the client
+// gives up.
+func stalled(t *testing.T, srvURL, path string, n int, prefix []byte) int {
+	t.Helper()
+	u, err := url.Parse(srvURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", path, u.Host, channel.ContentType, n)
+	if _, err := conn.Write(prefix); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("no answer to a stalled body: %v", err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestChannelStalledBody(t *testing.T) {
+	_, srvURL, pin := chanFixture(t, func(s string) string { return s + "limits: {header: {timeout: 1s}, channel: {auth: 1s}}\n" })
+	if code := stalled(t, srvURL, "/drop", 33, []byte{1}); code != http.StatusRequestTimeout {
+		t.Fatalf("stalled handshake: %d", code)
+	}
+	c := chanOpen(t, srvURL, "/drop", pin)
+	var buf bytes.Buffer
+	if err := c.sess.SealRequest(&buf, channel.Nonce{Kind: channel.KindOp}, bytes.NewReader(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if code := stalled(t, srvURL, "/drop", 1000, buf.Bytes()[:25]); code != http.StatusRequestTimeout {
+		t.Fatalf("stalled OP: %d", code)
+	}
+}
+
+// A v2 signature in HTTP headers, outside the channel, does not verify.
+func TestChannelV2OutsideChannel(t *testing.T) {
+	f, _, _ := chanFixture(t, nil)
+	const host = "lukd.test"
+	hr := httptest.NewRequest(http.MethodGet, "https://"+host+wire.EndpointsPath, nil)
+	hr.Header = signHeaders(t, f.user, nil, wire.ListNamespaceV2, func(ts, nonce string) []byte {
+		return wire.ListCanonicalTextV2(http.MethodGet, host, wire.EndpointsPath, ts, nonce, nil)
+	})
+	rec := httptest.NewRecorder()
+	f.handler().ServeHTTP(rec, hr)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
 }
 
 func TestChannelPartNotImplemented(t *testing.T) {

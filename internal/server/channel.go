@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -49,13 +51,6 @@ type chanSession struct {
 	// elem is the place of the session in the pending list of its table;
 	// nil once it has its OP or is dropped. The table lock guards it.
 	elem *list.Element
-}
-
-// touch records activity at now.
-func (cs *chanSession) touch(now time.Time) {
-	cs.mu.Lock()
-	cs.last = now
-	cs.mu.Unlock()
 }
 
 // hasOp reports whether the session has taken its OP.
@@ -198,19 +193,34 @@ func endpointOf(l *listener, path string) (*config.Endpoint, bool) {
 
 // serveChannel answers a channel request: a handshake opens a session, a
 // transport request carries a message of one.
+// The server has no read timeout of its own: the body, up to the clear
+// header of a transport request, must arrive within
+// limits.header.timeout, so a stalled one does not hold the connection.
 func (s *Server) serveChannel(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener) {
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(time.Duration(sn.cfg.Limits.Header.Timeout)))
+	defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
 	body := bufio.NewReader(r.Body)
 	first, err := body.Peek(1)
 	switch {
 	case err != nil:
-		chanFail(w, http.StatusBadRequest, "empty channel request")
+		chanFail(w, readStatus(err), "empty channel request")
 	case first[0] == chanTypeHandshake:
 		s.chanHandshake(w, r, l, body)
 	case first[0] == chanTypeTransport:
-		s.chanTransport(w, r, sn, l, body)
+		s.chanTransport(w, r, sn, l, rc, body)
 	default:
 		chanFail(w, http.StatusBadRequest, "unknown channel request")
 	}
+}
+
+// readStatus is the status of a channel body that could not be read: 408
+// when it did not arrive in time.
+func readStatus(err error) int {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return http.StatusRequestTimeout
+	}
+	return http.StatusBadRequest
 }
 
 // chanHandshake answers a handshake on an endpoint path of l or the
@@ -231,8 +241,12 @@ func (s *Server) chanHandshake(w http.ResponseWriter, r *http.Request, l *listen
 		return
 	}
 	b, err := io.ReadAll(io.LimitReader(body, maxHandshake+1))
-	if err != nil || len(b) > maxHandshake {
-		reject(http.StatusBadRequest, "bad handshake", err)
+	if err != nil {
+		reject(readStatus(err), "bad handshake", err)
+		return
+	}
+	if len(b) > maxHandshake {
+		reject(http.StatusBadRequest, "bad handshake", nil)
 		return
 	}
 	host := strings.ToLower(r.Host)
@@ -259,10 +273,10 @@ func errText(msg string, err error) string {
 // chanTransport answers a transport request. A session is found only on
 // the Host, path and listener of its handshake, so a message relayed to
 // another URL is unknown there.
-func (s *Server) chanTransport(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener, body io.Reader) {
+func (s *Server) chanTransport(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener, rc *http.ResponseController, body io.Reader) {
 	id, n, hdr, err := channel.ParseRequestHeader(body)
 	if err != nil {
-		chanFail(w, http.StatusBadRequest, "bad channel request")
+		chanFail(w, readStatus(err), "bad channel request")
 		return
 	}
 	cs := s.chans.get(id)
@@ -273,6 +287,7 @@ func (s *Server) chanTransport(w http.ResponseWriter, r *http.Request, sn *snaps
 	// Activity counts once a message opens: a forged one with a known id
 	// does not keep a session alive.
 	if n.Kind == channel.KindOp {
+		_ = rc.SetReadDeadline(time.Now().Add(time.Duration(sn.cfg.Limits.Channel.Auth)))
 		s.chanOp(w, r, sn, l, cs, n, hdr, body)
 		return
 	}
@@ -286,16 +301,17 @@ func (s *Server) chanTransport(w http.ResponseWriter, r *http.Request, sn *snaps
 // chanOp runs the OP of a session: the whole message is read and
 // authenticated before anything acts on it, then it runs through the
 // endpoint handlers and its answer goes back sealed. A session takes one
-// OP; another drops it.
+// OP: another one that authenticates drops it, while one refused before
+// it is read leaves it alone, as anybody can name a session by the id in
+// the clear. The session ends with the answer to its OP.
 func (s *Server) chanOp(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener, cs *chanSession, n channel.Nonce, hdr []byte, body io.Reader) {
 	if cs.hasOp() {
-		s.chans.drop(cs)
 		chanFail(w, http.StatusConflict, "the session has had its operation")
 		return
 	}
 	plain, err := io.ReadAll(io.LimitReader(cs.sess.OpenRequest(body, hdr, n), maxOp+1))
 	if err != nil {
-		chanFail(w, http.StatusBadRequest, "bad channel message")
+		chanFail(w, readStatus(err), "bad channel message")
 		return
 	}
 	if len(plain) > maxOp {
@@ -321,7 +337,7 @@ func (s *Server) chanOp(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 	if err := cw.Close(); err != nil {
 		s.log.Debug("channel response not sent", "remote", r.RemoteAddr, "host", r.Host, "path", r.URL.Path, "error", err)
 	}
-	cs.touch(s.now())
+	s.chans.drop(cs)
 }
 
 // innerRequest is the request an OP carries, to the Host of the session
