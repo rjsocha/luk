@@ -1053,13 +1053,13 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   served and lukd never removes it by itself (neither role); `lukd check`
   warns about each (`storage <s>: permanent name <path>/<name> is an
   orphan: no endpoint allocates it`), `lukd storage permanent` lists it
-  with `ORPHAN`, and `lukd storage permanent --prune-orphans` removes it.
+  with `ORPHAN`, and `lukd storage permanent --prune` removes it.
   Its versions stay ordinary stored files (ttl, retention, `lukd storage
   rm`); adding the entry back publishes the name again (its version
   accepted last).
 - Empty names: the directory of an empty name (only `current.last`)
   stays; `lukd storage permanent` lists it without a current version and
-  `--prune-empty` removes it, with the record of the version published
+  `--prune` removes it, with the record of the version published
   last (a version stored afterwards becomes current whatever its
   acceptance).
 - Listing: the endpoint listing shows `permanent: true` when an entry
@@ -2807,16 +2807,15 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   and `EXPIRES`. `--json` prints an array of `key`, `path`, `name`,
   `current`, `id`, `received`, `expires` (the last four omitted when
   empty) and `orphan`.
-  `--prune-orphans [--yes]` removes the directories of the orphans under
-  the base lock, each only while it is still an orphan, printing
+  `--prune [--yes]` removes the directories of the orphans and of the
+  empty names (allocated, without a current version, with their record of
+  the version published last) under the base lock, each only while it is
+  still an orphan or empty, printing
   `<path>/<name>: removed` per name; without `--yes` it lists them on
   stderr with their current versions and asks on a terminal (`[y/N]`),
   and refuses when stdin is not one. The versions stay: they are
   ordinary stored files that expire, are pruned by retention or removed
   with `lukd storage rm`. Neither role ever removes an orphan.
-  `--prune-empty [--yes]` removes, the same way, the directories of the
-  empty names (allocated, without a current version) with their record
-  of the version published last, each only while it is still empty.
 - `lukd storage watch --storage NAME [--json] [--suggest]`: the
   evaluation of the watch rules (see `watch`) now, read only. First the
   rules (`rule <i>: <globs>: <checks>`), then, per series in order of

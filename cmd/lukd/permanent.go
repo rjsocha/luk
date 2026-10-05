@@ -23,10 +23,10 @@ import (
 // storage, and the removal of the orphaned and the empty ones.
 func storagePermanentCmd(cfgPath *string) *cobra.Command {
 	var storage string
-	var asJSON, orphans, empty, yes bool
+	var asJSON, prune, yes bool
 	cmd := &cobra.Command{
 		Use:   "permanent",
-		Short: "List the permanent names of a storage, remove orphaned or empty ones",
+		Short: "List the permanent names of a storage, remove orphaned and empty ones",
 		Long: "List the permanent names of a local storage (the directories under\n" +
 			".db/permanent): PATH and NAME (as published), CURRENT (the stored name of\n" +
 			"the current version, the version published last), RECEIVED and EXPIRES (of\n" +
@@ -35,15 +35,14 @@ func storagePermanentCmd(cfgPath *string) *cobra.Command {
 			"permanent.path, or no entry of that endpoint covers it. A name whose\n" +
 			"version is gone (removed, expired) is empty: CURRENT, RECEIVED and EXPIRES\n" +
 			"are -, it answers 404 until a later version is published.\n" +
-			"An orphan is not served and never removed by lukd itself. --prune-orphans\n" +
-			"removes the directories of the orphans under the base lock; the versions\n" +
+			"An orphan is not served and never removed by lukd itself. --prune\n" +
+			"removes, under the base lock, the directories of the orphans and of the\n" +
+			"empty names (with the record of the version published last); the versions\n" +
 			"stay, they are ordinary stored files (lukd storage rm, ttl, retention).\n" +
-			"--prune-empty removes the directories of the empty names (with the record\n" +
-			"of the version published last). Both ask for confirmation on a terminal;\n" +
-			"elsewhere --yes is required.",
+			"It asks for confirmation on a terminal; elsewhere --yes is required.",
 		Example: "  lukd storage permanent --storage drop\n" +
-			"  lukd storage permanent --storage drop --prune-orphans\n" +
-			"  lukd storage permanent --storage drop --prune-empty --yes",
+			"  lukd storage permanent --storage drop --prune\n" +
+			"  lukd storage permanent --storage drop --prune --yes",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			_, _, l, err := openStorage(*cfgPath, storage)
@@ -51,14 +50,17 @@ func storagePermanentCmd(cfgPath *string) *cobra.Command {
 				return err
 			}
 			list, lerr := l.PermanentList()
-			var p *pruning
-			switch {
-			case orphans:
-				p = &pruning{what: "orphaned", pick: func(p store.PermanentInfo) bool { return p.Orphan }, prune: l.PruneOrphan}
-			case empty:
-				p = &pruning{what: "empty", pick: func(p store.PermanentInfo) bool { return !p.Orphan && p.Current == "" }, prune: l.PruneEmpty}
-			}
-			if p != nil {
+			if prune {
+				p := &pruning{
+					what: "orphaned or empty",
+					pick: func(p store.PermanentInfo) bool { return p.Orphan || p.Current == "" },
+					prune: func(p store.PermanentInfo) error {
+						if p.Orphan {
+							return l.PruneOrphan(p.Key)
+						}
+						return l.PruneEmpty(p.Key)
+					},
+				}
 				if err := p.run(storage, list, yes, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
 					return errors.Join(err, lerr)
 				}
@@ -73,11 +75,10 @@ func storagePermanentCmd(cfgPath *string) *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&storage, "storage", "", "storage name")
 	f.BoolVar(&asJSON, "json", false, "print JSON")
-	f.BoolVar(&orphans, "prune-orphans", false, "remove the directories of the orphaned permanent names")
-	f.BoolVar(&empty, "prune-empty", false, "remove the directories of the permanent names without a current version")
-	f.BoolVar(&yes, "yes", false, "with --prune-orphans or --prune-empty: do not ask for confirmation")
+	f.BoolVar(&prune, "prune", false, "remove the directories of the orphaned permanent names and of those without a current version")
+	f.BoolVar(&yes, "yes", false, "with --prune: do not ask for confirmation")
 	cmd.MarkFlagRequired("storage")
-	cmd.MarkFlagsMutuallyExclusive("json", "prune-orphans", "prune-empty")
+	cmd.MarkFlagsMutuallyExclusive("json", "prune")
 	completeFlags(cmd, map[string]cobra.CompletionFunc{"storage": completeStorage})
 	return cmd
 }
@@ -125,7 +126,7 @@ func printPermanent(w io.Writer, list []store.PermanentInfo, asJSON bool) error 
 type pruning struct {
 	what  string
 	pick  func(store.PermanentInfo) bool
-	prune func(key string) error
+	prune func(store.PermanentInfo) error
 }
 
 // run removes the names of list p selects, after a confirmation on a
@@ -157,7 +158,7 @@ func (p *pruning) run(storage string, list []store.PermanentInfo, yes bool, in i
 	}
 	var errs []error
 	for _, pi := range names {
-		if err := p.prune(pi.Key); err != nil {
+		if err := p.prune(pi); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -182,7 +183,7 @@ func permanentOrphans(cfg *config.Config) []string {
 		}
 		for _, p := range list {
 			if p.Orphan {
-				out = append(out, fmt.Sprintf("storage %s: permanent name %s is an orphan: no endpoint allocates it (lukd storage permanent --storage %s --prune-orphans)", name, status.Clean(p.Key), name))
+				out = append(out, fmt.Sprintf("storage %s: permanent name %s is an orphan: no endpoint allocates it (lukd storage permanent --storage %s --prune)", name, status.Clean(p.Key), name))
 			}
 		}
 	}

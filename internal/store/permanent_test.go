@@ -544,7 +544,7 @@ func TestPermanentNestedNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkPerm(t, l, "permanent/a/b", "y", "AB")
-	// The empty name a goes with prune-empty, a/b stays.
+	// The empty name a goes with --prune, a/b stays.
 	if err := l.PruneEmpty("permanent/a/b"); err == nil {
 		t.Fatal("pruned a name with a current version")
 	}

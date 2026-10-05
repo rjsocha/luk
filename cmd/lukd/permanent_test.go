@@ -75,7 +75,7 @@ func TestStoragePermanent(t *testing.T) {
 		t.Fatalf("list\n%s", out)
 	}
 	// The entry of two goes: an orphan, reported by lukd check, kept by
-	// lukd, removed by --prune-orphans.
+	// lukd, removed by --prune.
 	permanentConfig(t, root, cfgPath, `{one: {allow: ['*']}}`)
 	_, errOut, err := runLukdIn(t, "", "check", "--no-running", "-c", cfgPath)
 	if err != nil || !strings.Contains(errOut, "warning: storage drop: permanent name permanent/two is an orphan") {
@@ -88,15 +88,15 @@ func TestStoragePermanent(t *testing.T) {
 	isTerm := stdinIsTerminal
 	t.Cleanup(func() { stdinIsTerminal = isTerm })
 	stdinIsTerminal = func() bool { return false }
-	if _, _, err := runLukdIn(t, "", "storage", "permanent", "--storage", "drop", "--prune-orphans", "-c", cfgPath); err == nil || !strings.Contains(err.Error(), "without --yes") {
+	if _, _, err := runLukdIn(t, "", "storage", "permanent", "--storage", "drop", "--prune", "-c", cfgPath); err == nil || !strings.Contains(err.Error(), "without --yes") {
 		t.Fatalf("no terminal: %v", err)
 	}
 	stdinIsTerminal = func() bool { return true }
-	if _, prompt, err := runLukdIn(t, "n\n", "storage", "permanent", "--storage", "drop", "--prune-orphans", "-c", cfgPath); err == nil ||
+	if _, prompt, err := runLukdIn(t, "n\n", "storage", "permanent", "--storage", "drop", "--prune", "-c", cfgPath); err == nil ||
 		!strings.Contains(prompt, "permanent/two (current c)") {
 		t.Fatalf("declined: %v %q", err, prompt)
 	}
-	out, _, err = runLukdIn(t, "", "storage", "permanent", "--storage", "drop", "--prune-orphans", "--yes", "-c", cfgPath)
+	out, _, err = runLukdIn(t, "", "storage", "permanent", "--storage", "drop", "--prune", "--yes", "-c", cfgPath)
 	if err != nil || out != "permanent/two: removed\n" {
 		t.Fatalf("prune: %v %q", err, out)
 	}
@@ -116,7 +116,7 @@ func TestStoragePermanent(t *testing.T) {
 		t.Fatalf("check after prune: %v %q", err, errOut)
 	}
 	// The version of one goes: the name is empty, listed without a
-	// current version until --prune-empty removes it.
+	// current version until --prune removes it.
 	if err := l.Remove("a"); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestStoragePermanent(t *testing.T) {
 	if err != nil || !strings.Contains(out, "permanent  one   -        -         -        -") {
 		t.Fatalf("empty list: %v\n%s", err, out)
 	}
-	out, _, err = runLukdIn(t, "", "storage", "permanent", "--storage", "drop", "--prune-empty", "--yes", "-c", cfgPath)
+	out, _, err = runLukdIn(t, "", "storage", "permanent", "--storage", "drop", "--prune", "--yes", "-c", cfgPath)
 	if err != nil || out != "permanent/one: removed\n" {
 		t.Fatalf("prune empty: %v %q", err, out)
 	}
