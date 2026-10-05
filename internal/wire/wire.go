@@ -40,6 +40,13 @@ const (
 	// ListNamespace signs the endpoint listing (EndpointsPath); no other
 	// signature verifies as one, nor a list signature as anything else.
 	ListNamespace = "luk-list@v1"
+	// NamespaceV2, ListNamespaceV2 and LinkNamespaceV2 sign the upload,
+	// the endpoint listing and the link requests inside the channel; their
+	// texts end with the session hash, so a signature is good for one
+	// session only and never verifies as a v1 one.
+	NamespaceV2     = "luk-upload@v2"
+	ListNamespaceV2 = "luk-list@v2"
+	LinkNamespaceV2 = "luk-link@v2"
 	// EndpointsPath is the endpoint listing, on every listener.
 	EndpointsPath = "/.well-known/luk/endpoints"
 	// WellKnown is reserved: no endpoint or expose path is equal to it or
@@ -312,6 +319,18 @@ func CanonicalText(host, path, timestamp, nonce, meta string) []byte {
 	return []byte(strings.Join([]string{Namespace, "PUT", host, path, timestamp, nonce, meta}, "\n"))
 }
 
+// CanonicalTextV2 is CanonicalText inside the channel: the v2 namespace,
+// then the session hash h on a last line (base64url without padding).
+func CanonicalTextV2(host, path, timestamp, nonce, meta string, h []byte) []byte {
+	return textV2(NamespaceV2, h, "PUT", host, path, timestamp, nonce, meta)
+}
+
+// textV2 joins the namespace, the lines and the session hash h.
+func textV2(namespace string, h []byte, lines ...string) []byte {
+	all := append(append([]string{namespace}, lines...), base64.RawURLEncoding.EncodeToString(h))
+	return []byte(strings.Join(all, "\n"))
+}
+
 // GetCanonicalText is what the client signs and the server verifies for a
 // download from an expose with auth.ssh: the method (GET or HEAD), the
 // Host, the request target (GetTarget), the timestamp and the nonce.
@@ -351,6 +370,12 @@ func ListCanonicalText(method, host, path, timestamp, nonce string) []byte {
 	return []byte(strings.Join([]string{ListNamespace, method, host, path, timestamp, nonce}, "\n"))
 }
 
+// ListCanonicalTextV2 is ListCanonicalText inside the channel (see
+// CanonicalTextV2).
+func ListCanonicalTextV2(method, host, path, timestamp, nonce string, h []byte) []byte {
+	return textV2(ListNamespaceV2, h, method, host, path, timestamp, nonce)
+}
+
 // LinkMethod is the HTTP method of a link action; false for an unknown
 // action.
 func LinkMethod(action string) (string, bool) {
@@ -372,6 +397,12 @@ func LinkMethod(action string) (string, bool) {
 // (empty for a list) and the action as sent, then the timestamp, the nonce and the meta.
 func LinkCanonicalText(method, host, path, link, action, timestamp, nonce, meta string) []byte {
 	return []byte(strings.Join([]string{LinkNamespace, method, host, path, link, action, timestamp, nonce, meta}, "\n"))
+}
+
+// LinkCanonicalTextV2 is LinkCanonicalText inside the channel (see
+// CanonicalTextV2).
+func LinkCanonicalTextV2(method, host, path, link, action, timestamp, nonce, meta string, h []byte) []byte {
+	return textV2(LinkNamespaceV2, h, method, host, path, link, action, timestamp, nonce, meta)
 }
 
 // LinkMeta is the meta of a remove, ttl or list link request; a replace sends

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"luk/internal/auth"
+	"luk/internal/channel"
 	"luk/internal/config"
 	"luk/internal/expose"
 	"luk/internal/pipeline"
@@ -58,6 +59,11 @@ type Server struct {
 	// certs are the certificates of the TLS listeners, for the pin of a
 	// luk:// URL; nil outside Receive, where the pin comes from the files.
 	certs map[string]*certSlot
+	// key is the identity key of the channel handshakes; nil answers none
+	// (a configuration not read from a file has no key file).
+	key atomic.Pointer[channel.Key]
+	// chans are the open channel sessions.
+	chans *chanTable
 }
 
 // snapshot is one configuration and what is built from it; it is never
@@ -88,6 +94,7 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 	}
 	s.queue.SetDirReserves(cfg.SecretReserves())
 	s.quota = quota.New(log, func() time.Time { return s.now() })
+	s.chans = newChanTable(func() config.ChannelLimits { return s.config().Limits.Channel })
 	s.snap.Store(s.newSnapshot(cfg))
 	return s
 }
@@ -240,15 +247,15 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request, sn *snapshot,
 		s.acme.serveHTTP(w, r)
 		return
 	}
+	if isChannel(r) {
+		s.serveChannel(w, r, sn, l)
+		return
+	}
 	if r.URL.Path == wire.EndpointsPath {
 		s.serveEndpoints(w, r, sn, l)
 		return
 	}
-	p := r.URL.Path
-	if len(p) > 1 {
-		p = strings.TrimSuffix(p, "/")
-	}
-	ep, ok := l.byPath[p]
+	ep, ok := endpointOf(l, r.URL.Path)
 	// Without endpoints nothing is an upload: the expose answers every
 	// request, 405 for what it does not take.
 	if !ok && (len(l.byPath) == 0 || r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost) {
@@ -259,6 +266,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request, sn *snapshot,
 		h.ServeHTTP(w, r)
 		return
 	}
+	s.serveEndpoint(w, r, sn, l, ep, ok)
+}
+
+// serveEndpoint answers a request on the endpoint ep of l, or 404 when the
+// path is none (!ok).
+func (s *Server) serveEndpoint(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener, ep *config.Endpoint, ok bool) {
 	var (
 		code int
 		resp any
@@ -373,8 +386,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 	}
 	now := s.now()
 	var meta wire.Meta
-	id, err := s.authenticate(r, sn, l, ep, now, wire.Namespace,
-		func(ts, nonce, metaS string) []byte { return wire.CanonicalText(r.Host, r.URL.Path, ts, nonce, metaS) },
+	ns, text := wire.Namespace, func(ts, nonce, metaS string) []byte { return wire.CanonicalText(r.Host, r.URL.Path, ts, nonce, metaS) }
+	if cs := sessionOf(r.Context()); cs != nil {
+		ns, text = wire.NamespaceV2, func(ts, nonce, metaS string) []byte {
+			return wire.CanonicalTextV2(r.Host, r.URL.Path, ts, nonce, metaS, cs.sess.H())
+		}
+	}
+	id, err := s.authenticate(r, sn, l, ep, now, ns, text,
 		func(metaS string) (err error) { meta, err = wire.DecodeMeta(metaS); return err })
 	if err != nil {
 		return 0, nil, err
@@ -1203,8 +1221,14 @@ func (s *Server) verifyGet(r *http.Request, sn *snapshot, l *listener) (*wire.Id
 
 // verify checks the timestamp, the nonce and the signature of a signed
 // request under namespace over text, and returns the identity of the
-// signer on the configuration of sn.
+// signer on the configuration of sn. Inside the channel only the v2
+// namespaces verify, whose texts carry the session hash, and the signer
+// becomes the identity of the session.
 func (s *Server) verify(r *http.Request, sn *snapshot, l *listener, now time.Time, ts, nonce, sigS, namespace string, text []byte) (*wire.Identity, error) {
+	cs := sessionOf(r.Context())
+	if cs != nil && namespace != wire.NamespaceV2 && namespace != wire.ListNamespaceV2 && namespace != wire.LinkNamespaceV2 {
+		return nil, fail(http.StatusUnauthorized, "namespace %s is not signed inside the channel", namespace)
+	}
 	t, err := time.Parse(time.RFC3339, ts)
 	if err != nil {
 		return nil, fail(http.StatusUnauthorized, "bad timestamp: %v", err)
@@ -1246,6 +1270,11 @@ func (s *Server) verify(r *http.Request, sn *snapshot, l *listener, now time.Tim
 	// After the identity: only known identities can fill the nonce cache.
 	if !s.nonces.Check(nonce, now) {
 		return nil, fail(http.StatusUnauthorized, "replayed nonce")
+	}
+	if cs != nil {
+		cs.mu.Lock()
+		cs.id = id
+		cs.mu.Unlock()
 	}
 	return id, nil
 }

@@ -114,6 +114,22 @@ func TestCanonicalText(t *testing.T) {
 	}
 }
 
+func TestCanonicalTextV2(t *testing.T) {
+	h := []byte{0xfb, 0xff, 0x01}
+	for _, c := range []struct{ got, want string }{
+		{string(CanonicalTextV2("h:8080", "/backup", "T", "N", "M", h)), "luk-upload@v2\nPUT\nh:8080\n/backup\nT\nN\nM\n-_8B"},
+		{string(ListCanonicalTextV2("GET", "h", EndpointsPath, "T", "N", h)), "luk-list@v2\nGET\nh\n/.well-known/luk/endpoints\nT\nN\n-_8B"},
+		{string(LinkCanonicalTextV2("GET", "h", "/drop", "", "list", "T", "N", "M", h)), "luk-link@v2\nGET\nh\n/drop\n\nlist\nT\nN\nM\n-_8B"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%q, want %q", c.got, c.want)
+		}
+	}
+	if NamespaceV2 != "luk-upload@v2" || ListNamespaceV2 != "luk-list@v2" || LinkNamespaceV2 != "luk-link@v2" {
+		t.Fatal("v2 namespaces")
+	}
+}
+
 func TestNonce(t *testing.T) {
 	a, b := NewNonce(), NewNonce()
 	if a == b || !ValidNonce(a) || len(a) != 22 {

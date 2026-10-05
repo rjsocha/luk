@@ -57,10 +57,15 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request, sn *snapshot
 	now := s.now()
 	var meta wire.Meta
 	var lm wire.LinkMeta
-	id, err := s.authenticate(r, sn, l, ep, now, wire.LinkNamespace,
-		func(ts, nonce, metaS string) []byte {
-			return wire.LinkCanonicalText(r.Method, r.Host, r.URL.Path, link, action, ts, nonce, metaS)
-		},
+	ns, text := wire.LinkNamespace, func(ts, nonce, metaS string) []byte {
+		return wire.LinkCanonicalText(r.Method, r.Host, r.URL.Path, link, action, ts, nonce, metaS)
+	}
+	if cs := sessionOf(r.Context()); cs != nil {
+		ns, text = wire.LinkNamespaceV2, func(ts, nonce, metaS string) []byte {
+			return wire.LinkCanonicalTextV2(r.Method, r.Host, r.URL.Path, link, action, ts, nonce, metaS, cs.sess.H())
+		}
+	}
+	id, err := s.authenticate(r, sn, l, ep, now, ns, text,
 		func(metaS string) (err error) {
 			if action == wire.LinkReplace {
 				meta, err = wire.DecodeMeta(metaS)

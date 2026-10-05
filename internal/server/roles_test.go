@@ -57,6 +57,7 @@ expose:
 	if err := os.WriteFile(p, []byte(text), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	writeIdentity(t, p)
 	cfg, err := config.Load(p)
 	if err != nil {
 		t.Fatal(err)

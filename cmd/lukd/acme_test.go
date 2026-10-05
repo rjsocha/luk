@@ -366,6 +366,7 @@ listen:
 	if err := os.WriteFile(cfgPath, []byte(text), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	writeIdentity(t, cfgPath)
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)

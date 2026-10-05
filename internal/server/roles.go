@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"luk/internal/channel"
 	"luk/internal/config"
 	"luk/internal/expose"
 	"luk/internal/pipeline"
@@ -99,6 +100,9 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	s := New(cfg, log)
 	s.acme = ac
 	s.certs = certs
+	if err := s.loadIdentity(); err != nil {
+		return err
+	}
 	if err := s.persistNonces(cfg.Auth.Nonces); err != nil {
 		return err
 	}
@@ -127,7 +131,7 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	expose.StartJanitor(ctx, s.config, log, time.Minute, expose.Expire, nil, nil, beat)
+	expose.StartJanitor(ctx, s.config, log, time.Minute, expose.Expire, nil, func(time.Time) { s.chans.sweep(s.now()) }, beat)
 	errc := make(chan error, 1)
 	if servers, err = s.listen(cfg, certs, errc); err != nil {
 		return err
@@ -295,8 +299,32 @@ func setLevel(log *slog.Logger, cfg *config.Config) {
 	}
 }
 
-// reload reloads the configuration of the receive role (see reloadConfig).
-func (s *Server) reload() *config.Config { return reloadConfig(s.config(), "receive", s.log, s.apply) }
+// reload reloads the configuration of the receive role (see reloadConfig)
+// and re-reads the identity key; a key that does not load keeps the one in
+// use.
+func (s *Server) reload() *config.Config {
+	next := reloadConfig(s.config(), "receive", s.log, s.apply)
+	if err := s.loadIdentity(); err != nil {
+		s.log.Error("reload: identity key not read, keeping the current one", "error", err)
+	}
+	return next
+}
+
+// loadIdentity loads the identity key of the current configuration, the
+// static key of the channel handshakes. A configuration not read from a
+// file has no key file and leaves the server without a channel.
+func (s *Server) loadIdentity() error {
+	p := s.config().IdentityPath
+	if p == "" {
+		return nil
+	}
+	k, err := channel.LoadKey(p)
+	if err != nil {
+		return fmt.Errorf("identity key: %w (run lukd key generate)", err)
+	}
+	s.key.Store(&k)
+	return nil
+}
 
 // reloadConfig reads the configuration cur was loaded from again and hands
 // it to apply. An invalid configuration, a change of a setting that needs

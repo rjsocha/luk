@@ -443,16 +443,22 @@ func TestLimitsDefaults(t *testing.T) {
 	if b.Size != 0 || b.Idle != Duration(2*time.Minute) || b.Timeout != 0 {
 		t.Fatalf("%+v", b)
 	}
+	if ch := l.Channel; ch.Auth != Duration(time.Minute) || ch.Pending != 1024 || ch.Idle != Duration(2*time.Minute) {
+		t.Fatalf("%+v", ch)
+	}
 }
 
 func TestLimitsSet(t *testing.T) {
-	c, err := Parse([]byte(good + "\nlimits: {conn: {max: 5, idle: 4s}, header: {timeout: 3s}}\n"))
+	c, err := Parse([]byte(good + "\nlimits: {conn: {max: 5, idle: 4s}, header: {timeout: 3s}, channel: {auth: 7s, pending: 1, idle: 8s}}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	l := c.Limits
 	if l.Conn.Max != 5 || l.Conn.Idle != Duration(4*time.Second) || l.Header.Timeout != Duration(3*time.Second) {
 		t.Fatalf("%+v", l)
+	}
+	if ch := l.Channel; ch.Auth != Duration(7*time.Second) || ch.Pending != 1 || ch.Idle != Duration(8*time.Second) {
+		t.Fatalf("%+v", ch)
 	}
 	c, err = Parse([]byte(strings.Replace(good, "limits: {body: {size: 50G}}", "limits: {body: {size: 1K, idle: 5s, timeout: 1h}}", 1)))
 	if err != nil {
@@ -465,7 +471,8 @@ func TestLimitsSet(t *testing.T) {
 }
 
 func TestLimitsInvalid(t *testing.T) {
-	for _, l := range []string{"conn: {max: -1}", "conn: {idle: -1s}", "header: {timeout: -1s}"} {
+	for _, l := range []string{"conn: {max: -1}", "conn: {idle: -1s}", "header: {timeout: -1s}",
+		"channel: {auth: -1s}", "channel: {idle: -1s}", "channel: {pending: -1}"} {
 		if _, err := Parse([]byte(good + "\nlimits: {" + l + "}\n")); err == nil || !strings.Contains(err.Error(), "limits.") {
 			t.Fatalf("%s: %v", l, err)
 		}

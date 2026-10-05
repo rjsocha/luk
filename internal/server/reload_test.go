@@ -453,6 +453,7 @@ storage:
 	e := &reloadEnv{dir: dir}
 	e.write(t, "config.yaml", text)
 	e.write(t, "ssh.d/robert.socha.pub", pubLine(user.PublicKey())+"\n")
+	writeIdentity(t, filepath.Join(dir, "config.yaml"))
 	cfg, err := config.Load(filepath.Join(dir, "config.yaml"))
 	if err != nil {
 		t.Fatal(err)

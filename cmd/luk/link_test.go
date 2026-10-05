@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"luk/internal/channel"
 	"luk/internal/client"
 	"luk/internal/config"
 	"luk/internal/server"
@@ -112,13 +113,22 @@ func (l *logBuf) count(msg string) int {
 	return strings.Count(l.b.String(), "msg=\""+msg+"\"")
 }
 
-// startLukd writes the config text to p and runs both lukd roles on it
-// until the test ends, logging into the returned buffer; addr is an
-// address it listens on.
+// startLukd writes the config text to p (and an identity key next to it
+// when there is none) and runs both lukd roles on it until the test ends,
+// logging into the returned buffer; addr is an address it listens on.
 func startLukd(t *testing.T, p, text, addr string) *logBuf {
 	t.Helper()
 	if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(config.IdentityPath(p)); err != nil {
+		k, err := channel.GenerateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := channel.WriteKey(config.IdentityPath(p), k); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cfg, err := config.Load(p)
 	if err != nil {

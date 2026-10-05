@@ -159,6 +159,18 @@ type Limits struct {
 	Header HeaderLimits `yaml:"header"`
 	Queue  QueueLimits  `yaml:"queue"`
 	Failed FailedLimits `yaml:"failed"`
+	// Channel bounds the channel sessions of the receive role.
+	Channel ChannelLimits `yaml:"channel"`
+}
+
+// ChannelLimits: Auth is the time from a handshake to its OP, Pending the
+// number of sessions without an OP kept at once (the oldest is dropped for
+// a new one), Idle the time a session with its OP is kept without a
+// request.
+type ChannelLimits struct {
+	Auth    Duration `yaml:"auth"`
+	Pending int      `yaml:"pending"`
+	Idle    Duration `yaml:"idle"`
 }
 
 // FailedLimits: Age is how long a failure record is kept; 0 keeps it
@@ -207,6 +219,12 @@ const (
 	DefaultBodyIdle      = 2 * time.Minute
 	DefaultQueueReserve  = 1 << 30
 	DefaultFailedAge     = 3 * 24 * time.Hour
+)
+
+const (
+	DefaultChannelAuth    = 60 * time.Second
+	DefaultChannelPending = 1024
+	DefaultChannelIdle    = 2 * time.Minute
 )
 
 // Listen is a named listener. Several listeners may share an address;
@@ -1220,6 +1238,8 @@ func (c *Config) validate() []error {
 	}{
 		{"limits.conn.idle", &l.Conn.Idle, DefaultConnIdle},
 		{"limits.header.timeout", &l.Header.Timeout, DefaultHeaderTimeout},
+		{"limits.channel.auth", &l.Channel.Auth, DefaultChannelAuth},
+		{"limits.channel.idle", &l.Channel.Idle, DefaultChannelIdle},
 	} {
 		if *d.v < 0 {
 			bad("%s must be positive", d.name)
@@ -1227,6 +1247,13 @@ func (c *Config) validate() []error {
 		if *d.v == 0 {
 			*d.v = Duration(d.def)
 		}
+	}
+
+	if l.Channel.Pending < 0 {
+		bad("limits.channel.pending must be at least 1")
+	}
+	if l.Channel.Pending == 0 {
+		l.Channel.Pending = DefaultChannelPending
 	}
 
 	if l.Queue.Reserve < 0 {
