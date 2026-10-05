@@ -3044,11 +3044,11 @@ key reads as a warning in the configuration on purpose.
 - `symmetric`: every password adds one symmetric-key encrypted session
   key packet to the same `.gpg` file, next to the recipients' keys: any
   recipient key or any of the passwords decrypts it. The password is
-  turned into a key with the Argon2 S2K of RFC 9580 (3 passes,
-  parallelism 4, 64 MiB). Decrypting with a password needs an OpenPGP
-  implementation that reads Argon2 S2K; GnuPG 2.4 does not (`unknown S2K
-  mode 4`), and while it still decrypts such a file with a recipient key,
-  it reports the packets it cannot read and exits with status 2. The meta
+  turned into a key with the iterated and salted S2K with SHA-256
+  (16777216 bytes hashed), which every OpenPGP implementation reads,
+  GnuPG 2.4 among them: `gpg --output f.txt --decrypt f.txt.gpg` asks for
+  the password, or takes it with `--batch --pinentry-mode loopback
+  --passphrase-file password.txt`. The meta
   of the file gets `"passwords"`: the names (never the passwords), next
   to `"recipients"`.
 - `openssl`: a file whose name (as it enters the step) matches one of

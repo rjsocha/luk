@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -167,12 +168,13 @@ func (d *Dispatcher) encryptStep(j Job, keys *gpgkeys.Resolver, passwordDir, nam
 }
 
 // gpgSeal opens a binary OpenPGP message to the recipients to and the
-// passwords. A password gets the Argon2 S2K of RFC 9580.
+// passwords. A password gets the iterated and salted S2K with SHA-256,
+// which GnuPG reads as well.
 func gpgSeal(to []*openpgp.Entity, passwords [][]byte, now time.Time) func(io.Writer) (io.WriteCloser, error) {
 	return func(w io.Writer) (io.WriteCloser, error) {
 		cfg := gpgkeys.Config(now)
 		if len(passwords) > 0 {
-			cfg.S2KConfig = &s2k.Config{S2KMode: s2k.Argon2S2K}
+			cfg.S2KConfig = &s2k.Config{S2KMode: s2k.IteratedSaltedS2K, Hash: crypto.SHA256}
 		}
 		return openpgp.EncryptWithParams(w, to, nil, &openpgp.EncryptParams{Config: cfg, Passwords: passwords})
 	}
