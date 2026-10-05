@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
+	"luk/internal/channel"
 	"luk/internal/tlsself"
 	"luk/internal/wire"
 )
@@ -20,15 +22,12 @@ import (
 // testRoots replaces the system CAs in tests.
 var testRoots *x509.CertPool
 
-// Certificate is the leaf certificate a TLS server presents: its pin, its
-// subject and validity, and whether its chain verifies against the system
+// Certificate is the leaf certificate a TLS server presents: its SPKI pin,
+// the pin of downloads, and whether its chain verifies against the system
 // CAs for the host.
 type Certificate struct {
-	Pin       string
-	Subject   string
-	NotBefore time.Time
-	NotAfter  time.Time
-	Verified  bool
+	Pin      string
+	Verified bool
 }
 
 // ScanTLS connects to the host and port of the https URL u without
@@ -57,40 +56,57 @@ func ScanTLS(ctx context.Context, u *url.URL) (*Certificate, error) {
 		inter.AddCert(c)
 	}
 	_, verr := leaf.Verify(x509.VerifyOptions{DNSName: u.Hostname(), Intermediates: inter, Roots: testRoots})
-	return &Certificate{
-		Pin: tlsself.Pin(leaf), Subject: leaf.Subject.String(),
-		NotBefore: leaf.NotBefore, NotAfter: leaf.NotAfter, Verified: verr == nil,
-	}, nil
+	return &Certificate{Pin: tlsself.Pin(leaf), Verified: verr == nil}, nil
 }
 
-// NoListingError is a server that answers 404 to the endpoint listing: a
-// lukd older than the listing, or no lukd.
-type NoListingError struct{ Err error }
+// listingURL is the endpoint listing of the server of u: its scheme and
+// host count.
+func listingURL(u *url.URL) *url.URL {
+	return &url.URL{Scheme: u.Scheme, Host: u.Host, Path: wire.EndpointsPath}
+}
 
-func (e *NoListingError) Error() string { return "the server does not offer an endpoint listing" }
-func (e *NoListingError) Unwrap() error { return e.Err }
-
-// ListEndpoints asks the server of o.URL (only its scheme and host count)
-// for the endpoints the signer may use on that listener (luk-list@v1).
-func ListEndpoints(ctx context.Context, o GetOptions) (*wire.EndpointList, error) {
-	u := &url.URL{Scheme: o.URL.Scheme, Host: o.URL.Host, Path: wire.EndpointsPath}
-	o.URL = u
-	resp, err := signedGet(ctx, o, http.MethodGet, wire.ListNamespace)
+// Scan runs a handshake with the lukd of u (only its scheme and host
+// count) on the endpoint listing, the one path every listener takes, and
+// returns the key lukd presents. Nothing authenticates that key: it is
+// what luk scan shows to be pinned.
+func Scan(ctx context.Context, u *url.URL) ([]byte, error) {
+	c, err := Dial(ctx, DialOptions{URL: listingURL(u), Discover: true})
 	if err != nil {
-		var re *RejectedError
-		if errors.As(err, &re) && re.Status == http.StatusNotFound {
-			return nil, &NoListingError{err}
-		}
 		return nil, err
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxListAnswer))
+	c.Close()
+	return c.PeerKey(), nil
+}
+
+// ListEndpoints asks the lukd of u (only its scheme and host count),
+// through the channel with the lukd keys pins accepted, for the endpoints
+// signer may use on that listener (luk-list@v2).
+func ListEndpoints(ctx context.Context, u *url.URL, pins []channel.Pin, signer ssh.Signer) (*wire.EndpointList, error) {
+	lu := listingURL(u)
+	c, err := Dial(ctx, DialOptions{URL: lu, Pins: pins})
 	if err != nil {
-		return nil, transferError(ctx, err, u.Host, 0, -1, true)
+		return nil, err
+	}
+	defer c.Close()
+	req, err := signedOp(Options{URL: lu.String(), Signer: signer}, c, http.MethodGet, "", nil, func(host, path, ts, nonce string) (string, []byte) {
+		return wire.ListNamespaceV2, wire.ListCanonicalTextV2(http.MethodGet, host, path, ts, nonce, c.H())
+	})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.Do(ctx, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status >= 400 {
+		return nil, rejection(resp)
+	}
+	if resp.Status != http.StatusOK {
+		return nil, fmt.Errorf("unexpected answer %d %s to an endpoint listing", resp.Status, http.StatusText(resp.Status))
 	}
 	l := &wire.EndpointList{}
-	if err := json.Unmarshal(data, l); err != nil {
-		return nil, fmt.Errorf("bad answer (200): %w", err)
+	if err := json.Unmarshal(resp.Body, l); err != nil {
+		return nil, fmt.Errorf("bad answer (%d): %w", resp.Status, err)
 	}
 	return l, nil
 }

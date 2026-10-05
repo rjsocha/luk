@@ -26,10 +26,10 @@ type LinkOptions struct {
 	TTL    string
 }
 
-// Link sends a link request and returns the server answer: 200 for remove
-// and ttl, 202 for a replace, whose sha256 is compared with the content
-// sent. A replace goes through the channel and sends its content in parts
-// as an upload does.
+// Link sends a link request through the channel and returns the server
+// answer: 200 for remove and ttl, 202 for a replace, whose sha256 is
+// compared with the content sent. A replace sends its content in parts as
+// an upload does.
 func Link(ctx context.Context, o LinkOptions) (*wire.LinkAnswer, error) {
 	method, ok := wire.LinkMethod(o.Action)
 	if !ok || o.Action == wire.LinkList {
@@ -42,25 +42,43 @@ func Link(ctx context.Context, o LinkOptions) (*wire.LinkAnswer, error) {
 	if err != nil {
 		return nil, err
 	}
-	o.Body, o.Source, o.Size = nil, nil, 0
-	header := map[string]string{wire.HeaderLink: o.Link, wire.HeaderLinkAction: o.Action}
-	res, err := send(ctx, o.Options, method, metaS, header, func(host, path, ts, nonce string) (string, []byte) {
-		return wire.LinkNamespace, wire.LinkCanonicalText(method, host, path, o.Link, o.Action, ts, nonce, metaS)
+	resp, err := linkOp(ctx, o.Options, method, o.Link, o.Action, metaS)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status >= 400 {
+		return nil, rejection(resp)
+	}
+	if resp.Status != http.StatusOK {
+		return nil, fmt.Errorf("unexpected answer %d %s to a link %s", resp.Status, http.StatusText(resp.Status), o.Action)
+	}
+	a := &wire.LinkAnswer{}
+	if err := json.Unmarshal(resp.Body, a); err != nil {
+		return nil, fmt.Errorf("bad answer (%d): %w", resp.Status, err)
+	}
+	return a, nil
+}
+
+// linkOp sends a link request without content as the one OP of a new
+// channel to o.URL and returns the answer.
+func linkOp(ctx context.Context, o Options, method, link, action, metaS string) (*InnerResponse, error) {
+	u, err := url.Parse(o.URL)
+	if err != nil {
+		return nil, err
+	}
+	c, err := Dial(ctx, DialOptions{URL: u, Pins: o.Pins})
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	header := map[string]string{wire.HeaderLink: link, wire.HeaderLinkAction: action}
+	req, err := signedOp(o, c, method, metaS, header, func(host, path, ts, nonce string) (string, []byte) {
+		return wire.LinkNamespaceV2, wire.LinkCanonicalTextV2(method, host, path, link, action, ts, nonce, metaS, c.H())
 	})
 	if err != nil {
 		return nil, err
 	}
-	if res.status >= 400 {
-		return nil, res.rejected()
-	}
-	if res.status != http.StatusOK {
-		return nil, fmt.Errorf("unexpected answer %d %s to a link %s", res.status, http.StatusText(res.status), o.Action)
-	}
-	a := &wire.LinkAnswer{}
-	if err := json.Unmarshal(res.data, a); err != nil {
-		return nil, fmt.Errorf("bad answer (%d): %w", res.status, err)
-	}
-	return a, nil
+	return c.Do(ctx, req, nil)
 }
 
 // linkReplace replaces the content of o.Link through the channel.
@@ -101,35 +119,27 @@ func linkReplace(ctx context.Context, o LinkOptions, method string) (*wire.LinkA
 	return a, nil
 }
 
-// maxListAnswer is the largest link list answer read: wire.MaxLinkList
-// entries with long names.
-const maxListAnswer = 64 << 20
-
-// LinkList asks the endpoint o.URL for the links of the signer there; only
-// URL and Signer of o count.
+// LinkList asks the endpoint o.URL through the channel for the links of
+// the signer there; only URL, Pins and Signer of o count.
 func LinkList(ctx context.Context, o Options) (*wire.LinkListAnswer, error) {
-	o = Options{URL: o.URL, Signer: o.Signer, DecisionTimeout: o.DecisionTimeout, IdleTimeout: o.IdleTimeout, maxAnswer: maxListAnswer}
 	metaS, err := wire.EncodeLinkMeta(wire.LinkMeta{})
 	if err != nil {
 		return nil, err
 	}
 	method, _ := wire.LinkMethod(wire.LinkList)
-	header := map[string]string{wire.HeaderLink: "", wire.HeaderLinkAction: wire.LinkList}
-	res, err := send(ctx, o, method, metaS, header, func(host, path, ts, nonce string) (string, []byte) {
-		return wire.LinkNamespace, wire.LinkCanonicalText(method, host, path, "", wire.LinkList, ts, nonce, metaS)
-	})
+	resp, err := linkOp(ctx, Options{URL: o.URL, Pins: o.Pins, Signer: o.Signer}, method, "", wire.LinkList, metaS)
 	if err != nil {
 		return nil, err
 	}
-	if res.status >= 400 {
-		return nil, res.rejected()
+	if resp.Status >= 400 {
+		return nil, rejection(resp)
 	}
-	if res.status != http.StatusOK {
-		return nil, fmt.Errorf("unexpected answer %d %s to a link list", res.status, http.StatusText(res.status))
+	if resp.Status != http.StatusOK {
+		return nil, fmt.Errorf("unexpected answer %d %s to a link list", resp.Status, http.StatusText(resp.Status))
 	}
 	a := &wire.LinkListAnswer{}
-	if err := json.Unmarshal(res.data, a); err != nil {
-		return nil, fmt.Errorf("bad answer (%d): %w", res.status, err)
+	if err := json.Unmarshal(resp.Body, a); err != nil {
+		return nil, fmt.Errorf("bad answer (%d): %w", resp.Status, err)
 	}
 	return a, nil
 }

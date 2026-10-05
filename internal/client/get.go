@@ -128,7 +128,7 @@ var etagSHA = regexp.MustCompile(`^"([0-9a-f]{64})"$`)
 // answer; any other answer is an error (RejectedError for 400 and
 // above). The caller reads and closes the Download.
 func Get(ctx context.Context, o GetOptions) (*Download, error) {
-	resp, err := signedGet(ctx, o, http.MethodGet, wire.GetNamespace)
+	resp, err := signedGet(ctx, o, http.MethodGet)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func List(ctx context.Context, o GetOptions, recursive bool) ([]wire.ListEntry, 
 		u.RawQuery = wire.QueryRecursive
 	}
 	o.URL = &u
-	resp, err := signedGet(ctx, o, http.MethodGet, wire.GetNamespace)
+	resp, err := signedGet(ctx, o, http.MethodGet)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +246,7 @@ type Head struct {
 // and returns what a 200 answer announces; errors as for Get. Progress
 // and BWLimit do not apply.
 func HeadFile(ctx context.Context, o GetOptions) (*Head, error) {
-	resp, err := signedGet(ctx, o, http.MethodHead, wire.GetNamespace)
+	resp, err := signedGet(ctx, o, http.MethodHead)
 	if err != nil {
 		return nil, err
 	}
@@ -269,12 +269,12 @@ func headOf(resp *http.Response) *Head {
 	return h
 }
 
-// signedGet sends a signed request of method GET or HEAD to o.URL, under
-// namespace (wire.GetNamespace, wire.ListNamespace), and returns a 200
-// answer. Without its headers within the decision timeout the request
-// ends with NoAnswer; the body of the answer fails with Stalled when no
-// byte comes for the idle timeout. Closing the body ends the request.
-func signedGet(ctx context.Context, o GetOptions, method, namespace string) (*http.Response, error) {
+// signedGet sends a signed request (luk-get@v1) of method GET or HEAD to
+// o.URL and returns a 200 answer. Without its headers within the decision
+// timeout the request ends with NoAnswer; the body of the answer fails
+// with Stalled when no byte comes for the idle timeout. Closing the body
+// ends the request.
+func signedGet(ctx context.Context, o GetOptions, method string) (*http.Response, error) {
 	u := o.URL
 	wait, err := orDefault(o.DecisionTimeout, defaultDecision, "decision timeout")
 	if err != nil {
@@ -286,11 +286,8 @@ func signedGet(ctx context.Context, o GetOptions, method, namespace string) (*ht
 	}
 	ts := time.Now().UTC().Format(time.RFC3339)
 	nonce := wire.NewNonce()
-	text, what := wire.GetCanonicalText(method, u.Host, wire.GetTarget(u.EscapedPath(), u.RawQuery), ts, nonce), "a get"
-	if namespace == wire.ListNamespace {
-		text, what = wire.ListCanonicalText(method, u.Host, u.EscapedPath(), ts, nonce), "an endpoint listing"
-	}
-	sig, err := sshsig.Sign(o.Signer, namespace, text)
+	text := wire.GetCanonicalText(method, u.Host, wire.GetTarget(u.EscapedPath(), u.RawQuery), ts, nonce)
+	sig, err := sshsig.Sign(o.Signer, wire.GetNamespace, text)
 	if err != nil {
 		return nil, err
 	}
@@ -329,11 +326,10 @@ func signedGet(ctx context.Context, o GetOptions, method, namespace string) (*ht
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		res := &result{status: resp.StatusCode, data: data, date: resp.Header.Get("Date"), at: at}
 		if resp.StatusCode >= 400 {
-			return nil, res.rejected()
+			return nil, rejected(resp.StatusCode, data, resp.Header.Get("Date"), at, "")
 		}
-		return nil, fmt.Errorf("unexpected answer %d %s to %s", resp.StatusCode, http.StatusText(resp.StatusCode), what)
+		return nil, fmt.Errorf("unexpected answer %d %s to a get", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	return resp, nil
 }

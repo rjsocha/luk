@@ -15,34 +15,39 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
-	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 
+	"luk/internal/channel"
 	"luk/internal/client"
 	"luk/internal/wire"
 )
 
 func newScanCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
-		key                                   string
+		key, pinFormat                        string
 		pinOnly, endpoints, printCmds, asJSON bool
 	)
 	cmd := &cobra.Command{
 		Use:   "scan URL",
-		Short: "Print the pin of a server and the endpoints it offers you",
+		Short: "Print the lukd key of a server and the endpoints it offers you",
 		Long: `Scan the lukd server of URL: an origin (https://host:8443) or an endpoint
-URL (https://host:8443/drop); a config endpoint name works too. Without
---pin and --endpoints it does both.
+URL (https://host:8443/drop), http or https; a config endpoint name works
+too. Without --pin and --endpoints it does both.
 
---pin connects without verifying the certificate chain and prints the pin
-of the server's leaf certificate (sha256//<base64>, the format lukd
-prints) on stdout, the certificate subject and validity on stderr. This is
-trust on first use: compare it with "lukd tls pin" on the server.
+--pin runs the handshake of the channel and prints the key lukd presents,
+the pin of its endpoints, on stdout: six words by default, the full key
+with --pin-format key. This is trust on first use: compare it with "lukd
+key" on the server. When the config (or the URL fragment) has pins for
+that origin and the key matches none of them, the key is still printed,
+the error says so and the exit code is 3. For an https URL whose
+certificate chain does not verify against the system CAs, stderr also
+has "download pin: sha256//...": the SPKI pin of the certificate, the
+one the download links of that listener carry ("lukd tls pin").
 
---endpoints sends a signed request for /.well-known/luk/endpoints of the
-origin and lists the endpoints of that listener your key may upload to:
+--endpoints asks lukd, through the channel and trusting the key just
+scanned, for the endpoints of that listener your key may upload to:
 NAME, URL, RESPOND (url: the upload answers its URL; accept), TTL (the
 lifetime without --ttl, never without one, then the range --ttl may ask
 for when the storage takes it), FLAGS (secret, pretty-url, private,
@@ -54,24 +59,24 @@ and, when an endpoint has one, QUOTA (your upload quota: the rate, the
 largest upload and what you may send now).
 The key is --key, else the key of the config endpoint the URL names, else
 the config key, else each key of the SSH agent in turn until the server
-knows one. The server is trusted by the system CAs, else by the pin
-scanned in the same run.
+knows one.
 
-An http URL has no pin: --pin is a usage error and the default does the
-listing only. When the listing fails the pin is still printed, the error
-follows and the exit code is that of luk send.
+When the listing fails the pin is still printed, the error follows and
+the exit code is that of luk send.
 
---json prints one JSON object: {"pin": ..., "endpoints": [...]}, each
-only when asked for. --print prints ready-to-run "luk config endpoint
-add" commands instead, one per endpoint (https URLs carry the pin as
-the fragment when the certificate chain does not verify against the
-system CAs, or with --pin; --key the key that listed them unless it is
-the config key: --key as given, the key of the config endpoint, or the fingerprint
-of the agent key); with --pin alone one command for URL, named by its
-last path segment, or by the first label of the host for an origin
-(NAME, to replace, for an IP address).`,
+--json prints one JSON object: {"pin": ..., "download_pin": ...,
+"endpoints": [...]}, each only when asked for and download_pin only for
+a certificate that does not verify. --print prints ready-to-run "luk
+config endpoint add" commands instead, one per endpoint, the URL
+carrying the lukd key as its fragment (in the --pin-format); --key the
+key that listed them unless it is the config key: --key as given, the
+key of the config endpoint, or the fingerprint of the agent key; with
+--pin alone one command for URL, named by its last path segment, or by
+the first label of the host for an origin (NAME, to replace, for an IP
+address). A key that matches no configured pin gets no commands.`,
 		Example: `  luk scan https://lukd.vm:8443
   luk scan --pin https://lukd.vm:8443/drop
+  luk scan --pin --pin-format key http://lukd.vm:8080
   luk scan --endpoints drop --json
   luk scan --print https://lukd.vm:8443 | sh
   luk scan --pin --print https://lukd.vm:8443/drop`,
@@ -91,11 +96,14 @@ last path segment, or by the first label of the host for an origin
 			if printCmds && asJSON {
 				return usageError{errors.New("--print and --json exclude each other")}
 			}
+			if pinFormat != "words" && pinFormat != "key" {
+				return usageError{fmt.Errorf("--pin-format must be words or key, got %q", pinFormat)}
+			}
 			cfg, _, err := client.LoadMerged()
 			if err != nil {
 				return usageError{err}
 			}
-			raw, _, err := cfg.Resolve(args[0])
+			raw, given, err := cfg.Resolve(args[0])
 			if err != nil {
 				return usageError{err}
 			}
@@ -103,47 +111,61 @@ last path segment, or by the first label of the host for an origin
 			if err != nil {
 				return usageError{err}
 			}
+			pins, err := client.PinsFor(cfg, u, strings.Join(given, ","))
+			if err != nil {
+				return usageError{err}
+			}
 			name := args[0]
 			if strings.Contains(name, "://") {
 				name = matchEndpoint(cfg, u)
 			}
-			https := u.Scheme == "https"
-			if !https && pinOnly {
-				return usageError{fmt.Errorf("--pin needs an https URL, got %q", raw)}
-			}
-			wantPin := https && (pinOnly || !endpoints)
+			wantPin := pinOnly || !endpoints
 			wantList := endpoints || !pinOnly
 			ctx, stop := interruptContext()
 			defer stop()
 
 			var cert *client.Certificate
-			if https {
+			if wantPin && u.Scheme == "https" {
 				if cert, err = client.ScanTLS(ctx, u); err != nil {
 					return err
 				}
-				if wantPin || printCmds {
-					fmt.Fprintf(stderr, "subject:    %s\nnot before: %s\nnot after:  %s\n",
-						client.Printable(cert.Subject), cert.NotBefore.UTC().Format(time.RFC3339), cert.NotAfter.UTC().Format(time.RFC3339))
-				}
+			}
+			peer, err := client.Scan(ctx, u)
+			if err != nil {
+				return err
+			}
+			pin, err := channel.FormatPin(peer, pinFormat)
+			if err != nil {
+				return err
+			}
+			// A scan shows what the server presents; a key the configured
+			// pins do not accept is an error once it is shown.
+			var mismatch error
+			if len(pins) > 0 && !slices.ContainsFunc(pins, func(p channel.Pin) bool { return p.Matches(peer) }) {
+				mismatch = &client.PinMismatchError{Got: peer}
 			}
 			var list *wire.EndpointList
 			var listErr error
 			var usedKey string
 			if wantList {
-				trust := ""
-				if cert != nil && !cert.Verified {
-					trust = cert.Pin
+				seen, err := channel.ParsePin(channel.KeyString(peer))
+				if err != nil {
+					return err
 				}
-				list, usedKey, listErr = listEndpoints(ctx, cfg, u, trust, name, key)
+				list, usedKey, listErr = listEndpoints(ctx, cfg, u, []channel.Pin{seen}, name, key)
 				if errors.As(listErr, new(usageError)) {
 					return listErr
 				}
 			}
+			dpin := ""
+			if wantPin {
+				dpin = downloadPin(cert)
+			}
 			switch {
 			case asJSON:
-				res := scanResult{}
+				res := scanResult{DownloadPin: dpin}
 				if wantPin {
-					res.Pin = cert.Pin
+					res.Pin = pin
 				}
 				if list != nil {
 					res.Endpoints = &list.Endpoints
@@ -154,17 +176,25 @@ last path segment, or by the first label of the host for an origin
 					return err
 				}
 			case printCmds:
-				fragment := pinFragment(cert, pinOnly)
+				if dpin != "" {
+					fmt.Fprintln(stderr, "download pin: "+dpin)
+				}
+				if mismatch != nil {
+					break
+				}
 				if list != nil {
 					for _, e := range list.Endpoints {
-						fmt.Fprintln(stdout, addCommand(client.Printable(e.Name), client.Printable(e.URL)+fragment, usedKey))
+						fmt.Fprintln(stdout, addCommand(client.Printable(e.Name), client.Printable(e.URL)+"#"+pin, usedKey))
 					}
 				} else if wantPin {
-					fmt.Fprintln(stdout, addCommand(scanName(u), originURL(u)+fragment, ""))
+					fmt.Fprintln(stdout, addCommand(scanName(u), originURL(u)+"#"+pin, ""))
 				}
 			default:
 				if wantPin {
-					fmt.Fprintln(stdout, cert.Pin)
+					fmt.Fprintln(stdout, pin)
+				}
+				if dpin != "" {
+					fmt.Fprintln(stderr, "download pin: "+dpin)
 				}
 				if list != nil {
 					if err := printEndpoints(stdout, list.Endpoints); err != nil {
@@ -173,35 +203,47 @@ last path segment, or by the first label of the host for an origin
 				}
 			}
 			if listErr != nil {
-				return fmt.Errorf("listing endpoints of %s: %w", u.Host, listErr)
+				listErr = fmt.Errorf("listing endpoints of %s: %w", u.Host, listErr)
 			}
-			return nil
+			return errors.Join(mismatch, listErr)
 		},
 	}
 	f := cmd.Flags()
-	f.BoolVar(&pinOnly, "pin", false, "print the pin of the server certificate (https only)")
+	f.BoolVar(&pinOnly, "pin", false, "print the lukd key of the server, the pin of its endpoints")
 	f.BoolVar(&endpoints, "endpoints", false, "list the endpoints your key may use (signed request)")
 	f.BoolVar(&printCmds, "print", false, "print luk config endpoint add commands instead")
 	f.BoolVar(&asJSON, "json", false, "print one JSON object with the pin and the endpoints")
+	f.StringVar(&pinFormat, "pin-format", "words", "show the lukd key as words or key")
 	f.StringVarP(&key, "key", "k", "", "private key file (uses PATH-cert.pub when present), a .pub file of an agent key, or SHA256:... fingerprint of an agent key")
-	completeFlags(cmd, map[string]cobra.CompletionFunc{"key": completeKey})
+	completeFlags(cmd, map[string]cobra.CompletionFunc{"key": completeKey, "pin-format": completePinFormat})
 	return cmd
 }
 
 // scanResult is the output of luk scan --json.
 type scanResult struct {
-	Pin       string               `json:"pin,omitempty"`
-	Endpoints *[]wire.EndpointInfo `json:"endpoints,omitempty"`
+	Pin         string               `json:"pin,omitempty"`
+	DownloadPin string               `json:"download_pin,omitempty"`
+	Endpoints   *[]wire.EndpointInfo `json:"endpoints,omitempty"`
+}
+
+// downloadPin is the SPKI pin of cert that download links carry: only for
+// a chain that does not verify against the system CAs, as a verified one
+// (an acme listener) needs none. Empty for http (cert nil).
+func downloadPin(cert *client.Certificate) string {
+	if cert == nil || cert.Verified {
+		return ""
+	}
+	return cert.Pin
 }
 
 // listEndpoints asks the server of u for the endpoints of the signer,
-// trusting the pin (empty: the system CAs). The key is flag, else the key
-// of the config endpoint name, else the config key, else each agent key in
-// turn while the server does not know it. It also returns the key for the
-// commands of --print: flag, the key of the config endpoint, or the
-// fingerprint of the agent key the server knew; empty for the config key,
-// which every endpoint takes anyway.
-func listEndpoints(ctx context.Context, cfg *client.Config, u *neturl.URL, pin, name, flag string) (*wire.EndpointList, string, error) {
+// through the channel with the lukd keys pins. The key is flag, else the
+// key of the config endpoint name, else the config key, else each agent
+// key in turn, a channel each, while the server does not know it. It also
+// returns the key for the commands of --print: flag, the key of the config
+// endpoint, or the fingerprint of the agent key the server knew; empty for
+// the config key, which every endpoint takes anyway.
+func listEndpoints(ctx context.Context, cfg *client.Config, u *neturl.URL, pins []channel.Pin, name, flag string) (*wire.EndpointList, string, error) {
 	key, show := flag, flag
 	if key == "" {
 		key = cfg.Key
@@ -228,7 +270,7 @@ func listEndpoints(ctx context.Context, cfg *client.Config, u *neturl.URL, pin, 
 	var err error
 	for i, s := range signers {
 		var l *wire.EndpointList
-		l, err = client.ListEndpoints(ctx, client.GetOptions{URL: u, Pin: pin, Signer: s})
+		l, err = client.ListEndpoints(ctx, u, pins, s)
 		if err == nil {
 			if key == "" {
 				show = ssh.FingerprintSHA256(s.PublicKey())
@@ -296,18 +338,6 @@ func scanName(u *neturl.URL) string {
 		return "NAME"
 	}
 	return strings.SplitN(u.Hostname(), ".", 2)[0]
-}
-
-// pinFragment is the "#<pin>" the commands of --print add to an https URL:
-// only for a chain that does not verify against the system CAs, or with
-// --pin. A verified chain (an acme listener) is trusted by its CA, and a
-// pin would break the endpoint at the next renewal. Empty for http (cert
-// nil).
-func pinFragment(cert *client.Certificate, pinOnly bool) string {
-	if cert == nil || (cert.Verified && !pinOnly) {
-		return ""
-	}
-	return "#" + cert.Pin
 }
 
 // addCommand is the luk config endpoint add command of an endpoint, with

@@ -37,31 +37,36 @@ func earlyHints(hold time.Duration, status int) http.Handler {
 	})
 }
 
-// A 1xx answer other than 100 is no decision: the timer still ends the
-// wait of a link request.
-func TestEarlyHintsAreNoDecision(t *testing.T) {
+// tlsTestServer serves h over HTTPS, with HTTP/2 when h2; the requests
+// trust it by its pin.
+func tlsTestServer(t *testing.T, h2 bool, h http.Handler) (*httptest.Server, string) {
+	t.Helper()
+	ts := httptest.NewUnstartedServer(h)
+	ts.EnableHTTP2 = h2
+	ts.StartTLS()
+	t.Cleanup(ts.Close)
+	return ts, tlsself.Pin(ts.Certificate())
+}
+
+// A 1xx answer other than 100 is no answer: the timer still ends the wait
+// of a download.
+func TestEarlyHintsAreNoAnswer(t *testing.T) {
 	for _, proto := range protocols {
 		t.Run(proto.name, func(t *testing.T) {
-			ts := newTestServer(t, proto.h2, earlyHints(3*time.Second, 403))
+			ts, pin := tlsTestServer(t, proto.h2, earlyHints(3*time.Second, 403))
 			start := time.Now()
-			_, err := LinkList(context.Background(), Options{URL: ts.URL + "/backup", Signer: newSigner(t), DecisionTimeout: 200 * time.Millisecond})
-			var te *TransferError
-			if !errors.As(err, &te) || te.Reason != NoDecision {
-				t.Fatalf("%v", err)
-			}
-			if d := time.Since(start); d > 2*time.Second {
-				t.Fatalf("gave up after %s", d)
-			}
+			_, err := Get(context.Background(), GetOptions{URL: mustURL(t, ts.URL+"/x"), Pin: pin, Signer: newSigner(t), DecisionTimeout: 200 * time.Millisecond})
+			wantReason(t, err, NoAnswer, start)
 		})
 	}
 }
 
-// A final answer after 103 within the timeout is the decision.
+// A final answer after 103 within the timeout is the answer.
 func TestRejectionAfterEarlyHints(t *testing.T) {
 	for _, proto := range protocols {
 		t.Run(proto.name, func(t *testing.T) {
-			ts := newTestServer(t, proto.h2, earlyHints(300*time.Millisecond, 401))
-			_, err := LinkList(context.Background(), Options{URL: ts.URL + "/backup", Signer: newSigner(t), DecisionTimeout: 2 * time.Second})
+			ts, pin := tlsTestServer(t, proto.h2, earlyHints(300*time.Millisecond, 401))
+			_, err := Get(context.Background(), GetOptions{URL: mustURL(t, ts.URL+"/x"), Pin: pin, Signer: newSigner(t), DecisionTimeout: 2 * time.Second})
 			var re *RejectedError
 			if !errors.As(err, &re) || re.Status != 401 {
 				t.Fatalf("%v", err)
@@ -70,9 +75,9 @@ func TestRejectionAfterEarlyHints(t *testing.T) {
 	}
 }
 
-// The first bytes of a status line are not a decision either: only the
+// The first bytes of a status line are not an answer either: only the
 // complete headers of a final answer are.
-func TestPartialHeadersAreNoDecision(t *testing.T) {
+func TestPartialHeadersAreNoAnswer(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -101,11 +106,9 @@ func TestPartialHeadersAreNoDecision(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, err = LinkList(ctx, Options{URL: "http://" + ln.Addr().String() + "/backup", Signer: newSigner(t), DecisionTimeout: 200 * time.Millisecond})
-	var te *TransferError
-	if !errors.As(err, &te) || te.Reason != NoDecision {
-		t.Fatalf("%v", err)
-	}
+	start := time.Now()
+	_, err = Get(ctx, GetOptions{URL: mustURL(t, "http://"+ln.Addr().String()+"/x"), Signer: newSigner(t), DecisionTimeout: 200 * time.Millisecond})
+	wantReason(t, err, NoAnswer, start)
 }
 
 // A timestamp refused as out of the window carries the offset of the local
@@ -169,8 +172,7 @@ func wantReason(t *testing.T, err error, reason Reason, start time.Time) *Transf
 	return te
 }
 
-// A GET, a HEAD and the endpoint listing without answer headers end
-// after the decision timeout.
+// A GET and a HEAD without answer headers end after the decision timeout.
 func TestGetNoAnswer(t *testing.T) {
 	for _, proto := range protocols {
 		t.Run(proto.name, func(t *testing.T) {
@@ -188,9 +190,6 @@ func TestGetNoAnswer(t *testing.T) {
 			}
 			start = time.Now()
 			_, err = Get(context.Background(), o)
-			wantReason(t, err, NoAnswer, start)
-			start = time.Now()
-			_, err = ListEndpoints(context.Background(), o)
 			wantReason(t, err, NoAnswer, start)
 		})
 	}

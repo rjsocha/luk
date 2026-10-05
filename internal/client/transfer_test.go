@@ -11,28 +11,6 @@ import (
 	"luk/internal/channel"
 )
 
-func TestNoDecisionMessage(t *testing.T) {
-	for _, proto := range protocols {
-		t.Run(proto.name, func(t *testing.T) {
-			release := make(chan struct{})
-			ts := newTestServer(t, proto.h2, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				select {
-				case <-release:
-				case <-r.Context().Done():
-				}
-			}))
-			t.Cleanup(func() { close(release) })
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_, err := LinkList(ctx, Options{URL: ts.URL + "/backup", Signer: newSigner(t), DecisionTimeout: time.Second})
-			var te *TransferError
-			if !errors.As(err, &te) || te.Reason != NoDecision || err.Error() != "the server gave no decision within 1s" {
-				t.Fatalf("%v", err)
-			}
-		})
-	}
-}
-
 // A part whose connection breaks every time ends the upload with the
 // bytes lukd verified.
 func TestConnectionClosedMidBody(t *testing.T) {

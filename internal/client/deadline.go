@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	// defaultDecision is the decision timeout: the wait for 100 Continue or
-	// the headers of an answer.
+	// defaultDecision is the decision timeout: the wait for the headers of
+	// an answer.
 	defaultDecision = 60 * time.Second
 	// defaultIdle is the idle timeout: the longest wait for the server
 	// while the body moves, and for the answer after the body.

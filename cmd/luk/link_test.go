@@ -22,6 +22,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"luk/internal/channel"
+	"luk/internal/channel/chantest"
 	"luk/internal/client"
 	"luk/internal/config"
 	"luk/internal/server"
@@ -292,14 +293,13 @@ func TestLinkUsageErrors(t *testing.T) {
 func TestLinkEndpointOrder(t *testing.T) {
 	tempConfig(t)
 	var hits []string
-	srv := func(name string) string {
-		s := newHTTPServer(t, func(w http.ResponseWriter, r *http.Request) {
-			hits = append(hits, name+" "+r.Method+" "+r.URL.Path)
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"url":"x","removed":true}`)
-		})
-		mustRun(t, "config", "endpoint", "add", "-e", name, "--url", s+"/"+name)
-		return s
+	srv := func(name string) {
+		s := chantest.New(t)
+		s.Op = func(req channel.Request, _ []byte) *chantest.Answer {
+			hits = append(hits, name+" "+req.Method+" "+req.Target)
+			return &chantest.Answer{Status: http.StatusOK, Body: wire.LinkAnswer{URL: "x", Removed: true}}
+		}
+		mustRun(t, "config", "endpoint", "add", "-e", name, "--url", s.URL+"/"+name+"#"+s.Pin())
 	}
 	srv("byhost")
 	srv("def")
@@ -321,18 +321,6 @@ func TestLinkEndpointOrder(t *testing.T) {
 	if strings.Join(hits, ",") != strings.Join(want, ",") {
 		t.Fatalf("hits %v, want %v", hits, want)
 	}
-}
-
-func newHTTPServer(t *testing.T, h http.HandlerFunc) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := &http.Server{Handler: h}
-	go s.Serve(l)
-	t.Cleanup(func() { s.Close() })
-	return "http://" + l.Addr().String()
 }
 
 func TestConfigLinkLayers(t *testing.T) {
@@ -401,12 +389,12 @@ func TestLinkCompletion(t *testing.T) {
 func TestLinkAlias(t *testing.T) {
 	tempConfig(t)
 	var got string
-	s := newHTTPServer(t, func(w http.ResponseWriter, r *http.Request) {
-		got = r.Method + " " + r.Header.Get("Luk-Link-Action") + " " + r.Header.Get("Luk-Link")
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"url":"x","expires":"2026-10-09T00:00:00Z","ttl":"7d"}`)
-	})
-	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", s+"/drop")
+	s := chantest.New(t)
+	s.Op = func(req channel.Request, _ []byte) *chantest.Answer {
+		got = req.Method + " " + req.Header.Get(wire.HeaderLinkAction) + " " + req.Header.Get(wire.HeaderLink)
+		return &chantest.Answer{Status: http.StatusOK, Body: wire.LinkAnswer{URL: "x", Expires: "2026-10-09T00:00:00Z", TTL: "7d"}}
+	}
+	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", s.URL+"/drop#"+s.Pin())
 	key, _ := newKeyFile(t)
 	mustRun(t, "alias", "add", "--alias", "keep", "--", "link", "--ttl", "7d", "-e", "drop", "-k", key)
 	code, out, errs := runLuk(t, "keep", "https://d.example/d/x")
@@ -560,5 +548,40 @@ func TestPrintLinksEscapes(t *testing.T) {
 		`a\tb\nc` + "  1 B   " + `now\r` + "  " + `x\a` + "      -      " + `https://d.example/d/a\x1b[2J` + "\n"
 	if err != nil || b.String() != want {
 		t.Fatalf("%v\n%q\nwant %q", err, b.String(), want)
+	}
+}
+
+// Remove, ttl and list go through the channel: they need the lukd key of
+// the endpoint and fail against a pin of another key.
+func TestLinkThroughChannel(t *testing.T) {
+	e := newLukdEnv(t)
+	link := strings.TrimSpace(mustRun(t, "send", "-e", "drop", "-k", e.key, "--file", namedFile(t, "a.txt", "hello")))
+	waitContent(t, link, "hello")
+	other, err := channel.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := e.base + "/drop#" + channel.Words(other.Public)
+	for _, args := range [][]string{
+		{"link", "ls", "-e", wrong},
+		{"link", link, "--ttl", "1d", "-e", wrong},
+		{"link", link, "--rm", "-e", wrong},
+	} {
+		code, _, errs := runLuk(t, append(args, "-k", e.key)...)
+		if code != 3 || !strings.Contains(errs, "matches no pin of this endpoint") {
+			t.Fatalf("%v: exit %d %q", args, code, errs)
+		}
+	}
+	if out := mustRun(t, "link", "ls", "-e", "drop", "-k", e.key); !strings.Contains(out, link) {
+		t.Fatalf("ls: %q", out)
+	}
+	if code, out, errs := runLuk(t, "link", link, "--ttl", "1d", "-k", e.key); code != 0 || strings.TrimSpace(out) == "" {
+		t.Fatalf("ttl: exit %d %q %q", code, out, errs)
+	}
+	if code, out, errs := runLuk(t, "link", link, "--rm", "-k", e.key); code != 0 || out != "" {
+		t.Fatalf("rm: exit %d %q %q", code, out, errs)
+	}
+	if code, _ := httpGet(t, link); code != 404 {
+		t.Fatalf("after rm: %d", code)
 	}
 }

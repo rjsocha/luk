@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"crypto/x509"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -28,13 +27,5 @@ func TestScanTLSVerified(t *testing.T) {
 	t.Cleanup(func() { testRoots = nil })
 	if c, err = ScanTLS(context.Background(), u); err != nil || !c.Verified {
 		t.Fatalf("trusted: %+v %v", c, err)
-	}
-	// Verified by the chain, the listing needs no pin; the server answers
-	// 404 as a lukd without the listing does.
-	_, err = ListEndpoints(context.Background(), GetOptions{URL: u, Signer: newSigner(t)})
-	var nl *NoListingError
-	var re *RejectedError
-	if !errors.As(err, &nl) || !errors.As(err, &re) || re.Status != http.StatusNotFound {
-		t.Fatalf("%v", err)
 	}
 }

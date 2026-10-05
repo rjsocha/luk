@@ -26,7 +26,6 @@ import (
 	"luk/internal/channel"
 	"luk/internal/channel/chantest"
 	"luk/internal/client"
-	"luk/internal/tlsself"
 	"luk/internal/wire"
 )
 
@@ -174,7 +173,7 @@ func TestPositionalAndMissingFlagsExitOne(t *testing.T) {
 		{"config", "show", "x"},
 		{"scan"},
 		{"scan", "https://h", "https://i"},
-		{"scan", "--pin", "http://h"},
+		{"scan", "--pin-format", "hex", "https://h"},
 		{"scan", "--json", "--print", "https://h"},
 		{"version", "x"},
 	} {
@@ -430,16 +429,15 @@ func TestSendBackupNeedsRegularFile(t *testing.T) {
 
 func TestScanPinByConfigName(t *testing.T) {
 	tempConfig(t)
-	ts := httptest.NewTLSServer(http.NotFoundHandler())
-	defer ts.Close()
-	if code, _, e := runLuk(t, "config", "endpoint", "add", "-e", "srv", "--url", ts.URL); code != 0 {
+	srv := chantest.New(t)
+	if code, _, e := runLuk(t, "config", "endpoint", "add", "-e", "srv", "--url", srv.URL); code != 0 {
 		t.Fatalf("%s", e)
 	}
 	code, out, errs := runLuk(t, "scan", "--pin", "srv")
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errs)
 	}
-	if strings.TrimSpace(out) != tlsself.Pin(ts.Certificate()) {
+	if strings.TrimSpace(out) != srv.Pin() {
 		t.Errorf("pin %q", out)
 	}
 	if code, _, _ := runLuk(t, "scan", "--pin", "nope"); code != 1 {
@@ -459,7 +457,7 @@ func TestExitCode(t *testing.T) {
 		{errors.New("boom"), 3},
 		{fmt.Errorf("wrapped: %w", &client.HashMismatchError{}), 4},
 		{&client.TransferError{Reason: client.Interrupted}, 130},
-		{&client.TransferError{Reason: client.NoDecision}, 3},
+		{&client.TransferError{Reason: client.NoAnswer}, 3},
 		{&client.TransferError{Reason: client.Closed}, 3},
 	}
 	for _, c := range cases {
@@ -606,11 +604,10 @@ func TestConfigShowSources(t *testing.T) {
 
 func TestScanResolvesThroughMergedConfig(t *testing.T) {
 	tempConfig(t)
-	ts := httptest.NewTLSServer(http.NotFoundHandler())
-	defer ts.Close()
-	mustRun(t, "config", "--global", "endpoint", "add", "-e", "srv", "--url", ts.URL)
+	srv := chantest.New(t)
+	mustRun(t, "config", "--global", "endpoint", "add", "-e", "srv", "--url", srv.URL)
 	mustRun(t, "config", "--global", "default", "-e", "srv")
-	if out := mustRun(t, "scan", "--pin", "srv"); strings.TrimSpace(out) != tlsself.Pin(ts.Certificate()) {
+	if out := mustRun(t, "scan", "--pin", "srv"); strings.TrimSpace(out) != srv.Pin() {
 		t.Errorf("pin %q", out)
 	}
 }

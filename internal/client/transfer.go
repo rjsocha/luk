@@ -16,8 +16,6 @@ type Reason int
 const (
 	// Interrupted: the caller's context ended (Ctrl-C).
 	Interrupted Reason = iota + 1
-	// NoDecision: no 100 Continue or answer within the decision timeout.
-	NoDecision
 	// Closed: the connection broke while the body moved.
 	Closed
 	// Unreachable: the connection broke before any body byte.
@@ -32,7 +30,7 @@ const (
 
 // TransferError is a request that ended in transit. Done is the body bytes
 // moved by then, Total the body size (-1: unknown), Wait the decision
-// timeout of a NoDecision or NoAnswer or the idle timeout of a Stalled,
+// timeout of a NoAnswer or the idle timeout of a Stalled,
 // and Err the cause, without the url.Error wrapper.
 type TransferError struct {
 	Reason Reason
@@ -50,8 +48,6 @@ func (e *TransferError) Error() string {
 			return "interrupted after " + e.moved()
 		}
 		return "interrupted"
-	case NoDecision:
-		return "the server gave no decision within " + seconds(e.Wait)
 	case NoAnswer:
 		return "the server gave no answer within " + seconds(e.Wait)
 	case Stalled:

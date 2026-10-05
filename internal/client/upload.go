@@ -1,7 +1,6 @@
 package client
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -40,12 +39,6 @@ type Options struct {
 	// Parallel is the number of parts in flight at once, at most what
 	// lukd offers; 0 is 1.
 	Parallel int
-	// DecisionTimeout bounds the wait for the answer headers of a link
-	// request outside the channel; 0 means 60s.
-	DecisionTimeout time.Duration
-	// IdleTimeout bounds each wait for the bytes of the answer of a link
-	// request outside the channel; 0 means 2m.
-	IdleTimeout time.Duration
 	// Progress receives the transfer progress; nil turns it off.
 	Progress io.Writer
 	// BWLimit caps the body rate in bytes per second; 0 is unlimited.
@@ -53,9 +46,6 @@ type Options struct {
 	// NoBody marks a content that cannot be sent (a stream already
 	// read): an upload lukd wants the content of ends with ErrBodyWanted.
 	NoBody bool
-
-	// maxAnswer caps the answer body read; 0 means 1 MiB.
-	maxAnswer int64
 }
 
 type RejectedError struct {
@@ -208,7 +198,7 @@ func changedSource(o Options, res *partsResult, status int) *HashMismatchError {
 // signedOp is the OP of a signed request inside the channel c: the Luk-*
 // signature headers over what sign returns (the namespace and the
 // canonical text) for the Host, the path, the timestamp and the nonce,
-// plus header.
+// plus header and the meta when there is one.
 func signedOp(o Options, c *Channel, method, metaS string, header map[string]string, sign func(host, path, ts, nonce string) (string, []byte)) (channel.Request, error) {
 	u, err := url.Parse(o.URL)
 	if err != nil {
@@ -229,29 +219,14 @@ func signedOp(o Options, c *Channel, method, metaS string, header map[string]str
 	for k, v := range header {
 		h.Set(k, v)
 	}
-	h.Set(wire.HeaderMeta, metaS)
+	if metaS != "" {
+		h.Set(wire.HeaderMeta, metaS)
+	}
 	h.Set(wire.HeaderTimestamp, ts)
 	h.Set(wire.HeaderNonce, nonce)
 	h.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
 	target := (&url.URL{Path: path, RawPath: u.RawPath}).RequestURI()
 	return channel.Request{Method: method, Target: target, Header: h}, nil
-}
-
-// result is the answer to a signed request outside the channel: the
-// status and the body (at most 1 MiB).
-type result struct {
-	status int
-	data   []byte
-	// date is the Date header of the answer, at the local time it came.
-	date string
-	at   time.Time
-	// retry is the Retry-After header (seconds).
-	retry string
-}
-
-// rejected is the error of an answer of 400 or above.
-func (r *result) rejected() error {
-	return rejected(r.status, r.data, r.date, r.at, r.retry)
 }
 
 // rejected is the RejectedError of an answer of status with body data:
@@ -270,84 +245,6 @@ func rejected(status int, data []byte, date string, at time.Time, retry string) 
 		re.RetryAfter = time.Duration(n) * time.Second
 	}
 	return re
-}
-
-// send makes one signed request without a body to o.URL outside the
-// channel: the Luk-* signature headers over what sign returns for the
-// Host, the path, the timestamp and the nonce, plus header.
-func send(ctx context.Context, o Options, method, metaS string, header map[string]string, sign func(host, path, ts, nonce string) (string, []byte)) (*result, error) {
-	u, err := url.Parse(o.URL)
-	if err != nil {
-		return nil, err
-	}
-	path := u.Path
-	if path == "" {
-		path = "/"
-	}
-	ts := time.Now().UTC().Format(time.RFC3339)
-	nonce := wire.NewNonce()
-	ns, text := sign(u.Host, path, ts, nonce)
-	sig, err := sshsig.Sign(o.Signer, ns, text)
-	if err != nil {
-		return nil, err
-	}
-
-	wait, err := orDefault(o.DecisionTimeout, defaultDecision, "decision timeout")
-	if err != nil {
-		return nil, err
-	}
-	idle, err := orDefault(o.IdleTimeout, defaultIdle, "idle timeout")
-	if err != nil {
-		return nil, err
-	}
-	caller := ctx
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	// The decision is the complete headers of a final answer; a 1xx is
-	// none. The idle watchdog covers the reading of the answer.
-	dec := newDecider(wait, cancel)
-	defer dec.stop()
-	answerWD := newWatchdog(idle, cancel)
-	defer answerWD.stop()
-
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range header {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set(wire.HeaderMeta, metaS)
-	req.Header.Set(wire.HeaderTimestamp, ts)
-	req.Header.Set(wire.HeaderNonce, nonce)
-	req.Header.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
-
-	tr, err := transport(u, "")
-	if err != nil {
-		return nil, err
-	}
-	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
-	at := time.Now()
-	if !dec.decide() {
-		if resp != nil {
-			resp.Body.Close()
-		}
-		if err == nil {
-			err = context.Canceled
-		}
-		return nil, &TransferError{Reason: NoDecision, Host: u.Host, Wait: wait, Err: err}
-	}
-	if err != nil {
-		return nil, transferError(caller, err, u.Host, 0, 0, false)
-	}
-	defer resp.Body.Close()
-	answer := &readIdle{r: resp.Body, w: answerWD, done: cancel}
-	data, err := io.ReadAll(io.LimitReader(answer, cmp.Or(o.maxAnswer, 1<<20)))
-	if err != nil {
-		return nil, transferError(caller, err, u.Host, 0, 0, true)
-	}
-	return &result{status: resp.StatusCode, data: data, date: resp.Header.Get("Date"), at: at, retry: resp.Header.Get("Retry-After")}, nil
 }
 
 func decodeAnswer(status int, data []byte, dryRun bool) (*Answer, error) {
