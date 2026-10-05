@@ -26,7 +26,7 @@ func dirsConfig(root string) *config.Config {
 
 func TestPrepareDirsCreates(t *testing.T) {
 	root := t.TempDir()
-	if err := prepareDirs(dirsConfig(root), true); err != nil {
+	if err := prepareDirs(dirsConfig(root), "receive"); err != nil {
 		t.Fatal(err)
 	}
 	for _, d := range []string{"queue/b", "storage/a", "storage/a/.db", "storage/a/file", "tls", "work", "gpg-cache"} {
@@ -51,7 +51,7 @@ func TestPrepareDirsNotADirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Endpoint["b"].Path = file
-	if err := prepareDirs(cfg, true); err == nil || !strings.Contains(err.Error(), file) {
+	if err := prepareDirs(cfg, "receive"); err == nil || !strings.Contains(err.Error(), file) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -65,7 +65,7 @@ func TestPrepareDirsOldLayout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "x"), nil, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	err := prepareDirs(dirsConfig(root), true)
+	err := prepareDirs(dirsConfig(root), "receive")
 	if err == nil || !strings.Contains(err.Error(), "storage a: "+base+": holds .luk, x besides .db/ and file/") {
 		t.Fatalf("err = %v", err)
 	}
@@ -85,7 +85,7 @@ func TestPrepareDirsUnwritable(t *testing.T) {
 	}
 	cfg := dirsConfig(root)
 	cfg.Storage["a"].Base = locked
-	err := prepareDirs(cfg, true)
+	err := prepareDirs(cfg, "receive")
 	if err == nil || !strings.Contains(err.Error(), locked) || !strings.Contains(err.Error(), "ReadWritePaths") {
 		t.Fatalf("err = %v", err)
 	}
@@ -103,7 +103,7 @@ func TestPrepareDirsUnreadableTLS(t *testing.T) {
 	if err := os.WriteFile(cfg.Listen["l"].TLS.Key, nil, 0o000); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareDirs(cfg, true); err == nil || !strings.Contains(err.Error(), cfg.Listen["l"].TLS.Key) {
+	if err := prepareDirs(cfg, "receive"); err == nil || !strings.Contains(err.Error(), cfg.Listen["l"].TLS.Key) {
 		t.Fatalf("err = %v", err)
 	}
 }

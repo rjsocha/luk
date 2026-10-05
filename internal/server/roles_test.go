@@ -20,6 +20,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"luk/internal/config"
+	"luk/internal/expose"
 	"luk/internal/pipeline"
 	"luk/internal/queue"
 	"luk/internal/status"
@@ -431,9 +432,7 @@ func TestProcessResumesQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := `[{"pipeline":"gone","sender":"alice","tags":[],"last_id":"x","last_received":"","last_success":"2026-01-01T00:00:00Z","size":1}]`
-	if err := os.WriteFile(status.Path(e.root), []byte(old), 0o640); err != nil {
-		t.Fatal(err)
-	}
+	writeStatus(t, e.root, []byte(old), 0o640)
 	var logs syncBuf
 	e.start(t, Process, &logs)
 	waitFor(t, "stored", func() bool {
@@ -491,9 +490,7 @@ func TestRolesCancelledBeforeStart(t *testing.T) {
 
 func TestProcessStatusCorruptMovedAside(t *testing.T) {
 	e := newRoleEnv(t)
-	if err := os.WriteFile(status.Path(e.root), []byte("not json"), 0o640); err != nil {
-		t.Fatal(err)
-	}
+	writeStatus(t, e.root, []byte("not json"), 0o640)
 	var logs strings.Builder
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -511,12 +508,77 @@ func TestProcessStatusUnreadableFails(t *testing.T) {
 		t.Skip("root reads any file")
 	}
 	e := newRoleEnv(t)
-	if err := os.WriteFile(status.Path(e.root), []byte("[]"), 0o000); err != nil {
-		t.Fatal(err)
-	}
+	writeStatus(t, e.root, []byte("[]"), 0o000)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := Process(ctx, e.cfg, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "status") {
 		t.Fatalf("process: %v", err)
+	}
+}
+
+// writeStatus writes a status file the process role finds at start.
+func writeStatus(t *testing.T, root string, data []byte, perm os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(status.Path(root)), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(status.Path(root), data, perm); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRolesAlive: each role writes its liveness file at start and its
+// janitor loop touches it, rewriting it when deleted.
+func TestRolesAlive(t *testing.T) {
+	old := expose.BeatEvery
+	expose.BeatEvery = 20 * time.Millisecond
+	t.Cleanup(func() { expose.BeatEvery = old })
+	slowPickup(t)
+	for _, c := range []struct {
+		name string
+		role func(context.Context, *config.Config, *slog.Logger) error
+	}{{"receive", Receive}, {"process", Process}} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newRoleEnv(t)
+			var logs syncBuf
+			e.start(t, c.role, &logs)
+			p := status.AlivePath(e.root, c.name)
+			for _, d := range []string{status.Dir(e.root), status.RoleDir(e.root, c.name)} {
+				if fi, err := os.Stat(d); err != nil || fi.Mode().Perm() != 0o750 {
+					t.Fatalf("%s: %v %v", d, fi, err)
+				}
+			}
+			waitFor(t, "alive.json", func() bool { return exists(p) })
+			b, _ := os.ReadFile(p)
+			var info status.AliveInfo
+			if err := json.Unmarshal(b, &info); err != nil || info.Role != c.name || info.PID != os.Getpid() || info.Version != Version {
+				t.Fatalf("%s: %+v %v", b, info, err)
+			}
+			if _, err := time.Parse(time.RFC3339, info.Started); err != nil {
+				t.Fatal(err)
+			}
+			past := time.Now().Add(-time.Hour)
+			if err := os.Chtimes(p, past, past); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, "heartbeat", func() bool {
+				fi, err := os.Stat(p)
+				return err == nil && time.Since(fi.ModTime()) < time.Minute
+			})
+			if after, _ := os.ReadFile(p); string(after) != string(b) {
+				t.Fatalf("content rewritten: %s", after)
+			}
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, "alive.json rewritten", func() bool {
+				after, err := os.ReadFile(p)
+				return err == nil && string(after) == string(b)
+			})
+			other := map[string]string{"receive": "process", "process": "receive"}[c.name]
+			if exists(status.RoleDir(e.root, other)) {
+				t.Fatalf("%s created the status directory of %s", c.name, other)
+			}
+		})
 	}
 }

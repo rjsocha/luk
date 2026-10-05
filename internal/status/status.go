@@ -1,8 +1,9 @@
-// Package status keeps <root>/status.json: the last pipeline result per
-// (pipeline, sender) and the evaluation of the watch rules of the
-// storages. For the pipelines lukd reports facts only; their thresholds
-// live in the monitoring check that reads the file. The watch rules hold
-// their thresholds in the lukd configuration.
+// Package status keeps the status directory <root>/status: the liveness
+// file of each role (see Alive) and process/status.json, the last
+// pipeline result per (pipeline, sender) and the evaluation of the watch
+// rules of the storages. For the pipelines lukd reports facts only; their
+// thresholds live in the monitoring check that reads the file. The watch
+// rules hold their thresholds in the lukd configuration.
 package status
 
 import (
@@ -41,8 +42,8 @@ var (
 	syncDir = (*os.File).Sync
 )
 
-// Path is the status file under root.
-func Path(root string) string { return filepath.Join(root, "status.json") }
+// Path is the status file under root, written by the process role.
+func Path(root string) string { return filepath.Join(RoleDir(root, "process"), "status.json") }
 
 type Entry struct {
 	Pipeline     string   `json:"pipeline"`

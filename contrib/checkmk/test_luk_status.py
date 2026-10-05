@@ -51,6 +51,12 @@ class Base(unittest.TestCase):
         return out[0]
 
 
+class TestPaths(unittest.TestCase):
+    def test_default_status(self):
+        # Written by the process role under the lukd root.
+        self.assertEqual(ls.DEFAULT_STATUS, "/var/lib/luk/status/process/status.json")
+
+
 class TestParsing(unittest.TestCase):
     def test_duration(self):
         self.assertEqual(ls.parse_duration("30s"), 30)

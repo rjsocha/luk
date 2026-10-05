@@ -79,7 +79,7 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if err := setNonDumpable(); err != nil {
 		return fmt.Errorf("non-dumpable: %w", err)
 	}
-	if err := prepareDirs(cfg, true); err != nil {
+	if err := prepareDirs(cfg, "receive"); err != nil {
 		return err
 	}
 	lock, err := lockRole(cfg.Root, "receive")
@@ -123,7 +123,11 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		}
 		return fmt.Errorf("queue: %w", err)
 	}
-	expose.StartJanitor(ctx, s.config, log, time.Minute, expose.Expire, nil, nil)
+	beat, err := startAlive(cfg.Root, "receive", log)
+	if err != nil {
+		return err
+	}
+	expose.StartJanitor(ctx, s.config, log, time.Minute, expose.Expire, nil, nil, beat)
 	errc := make(chan error, 1)
 	if servers, err = s.listen(cfg, certs, errc); err != nil {
 		return err
@@ -169,7 +173,7 @@ func (s *Server) persistNonces(dir string) error {
 // On the way out it waits for the running pipelines, bounded by the
 // shutdown timeout.
 func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
-	if err := prepareDirs(cfg, false); err != nil {
+	if err := prepareDirs(cfg, "process"); err != nil {
 		return err
 	}
 	lock, err := lockRole(cfg.Root, "process")
@@ -202,7 +206,11 @@ func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	}
 	var cur atomic.Pointer[config.Config]
 	cur.Store(cfg)
-	expose.StartJanitor(ctx, cur.Load, log, time.Minute, expose.Maintain, d.Maintain, d.RefreshWatch)
+	beat, err := startAlive(cfg.Root, "process", log)
+	if err != nil {
+		return err
+	}
+	expose.StartJanitor(ctx, cur.Load, log, time.Minute, expose.Maintain, d.Maintain, d.RefreshWatch, beat)
 	wake := make(chan struct{}, 1)
 	watch := watchQueues(ctx, wake, log)
 	watch(pipeline.QueueDirs(cfg))
@@ -215,7 +223,7 @@ func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		case <-ctx.Done():
 			return nil
 		case <-hup:
-			next := reloadConfig(cur.Load(), false, log, func(next *config.Config) {
+			next := reloadConfig(cur.Load(), "process", log, func(next *config.Config) {
 				q.SetReserve(int64(next.Limits.Queue.Reserve))
 				d.Reload(next)
 				cur.Store(next)
@@ -226,6 +234,26 @@ func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 			}
 		}
 	}
+}
+
+// Version is the lukd version a role writes to its liveness file.
+var Version = "dev"
+
+// startAlive writes the liveness file of the role (see status.Alive) and
+// returns the heartbeat for its janitor loop: the loop that does the
+// role's periodic work (receive: expiry, process: queue maintenance,
+// pickup, storage maintenance, watch evaluation) touches the file, so its
+// mtime goes stale when that loop hangs.
+func startAlive(root, role string, log *slog.Logger) (func(time.Time), error) {
+	a, err := status.StartAlive(root, role, Version, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("liveness file: %w", err)
+	}
+	return func(now time.Time) {
+		if err := a.Beat(now); err != nil {
+			log.Warn("liveness file not touched", "file", a.Path(), "error", err)
+		}
+	}, nil
 }
 
 // stopDispatcher stops taking pipeline jobs and waits for the running ones,
@@ -268,14 +296,14 @@ func setLevel(log *slog.Logger, cfg *config.Config) {
 }
 
 // reload reloads the configuration of the receive role (see reloadConfig).
-func (s *Server) reload() *config.Config { return reloadConfig(s.config(), true, s.log, s.apply) }
+func (s *Server) reload() *config.Config { return reloadConfig(s.config(), "receive", s.log, s.apply) }
 
 // reloadConfig reads the configuration cur was loaded from again and hands
 // it to apply. An invalid configuration, a change of a setting that needs
 // a restart (see config.Restart.Changes) or a directory that cannot be
-// prepared (with tls, the TLS files too) keeps the current one entirely.
+// prepared (for receive, the TLS files too) keeps the current one entirely.
 // It returns the new configuration, nil when it kept the current one.
-func reloadConfig(cur *config.Config, tls bool, log *slog.Logger, apply func(*config.Config)) *config.Config {
+func reloadConfig(cur *config.Config, role string, log *slog.Logger, apply func(*config.Config)) *config.Config {
 	if cur.Path == "" {
 		log.Info("reload: configuration not read from a file, nothing to reload")
 		return nil
@@ -291,7 +319,7 @@ func reloadConfig(cur *config.Config, tls bool, log *slog.Logger, apply func(*co
 		}
 		return nil
 	}
-	if err := prepareDirs(next, tls); err != nil {
+	if err := prepareDirs(next, role); err != nil {
 		log.Error("reload failed, keeping the current configuration", "error", err)
 		return nil
 	}

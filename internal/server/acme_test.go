@@ -185,7 +185,7 @@ func TestACMECacheDir(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "acme"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareDirs(cfg, true); err != nil {
+	if err := prepareDirs(cfg, "receive"); err != nil {
 		t.Fatal(err)
 	}
 	for _, d := range []string{filepath.Join(root, "acme"), filepath.Join(root, "acme", "ca.example.com_14000_dir")} {
@@ -196,7 +196,7 @@ func TestACMECacheDir(t *testing.T) {
 	}
 	// The process role does not touch it.
 	other := acmeTestConfig(t, t.TempDir(), "https://ca.example.com/dir", "0.0.0.0:8443", "127.0.0.1:8080")
-	if err := prepareDirs(other, false); err != nil {
+	if err := prepareDirs(other, "process"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(other.Root, "acme")); !os.IsNotExist(err) {

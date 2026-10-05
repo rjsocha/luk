@@ -405,7 +405,7 @@ func TestCleanupAgeAndClaimed(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	StartJanitor(ctx, func() *config.Config { return e.cfg }, slog.New(slog.DiscardHandler), 0, Expire, nil, nil)
+	StartJanitor(ctx, func() *config.Config { return e.cfg }, slog.New(slog.DiscardHandler), 0, Expire, nil, nil, nil)
 	deadline := time.Now().Add(5 * time.Second)
 	for exists(filepath.Join(e.base, store.DataDir, "old")) || exists(stale) {
 		if time.Now().After(deadline) {
@@ -708,14 +708,23 @@ expose:
 	}
 }
 
-func TestJanitorBeforeAndAfter(t *testing.T) {
+func TestJanitorBeforeAfterAndBeat(t *testing.T) {
+	defer func(d time.Duration) { BeatEvery = d }(BeatEvery)
+	BeatEvery = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	calls := make(chan string, 4)
+	calls := make(chan string, 16)
 	cfg := &config.Config{Storage: map[string]*config.Storage{}}
 	StartJanitor(ctx, func() *config.Config { return cfg }, slog.New(slog.DiscardHandler), time.Hour, Maintain,
-		func(time.Time) { calls <- "before" }, func(time.Time) { calls <- "after" })
-	for _, want := range []string{"before", "after"} {
+		func(time.Time) { calls <- "before" }, func(time.Time) { calls <- "after" },
+		func(time.Time) {
+			select {
+			case calls <- "beat":
+			default:
+			}
+		})
+	// A beat after the pass, then beats between passes (every is an hour).
+	for _, want := range []string{"before", "after", "beat", "beat", "beat"} {
 		select {
 		case got := <-calls:
 			if got != want {

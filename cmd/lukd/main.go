@@ -53,6 +53,7 @@ func rootCmd() *cobra.Command {
 		return func(*cobra.Command, []string) error {
 			// The signals first: a SIGHUP or SIGTERM during the load and
 			// the start of the role must not end lukd by default action.
+			server.Version = buildVersion
 			server.CatchHangup()
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()

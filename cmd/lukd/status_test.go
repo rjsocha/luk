@@ -47,6 +47,10 @@ func TestStatusCommand(t *testing.T) {
 	if err != nil || strings.Count(out, "\n") != 1 || !strings.HasPrefix(out, "PIPELINE") {
 		t.Fatalf("missing file: %q %v", out, err)
 	}
+	// The process role creates the directory (see prepareDirs).
+	if err := os.MkdirAll(filepath.Dir(status.Path(root)), 0o750); err != nil {
+		t.Fatal(err)
+	}
 	st := status.New(status.Path(root))
 	if err := st.Record(status.Result{Pipeline: "archive", Sender: "robert.socha", ID: "id1", Size: 7}); err != nil {
 		t.Fatal(err)
@@ -76,6 +80,10 @@ func TestFlagGuard(t *testing.T) {
 
 func TestStatusCommandWatch(t *testing.T) {
 	cfg, root := statusConfig(t)
+	// The process role creates the directory (see prepareDirs).
+	if err := os.MkdirAll(filepath.Dir(status.Path(root)), 0o750); err != nil {
+		t.Fatal(err)
+	}
 	st := status.New(status.Path(root))
 	if err := st.SetWatch([]status.Watch{{Storage: "archive", Rule: 1, Pipeline: "archive", Origin: "db1-prod", File: "db.sql", State: "CRIT",
 		Message: "db1-prod/db.sql: last copy 31h ago (every 26h)", NewestReceived: "2026-10-03T05:00:00Z", Size: 4 << 30, Copies: 2,

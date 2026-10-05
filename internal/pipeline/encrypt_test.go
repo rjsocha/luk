@@ -45,7 +45,7 @@ func newGPGEnv(t *testing.T, pipeline string, keyFiles map[string][]byte, wkd ma
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range []string{"queue/up", "a", "b", "c", "work", "gpg-cache"} {
+	for _, d := range []string{"queue/up", "a", "b", "c", "work", "gpg-cache", "status/process"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
 			t.Fatal(err)
 		}

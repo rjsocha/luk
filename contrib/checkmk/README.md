@@ -2,7 +2,7 @@
 
 Install: `/usr/lib/check_mk_agent/local/luk_status` (executable, Python 3 stdlib only).
 
-Input: `/var/lib/luk/status.json` (env `LUK_STATUS`).
+Input: `/var/lib/luk/status/process/status.json` (env `LUK_STATUS`), written by the process role.
 Thresholds: `/etc/site/luk/check.conf` (env `LUK_CHECK_CONF`), see `check.conf.example`.
 A missing check.conf means no expectations. `LUK_CHECK_NOW` (RFC 3339) fixes the clock (tests).
 

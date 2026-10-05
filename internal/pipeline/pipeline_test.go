@@ -106,7 +106,7 @@ func newEnv(t *testing.T, concurrency int) *env {
 	t.Helper()
 	root := t.TempDir()
 	cfg := parseCfg(t, fmt.Sprintf(cfgTmpl, root, concurrency))
-	for _, d := range []string{"queue/up", "queue/other", "a", "b"} {
+	for _, d := range []string{"queue/up", "queue/other", "a", "b", "status/process"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
 			t.Fatal(err)
 		}
@@ -524,7 +524,7 @@ func TestQueueMetaKeepsHostname(t *testing.T) {
 
 func TestStoreDedupLogged(t *testing.T) {
 	e := newEnv(t, 1)
-	st, _, err := status.Open(filepath.Join(e.root, "status.json"))
+	st, _, err := status.Open(status.Path(e.root))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -632,7 +632,7 @@ func TestStoreRefreshesWatch(t *testing.T) {
 	e := newEnv(t, 1)
 	every := config.Duration(time.Hour)
 	e.cfg.Storage["b"].Watch = []config.Watch{{Origin: config.StringList{"robert.socha"}, Every: &every}, {Origin: config.StringList{"none"}, Every: &every}}
-	st, _, err := status.Open(filepath.Join(e.root, "status.json"))
+	st, _, err := status.Open(status.Path(e.root))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -659,7 +659,7 @@ func TestStoreRefreshesWatch(t *testing.T) {
 		ws[0].State != "OK" || ws[0].Copies != 1 || ws[1].Rule != 2 || ws[1].State != "WARN" {
 		t.Fatalf("watch %+v", ws)
 	}
-	b, _ := os.ReadFile(filepath.Join(e.root, "status.json"))
+	b, _ := os.ReadFile(status.Path(e.root))
 	if !strings.Contains(string(b), `"watch": [`) || !strings.Contains(string(b), `"origin": "robert.socha"`) {
 		t.Fatalf("status.json:\n%s", b)
 	}

@@ -11,6 +11,7 @@ import (
 
 	"luk/internal/config"
 	"luk/internal/pipeline"
+	"luk/internal/status"
 	"luk/internal/store"
 )
 
@@ -39,18 +40,30 @@ const (
 	Maintain
 )
 
+// BeatEvery is how often the janitor calls its beat between passes.
+var BeatEvery = status.BeatEvery
+
 // StartJanitor runs one pass of the given parts at once and then every
 // `every` until ctx is done. Data files without a sidecar are logged, never
 // deleted. before, when set, runs first in every pass, after, when set,
 // last. An interval <= 0 means one minute. Every pass works on the
-// configuration cfg returns then.
-func StartJanitor(ctx context.Context, cfg func() *config.Config, log *slog.Logger, every time.Duration, parts Janitor, before, after func(time.Time)) {
+// configuration cfg returns then. beat, when set, runs in the same
+// goroutine after every pass and every BeatEvery between passes, so it
+// stops while a pass hangs.
+func StartJanitor(ctx context.Context, cfg func() *config.Config, log *slog.Logger, every time.Duration, parts Janitor, before, after, beat func(time.Time)) {
 	if every <= 0 {
 		every = time.Minute
 	}
+	beatEvery := BeatEvery
 	go func() {
 		t := time.NewTicker(every)
 		defer t.Stop()
+		var beats <-chan time.Time
+		if beat != nil {
+			bt := time.NewTicker(beatEvery)
+			defer bt.Stop()
+			beats = bt.C
+		}
 		for {
 			now := time.Now()
 			if before != nil {
@@ -66,10 +79,19 @@ func StartJanitor(ctx context.Context, cfg func() *config.Config, log *slog.Logg
 			if after != nil {
 				after(time.Now())
 			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
+			if beat != nil {
+				beat(time.Now())
+			}
+		wait:
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					break wait
+				case now := <-beats:
+					beat(now)
+				}
 			}
 		}
 	}()

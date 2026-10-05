@@ -3122,8 +3122,61 @@ verification.
 
 ## Status
 
-lukd writes `status.json` atomically (and may serve it as
-`GET /status` behind auth): an object with `pipelines`, one entry per
+The status directory `<root>/status/` has one directory per role; each
+file has exactly one writer, its role:
+
+```
+<root>/status/
+  receive/alive.json     # receive role
+  process/alive.json     # process role
+  process/status.json    # process role
+```
+
+Each role creates its directory at start (with `status/`, mode 0750,
+owned by the service user, checked for writing like the other lukd
+directories). A `<root>/status.json` of an older release is ignored and
+can be deleted.
+
+### Liveness
+
+At start, after it took its lock (see Service), a role writes
+`alive.json` once, atomically (temporary file in the same directory,
+fsync, rename, fsync of the directory), mode 0640:
+
+```json
+{
+  "role": "process",
+  "pid": 4242,
+  "started": "2026-10-05T12:00:00Z",
+  "version": "0.9.0"
+}
+```
+
+The mtime of `alive.json` is the heartbeat: the janitor loop of the
+role touches it (mtime set to now, content not rewritten) after every
+pass and every 30 seconds between passes. That loop does the periodic
+work of the role (receive: the expiry pass; process: failure record
+expiry, failed counts, queue pickup, storage maintenance, watch
+evaluation), so a pass that hangs stops the heartbeat. A file deleted
+while the role runs is written again at the next touch.
+
+Contract for readers (monitoring), with age = now - mtime:
+
+- fresh: the role runs.
+- stale: the role is dead or stuck.
+- missing: the role has not started since the directory was created.
+
+The reader picks the stale threshold: a few heartbeat intervals plus
+the longest janitor pass it accepts (the touch waits for a running
+pass).
+
+lukd does not interpret the liveness files: no command reads them.
+
+### status.json
+
+The process role writes `status/process/status.json` atomically (and
+may serve it as `GET /status` behind auth): an object with
+`pipelines`, one entry per
 (pipeline, sender), and `watch`, the evaluation of the watch rules of
 the storages (see `watch` under Storage and catalog), one record per
 watched series and per rule no series matches:
@@ -3418,12 +3471,15 @@ systemctl enable --now lukd
   into an entry. A poll every 5
   seconds is the fallback (lost events, queue overflow, inotify not
   available); an entry already running is skipped. It runs the pipelines
-  (run and store steps), keeps the failure records and `status.json` (loaded at
+  (run and store steps), keeps the failure records and `status/process/status.json` (loaded at
   start, results, failed counts, watch evaluations) and does the storage
   maintenance of the janitor (retention, aliases, catalog rebuild,
   content objects, crash leftovers, old work directories), followed by
   the evaluation of the watch rules. `SIGHUP` reloads the configuration (see Reload); the
   queue directories of new endpoints are watched from then on.
+
+Both roles write their liveness file `<root>/status/<role>/alive.json`
+(see Status).
 
 Each role runs once per `root`: `lukd receive` holds a `flock` on
 `<root>/.lukd-receive.lock`, `lukd process` on
@@ -4680,7 +4736,7 @@ disk. Test on lukd.vm / luk.vm.
 
 ### Phase 5 - status
 
-- lukd keeps `<root>/status.json` (atomic writes, loaded at start), one
+- lukd keeps `<root>/status/process/status.json` (atomic writes, loaded at start), one
   entry per (pipeline, sender) under `pipelines`: `pipeline`, `sender`,
   `tags`, `last_id`, `last_received`, `last_accepted`, `last_success`, `last_failure`,
   `failed_step`, `error` (last failure, up to 4 KiB), `size`; and the

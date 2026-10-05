@@ -343,7 +343,7 @@ log: {level: %s}
 		if _, err := tlsself.Generate(l.TLS.Cert, l.TLS.Key, l.TLS.Host, l.TLS.Algorithm); err != nil {
 			t.Fatal(err)
 		}
-		if err := prepareDirs(cfg, true); err != nil {
+		if err := prepareDirs(cfg, "receive"); err != nil {
 			t.Fatal(err)
 		}
 		logs := &syncBuf{}

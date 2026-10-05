@@ -188,7 +188,7 @@ func newReloadEnv(t *testing.T) *reloadEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareDirs(cfg, true); err != nil {
+	if err := prepareDirs(cfg, "receive"); err != nil {
 		t.Fatal(err)
 	}
 	srv := New(cfg, slog.New(slog.NewTextHandler(e.logs, nil)))

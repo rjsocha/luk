@@ -22,9 +22,21 @@ func result(pipeline, sender, id string, errText string, step int) Result {
 	}
 }
 
+// testPath is the store file in dir; the layout under a root is Path.
+func testPath(dir string) string { return filepath.Join(dir, "status.json") }
+
+func TestPathLayout(t *testing.T) {
+	if p := Path("/var/lib/luk"); p != "/var/lib/luk/status/process/status.json" {
+		t.Fatal(p)
+	}
+	if p := AlivePath("/var/lib/luk", "receive"); p != "/var/lib/luk/status/receive/alive.json" {
+		t.Fatal(p)
+	}
+}
+
 func open(t *testing.T) (*Store, string) {
 	t.Helper()
-	p := Path(t.TempDir())
+	p := testPath(t.TempDir())
 	s, _, err := Open(p)
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +165,7 @@ func TestReloadAfterRestart(t *testing.T) {
 
 func TestOpenCorruptMovedAside(t *testing.T) {
 	dir := t.TempDir()
-	p := Path(dir)
+	p := testPath(dir)
 	for i := range 4 {
 		if err := os.WriteFile(p, []byte("{"), 0o640); err != nil {
 			t.Fatal(err)
@@ -181,7 +193,7 @@ func exists(p string) bool {
 }
 
 func TestOpenReadErrorFails(t *testing.T) {
-	p := Path(t.TempDir())
+	p := testPath(t.TempDir())
 	if err := os.Mkdir(p, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +208,7 @@ func TestOpenRemovesTempFiles(t *testing.T) {
 	other := filepath.Join(dir, ".keep")
 	os.WriteFile(tmp, []byte("x"), 0o640)
 	os.WriteFile(other, []byte("x"), 0o640)
-	if _, _, err := Open(Path(dir)); err != nil {
+	if _, _, err := Open(testPath(dir)); err != nil {
 		t.Fatal(err)
 	}
 	if exists(tmp) || !exists(other) {
@@ -269,7 +281,7 @@ func TestPrint(t *testing.T) {
 }
 
 func TestPrintMissing(t *testing.T) {
-	p := Path(t.TempDir())
+	p := testPath(t.TempDir())
 	var b bytes.Buffer
 	if err := Print(&b, p, false); err != nil {
 		t.Fatal(err)
@@ -404,7 +416,7 @@ func TestSetFailedRetriesFailedSync(t *testing.T) {
 }
 
 func TestOpenOlderArray(t *testing.T) {
-	p := Path(t.TempDir())
+	p := testPath(t.TempDir())
 	old := `[{"pipeline":"devdb","sender":"alice","tags":[],"last_id":"id1","last_received":"2026-09-30T11:59:00Z","failed_step":0,"size":42,"failed":1}]`
 	if err := os.WriteFile(p, []byte(old), 0o640); err != nil {
 		t.Fatal(err)

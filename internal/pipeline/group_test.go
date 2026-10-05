@@ -68,7 +68,7 @@ func newGroupEnv(t *testing.T, concurrency int) *env {
 		t.Skip("no /bin/sh")
 	}
 	root := t.TempDir()
-	for _, d := range []string{"queue/up", "s", "work"} {
+	for _, d := range []string{"queue/up", "s", "work", "status/process"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
 			t.Fatal(err)
 		}

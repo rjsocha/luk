@@ -61,7 +61,7 @@ func newRunEnv(t *testing.T, pipeline string) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range []string{"queue/up", "a", "b", "c", "work"} {
+	for _, d := range []string{"queue/up", "a", "b", "c", "work", "status/process"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
 			t.Fatal(err)
 		}

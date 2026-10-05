@@ -8,17 +8,20 @@ import (
 	"sort"
 
 	"luk/internal/config"
+	"luk/internal/status"
 	"luk/internal/store"
 )
 
 const dirHint = "the directory must be owned by the service user and inside ReadWritePaths of the unit"
 
-// prepareDirs creates the queue (secret queues 0700), local storage, work
-// and WKD cache directories and checks that the process can write to them
-// and, with tls, read the TLS files and write the ACME caches.
-func prepareDirs(cfg *config.Config, tls bool) error {
+// prepareDirs creates the status directory of the role, the queue (secret
+// queues 0700), local storage, work and WKD cache directories and checks
+// that the process can write to them and, for the receive role, read the
+// TLS files and write the ACME caches.
+func prepareDirs(cfg *config.Config, role string) error {
+	tls := role == "receive"
 	var errs []error
-	for _, d := range []string{cfg.WorkDir(), cfg.GPGCacheDir()} {
+	for _, d := range []string{status.RoleDir(cfg.Root, role), cfg.WorkDir(), cfg.GPGCacheDir()} {
 		if d != "" {
 			errs = append(errs, prepareWritable(d))
 		}

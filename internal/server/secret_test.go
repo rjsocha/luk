@@ -347,7 +347,7 @@ func TestSecretDirsCreated(t *testing.T) {
 	if err := os.RemoveAll(f.vol); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareDirs(f.srv.config(), true); err != nil {
+	if err := prepareDirs(f.srv.config(), "receive"); err != nil {
 		t.Fatal(err)
 	}
 	out := receipt(t, mustDo(t, f.fixture, secretMeta("again"), "again"), http.StatusCreated)
