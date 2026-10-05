@@ -370,7 +370,10 @@ func (q *Queue) Remove(e Entry) error {
 	return os.RemoveAll(e.Dir)
 }
 
-// Pending lists accepted entries, oldest first.
+// Pending lists accepted entries in acceptance order (FIFO): by the
+// top-level "accepted" and "accepted_seq" of their meta.json (see
+// Accepted); an entry without them (committed by an older lukd) by its
+// sidecar "received" time, then by id.
 func Pending(dir string) ([]Entry, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -378,7 +381,7 @@ func Pending(dir string) ([]Entry, error) {
 	}
 	type item struct {
 		e  Entry
-		mt int64
+		at Acceptance
 	}
 	var items []item
 	for _, d := range ents {
@@ -386,18 +389,17 @@ func Pending(dir string) ([]Entry, error) {
 			continue
 		}
 		edir := filepath.Join(dir, d.Name())
-		st, err := os.Stat(filepath.Join(edir, "meta.json"))
-		if err != nil {
+		if _, err := os.Stat(filepath.Join(edir, "meta.json")); err != nil {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(edir, "payload")); err != nil {
 			continue
 		}
-		items = append(items, item{Entry{Dir: edir, ID: d.Name()}, st.ModTime().UnixNano()})
+		items = append(items, item{Entry{Dir: edir, ID: d.Name()}, AcceptanceOf(filepath.Join(edir, "meta.json"))})
 	}
 	sort.Slice(items, func(i, j int) bool {
-		if items[i].mt != items[j].mt {
-			return items[i].mt < items[j].mt
+		if c := items[i].at.Compare(items[j].at); c != 0 {
+			return c < 0
 		}
 		return items[i].e.ID < items[j].e.ID
 	})
@@ -406,6 +408,34 @@ func Pending(dir string) ([]Entry, error) {
 		out[i] = it.e
 	}
 	return out, nil
+}
+
+// AcceptanceOf is the acceptance order the meta.json at path records:
+// its top-level accepted and accepted_seq, else its sidecar received time
+// (an entry committed before them); zero when it has none or cannot be
+// read.
+func AcceptanceOf(path string) Acceptance {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Acceptance{}
+	}
+	var m struct {
+		Accepted    int64 `json:"accepted"`
+		AcceptedSeq int   `json:"accepted_seq"`
+		Sidecar     struct {
+			Received string `json:"received"`
+		} `json:"sidecar"`
+	}
+	if json.Unmarshal(b, &m) != nil {
+		return Acceptance{}
+	}
+	if m.Accepted != 0 {
+		return Acceptance{NS: m.Accepted, Seq: m.AcceptedSeq}
+	}
+	if t, err := time.Parse(time.RFC3339, m.Sidecar.Received); err == nil {
+		return Acceptance{NS: t.UnixNano()}
+	}
+	return Acceptance{}
 }
 
 // Cleanup removes entry directories without meta.json: directories whose

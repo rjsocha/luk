@@ -873,7 +873,7 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   the request and `owner_key` equal to the signer's, not expired; claimed
   (`once`) files and aliases are not listed. 200 `{"links": [{"url",
   "file", "size", "received", "expires", "once", "mutable", "portal",
-  "access", "updated", "permanent", "permanent_url"}, ...]}`, newest `received` first (`file`,
+  "access", "updated", "permanent", "permanent_url"}, ...]}`, newest first (by acceptance order, see Acceptance order; `file`,
   `expires`, `access` and `updated` omitted when empty, `links` is `[]`
   for none). A version of a permanent name the endpoint allocates has
   `permanent` (the name) and `permanent_url` (its permanent URL); both
@@ -892,9 +892,9 @@ accepted`.
 
 ## Permanent names
 
-A permanent name is a fixed URL of a `respond: url` endpoint that always
-serves the newest version published under it, such as a key revocation
-list or the latest build. The names are allocated in the configuration
+A permanent name is a fixed URL of a `respond: url` endpoint that serves
+the version published under it last, such as a key revocation list or
+the latest build, or nothing at all. The names are allocated in the configuration
 only: there is no runtime reservation, and a name no entry covers can
 never be published.
 
@@ -908,10 +908,8 @@ endpoint:
       names:
         revocation/hosts.krl:         # an exact name
           allow: [robert.socha, kf, matt]
-          keep: 5                     # versions kept of this name (default 1)
         builds/*:                     # a pattern
           allow: ["ci:*"]
-          keep: 3
           max: 50                     # distinct names the pattern may hold (default 100)
 ```
 
@@ -967,31 +965,48 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   The version is a version of its name while its endpoint allocates the
   name under that path; a version of another path is not.
 - Serving: `GET` and `HEAD` of the permanent URL on the expose of the
-  storage serve the newest live version of the name (newest `received`,
-  then the greater stored name; expired versions do not count) with its
-  own sidecar: its size, `ETag` (sha256), `Content-Type` and file name,
-  under the rules of any file (an expired version answers 404). A name
-  without a version, or one the configuration no longer allocates,
-  answers 404. Link actions take the version URL; the permanent URL is
-  no link (404 `link not found`).
-- `keep`: after a version is stored, the live versions of the name
-  beyond the newest `keep` are removed in the same store, as `lukd
-  storage rm` removes a file (sidecar, objects, catalog), logged as
-  `permanent version pruned`. Versions also expire by their ttl, and
-  any removal (expiry, `luk link --rm`, `lukd storage rm`, retention)
-  moves the name to the newest live version left, or removes it when none
-  is left. A version that expires leaves the name at the next
-  maintenance pass (every minute), when the name moves to the previous
-  version; a `luk link --ttl` of a version takes effect at once.
+  storage serve the current version of the name, the one published
+  last, with its own sidecar: its size, `ETag` (sha256), `Content-Type`
+  and file name, under the rules of any file. A name whose current
+  version has expired answers 404 at once (the request checks the
+  expiry, also before the maintenance pass removes it), as does a name
+  without a version, or one the configuration no longer allocates. There
+  is never a fallback to an older version. Link actions take the version
+  URL; the permanent URL is no link (404 `link not found`).
+- Last published: the version accepted last (see Acceptance order) is
+  current; `received` and the order the queue entries are processed in
+  do not count. After a version is stored, under the base lock:
+  - accepted after the version published last (or the first): it becomes
+    current, then every other stored version of the name is removed as
+    `lukd storage rm` removes a file (sidecar, objects, catalog), logged
+    as `permanent version replaced`; a name has at most one stored
+    version;
+  - accepted before the version published last (an older upload whose
+    entry ran late): it never becomes current; it is removed again at
+    once, logged as `permanent version superseded`. This holds also
+    while the name is empty: the version published last is recorded
+    beside it (`current.last`, see On disk) and outlives it;
+  - the version published last itself (a retry of its store): it stays
+    current.
+- Gone: when the current version goes (`luk link --rm`, `lukd storage
+  rm`, retention, a replace of its stored name) or expires, the name is
+  empty and answers 404 until a later version is published. The expiry
+  pass (every minute) removes an expired version and with it `current`;
+  the maintenance pass of the process role unpublishes an expired or
+  removed current version it finds. A `luk link --ttl` of the current
+  version publishes its new expiry at once.
 - On disk: `<base>/.db/permanent/<path>/<name>/current/` holds `data`, a
   hardlink of the current version, and `meta.json`, a copy of its
-  sidecar. A new version is prepared in full as
+  sidecar; `current.last` (a file) records the version published last
+  (`accepted`, `accepted_seq`, `id`, `version` its stored name, `path`
+  and `name`) and stays when the version goes, so the directory of an
+  empty name holds only it. A new version is prepared in full as
   `<base>/.db/permanent/<path>/<name>/current.<random>/` (the hardlink,
   the sidecar, both synced with the directory), then swapped with
-  `current` in one `renameat2(RENAME_EXCHANGE)` (a plain rename for the
-  first version), the directory synced, and the old version (now
-  `current.<random>`) removed. A name that goes is renamed away in one
-  step before its files are removed.
+  `current` in one `renameat2(RENAME_EXCHANGE)` (a plain rename when
+  there is no `current`), the directory synced, `current.last` written,
+  and the old version (now `current.<random>`) removed. A current version
+  that goes is renamed away in one step before its files are removed.
 - Atomic for readers: a reader opens `current` once (a directory
   handle) and reads `meta.json` and opens `data` through it, so it gets
   the old version or the new one whole, with its own size, sha256 and
@@ -1005,11 +1020,14 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   version beside it; either way `current` is one whole version. Every
   publish, removal and repair of a permanent name runs under the base
   lock of the storage, so permanent names of one storage change one at a
-  time (two uploads of one name apply one after the other, the newest
-  wins), and a `current.<random>` found under the lock is a crash
-  leftover by definition: it is removed before the next version is
-  prepared, and by the maintenance of the process role (which also
-  republishes a name whose `current` is not its newest live version).
+  time (two uploads of one name apply one after the other, the one
+  accepted last wins), and a `current.<random>` found under the lock is a
+  crash leftover by definition: it is removed before the next version is
+  prepared, and by the maintenance of the process role. That pass also
+  finishes a switch a crash interrupted: a live version accepted after
+  the one published last (stored, not published) becomes current, and
+  every other stored version of the name (replaced or superseded, not
+  removed yet) is removed.
 - `renameat2(RENAME_EXCHANGE)` is required: the receive and process
   roles probe it on the base of every storage with permanent names at
   start (two directories in `.db/tmp/`) and refuse to start without it
@@ -1037,10 +1055,16 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   orphan: no endpoint allocates it`), `lukd storage permanent` lists it
   with `ORPHAN`, and `lukd storage permanent --prune-orphans` removes it.
   Its versions stay ordinary stored files (ttl, retention, `lukd storage
-  rm`); adding the entry back publishes the name again.
+  rm`); adding the entry back publishes the name again (its version
+  accepted last).
+- Empty names: the directory of an empty name (only `current.last`)
+  stays; `lukd storage permanent` lists it without a current version and
+  `--prune-empty` removes it, with the record of the version published
+  last (a version stored afterwards becomes current whatever its
+  acceptance).
 - Listing: the endpoint listing shows `permanent: true` when an entry
   grants the signer, never the names or patterns. `luk link ls` lists
-  each version as a link with the flag `permanent`, and then the
+  the version of a name as a link with the flag `permanent`, and then the
   permanent names those versions belong to (see Client).
 - Cost: a store, a removal and every maintenance pass of a storage with
   permanent names read every sidecar of the base (O(files)), as aliases
@@ -1613,9 +1637,9 @@ endpoint:
       remove: ["*"]
       ttl: ["*"]
       replace: [robert.socha]
-    permanent:                        # optional: fixed URLs of the newest version (see Permanent names)
+    permanent:                        # optional: fixed URLs of the version published last (see Permanent names)
       names:
-        revocation/hosts.krl: {allow: [robert.socha], keep: 5}
+        revocation/hosts.krl: {allow: [robert.socha]}
     limits:
       body:
         size: 2G
@@ -1786,10 +1810,10 @@ and `ssh.d/ca/`):
   from the `permanent.path` of every other endpoint storing into the
   same storage without nesting in it; `names` is not empty; every key
   is a valid name or pattern; every entry has `allow` (an identity list,
-  checked as an endpoint `allow`), `keep` and `max` at least 1, and
-  `max` only on a pattern. Warnings: two patterns of one endpoint that
-  may tie, and orphaned permanent names in a readable base (see
-  Permanent names);
+  checked as an endpoint `allow`) and no key besides `allow` and `max`;
+  `max` is at least 1 and only on a pattern. Warnings: two patterns of
+  one endpoint that may tie, and orphaned permanent names in a readable
+  base (see Permanent names);
 - `pretty` requires `respond: url` and a respond storage `path` (and a
   secret storage `path`) that uses `.Random`; `pretty.bits` is 64 to 128;
 - `run` is an absolute path; `tee` only on a `run` step (`tee needs
@@ -1994,6 +2018,43 @@ upload whose pipeline no longer exists (configuration reloaded in
 between) fails that pipeline (`pipeline not in the config`) and moves to
 the failed queue, from where `lukd queue retry` runs it once the pipeline
 is back (see Reload).
+
+### Acceptance order
+
+An upload is accepted when `lukd receive` commits its queue entry, after
+the whole body was received: `meta.json` is renamed into the entry. The
+moment of that commit, not the start of the request, orders uploads: a
+large upload started earlier and committed later is the newer one.
+
+- `accepted` (Unix nanoseconds) and `accepted_seq` are taken right
+  before `meta.json` is written and are part of it, so they are on disk
+  with the entry the moment it is committed (a crash before the rename
+  leaves a half entry that is removed at start, the client got no 2xx
+  and its retry is accepted later). The value is the wall clock read
+  once at the start of `lukd receive` plus the time elapsed since, on
+  the monotonic clock: it never goes back while the process runs, also
+  when NTP or an administrator steps the wall clock back.
+  `accepted_seq` orders acceptances of one process within the same
+  nanosecond (0, 1, 2, ...); it is omitted when 0. The order is
+  `accepted`, then `accepted_seq`.
+- A new `lukd receive` starts from the wall clock again: a wall clock
+  moved back by more than the restart took can order the first uploads
+  after the restart before the last ones before it (an administrative
+  action; nothing else reorders).
+- The queue entry keeps both at the top of `meta.json` and in its
+  sidecar (`sidecar.accepted`, `sidecar.accepted_seq`); every stored
+  file of the upload carries them in its sidecar. `received` stays the
+  time shown (second resolution, the start of the request).
+- What uses it: `lukd process` picks up the entries of a queue directory
+  in acceptance order (FIFO); the version of a permanent name published
+  last (see Permanent names), the newest declarer of an alias (and so
+  `latest` of the catalog), the order of the files of a retention series
+  and the newest copy of a watch series, `luk link ls`, `lukd storage
+  ls` and the last upload of a pipeline in `status.json`
+  (`last_accepted`, `last_accepted_seq`) all go by it.
+- Entries and sidecars written before it (no `accepted`) count by their
+  `received` time (whole seconds), then by id (and, where files of one
+  upload tie, by stored name).
 
 ### Scheduling
 
@@ -2391,12 +2452,14 @@ pipeline:
     buckets are in UTC: the day, the ISO week (`2026-W40`), the month and
     the year. A file whose `received` cannot be read is kept and takes no
     place in the counts.
-  - Selection, per series, newest first (by `received`, then by name):
-    `last` keeps the newest `last` files; `daily`, `weekly`, `monthly`
-    and `yearly` each walk the files from the newest and keep the newest
-    file of each distinct bucket until that many buckets are kept (a
-    bucket without files counts for nothing, so gaps reach further
-    back). `within` (a duration, `2d`, `36h`) keeps every file received
+  - Selection, per series, newest first (by acceptance order, see
+    Acceptance order, then by id and name): `last` keeps the newest
+    `last` files; `daily`, `weekly`, `monthly` and `yearly` each walk
+    the files from the newest and keep the first file of each distinct
+    bucket (of its `received` time) until that many buckets are kept (a
+    bucket without files counts for nothing, so gaps reach further back;
+    a bucket met again further down, a file received earlier but
+    accepted later, is not counted twice). `within` (a duration, `2d`, `36h`) keeps every file received
     at most that long before now, whatever the counts. The kept set is
     the union; every other file of the series is pruned. Each count is 0
     or more and a rule has at least one count or `within` above 0.
@@ -2443,7 +2506,8 @@ pipeline:
     globs match the file name of a series applies (path.Match; an absent
     list matches anything). A series no rule matches is not watched.
   - The copies of a series are its stored files whose `received` can be
-    read, newest first; the newest copy is the first. The checks, each
+    read, newest first (by acceptance order, see Acceptance order); the
+    newest copy is the first. The checks, each
     only when set:
     - `every` (a duration): the newest copy was received longer than
       `every` before now: CRIT (`last copy 31h ago (every 26h)`);
@@ -2540,7 +2604,8 @@ pipeline:
 - Every stored file has a sidecar with its meta in a mirror tree:
   `<base>/.db/meta/<stored path>.json` - client meta (original `file` name,
   `type`, `ttl`, `once`, `portal`, tags) and server meta (id, sender,
-  size, sha256, received, expires, `owner` unless `no_owner`, `owner_key`,
+  size, sha256, received, `accepted` and `accepted_seq` (see Acceptance
+  order), expires, `owner` unless `no_owner`, `owner_key`,
   `pipeline` and `origin` of the store (see `retention`), `updated` after
   a replace). Keeping sidecars out of the data tree
   means an uploaded `x.json` can never collide with the sidecar of `x`,
@@ -2566,7 +2631,7 @@ pipeline:
   and its sidecar is finished by the retry too. A versioned name is a
   name of its own: with `shard` it lies under its own hash, on the same
   filesystem. An alias on the old version is re-evaluated (the newest
-  declarer by `received` keeps it, as always), and the catalog, rebuilt
+  declarer by acceptance order keeps it, as always), and the catalog, rebuilt
   once per store, lists every version.
 - `dedup` (default `true`, only with `conflict: version`) - when the
   target path exists, it (the bare name, always the newest version) is
@@ -2655,7 +2720,7 @@ pipeline:
   `tags`), pipeline meta nested under `meta`. The sender is not listed:
   the catalog is public wherever its expose is.
 - `alias` in a file's meta: lukd keeps a hardlink `<alias>` to the newest
-  file declaring it, and a `latest` map (`alias -> name`) in the catalog.
+  file declaring it (by acceptance order, see Acceptance order), and a `latest` map (`alias -> name`) in the catalog.
   The alias goes when its target goes.
 
 ### `lukd storage`
@@ -2670,7 +2735,7 @@ must run as root or as <owner> (owner of <base>)`. A `base` that is a
 symlink is refused (`lukd storage: <base> is a symlink`).
 
 - `lukd storage ls --storage NAME [--owner IDENTITY] [--older DURATION]
-  [--json]`: the stored files, newest `received` first, as aligned
+  [--json]`: the stored files, newest first (by acceptance order), as aligned
   columns `NAME`, `SIZE` (bytes), `RECEIVED`, `EXPIRES`, `OWNER` (the
   display name of the sidecar), `OWNER KEY`, `ENDPOINT`, `FLAGS` (`once`,
   `mutable`, then `reveal` or `download`, then `private` or `any`, then
@@ -2733,21 +2798,25 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   (exit 1).
 - `lukd storage permanent --storage NAME [--json]`: the permanent
   names of the storage (the directories of `.db/permanent/`), read only,
-  by key: aligned columns `PATH` and `NAME` (as the current version
-  records them; the key when it cannot be read), `NEWEST` (the
-  `received` of the current version), `VERSIONS` (live versions of the
-  name in the storage), `CURRENT` (the stored name of the current
-  version) and `ORPHAN` (`ORPHAN` for a name the configuration does not
-  allocate, see Permanent names, else `-`). `--json` prints an array of
-  `key`, `path`, `name`, `current`, `id`, `received`, `versions` and
-  `orphan`.
+  by key: aligned columns `PATH` and `NAME` (as published; the key when
+  nothing can be read), `CURRENT` (the stored name of the current
+  version, the one published last), `RECEIVED` and `EXPIRES` (of that
+  version, `never` without an expiry) and `ORPHAN` (`ORPHAN` for a name
+  the configuration does not allocate, see Permanent names, else `-`).
+  An empty name (its version gone) shows `-` as `CURRENT`, `RECEIVED`
+  and `EXPIRES`. `--json` prints an array of `key`, `path`, `name`,
+  `current`, `id`, `received`, `expires` (the last four omitted when
+  empty) and `orphan`.
   `--prune-orphans [--yes]` removes the directories of the orphans under
   the base lock, each only while it is still an orphan, printing
   `<path>/<name>: removed` per name; without `--yes` it lists them on
-  stderr with their versions and asks on a terminal (`[y/N]`), and
-  refuses when stdin is not one. The versions stay: they are ordinary
-  stored files that expire, are pruned by retention or removed with
-  `lukd storage rm`. Neither role ever removes an orphan.
+  stderr with their current versions and asks on a terminal (`[y/N]`),
+  and refuses when stdin is not one. The versions stay: they are
+  ordinary stored files that expire, are pruned by retention or removed
+  with `lukd storage rm`. Neither role ever removes an orphan.
+  `--prune-empty [--yes]` removes, the same way, the directories of the
+  empty names (allocated, without a current version) with their record
+  of the version published last, each only while it is still empty.
 - `lukd storage watch --storage NAME [--json] [--suggest]`: the
   evaluation of the watch rules (see `watch`) now, read only. First the
   rules (`rule <i>: <globs>: <checks>`), then, per series in order of
@@ -3003,7 +3072,7 @@ watched series and per rule no series matches:
   "pipelines": [
     {"pipeline": "devdb", "sender": "hosts:replica.aws.example.net",
      "tags": ["prod", "devdump"], "last_id": "...", "last_received": "...",
-     "last_success": "...", "last_failure": "...", "failed_step": 2,
+     "last_accepted": 1791100800123456789, "last_success": "...", "last_failure": "...", "failed_step": 2,
      "error": "dbdump exit 1", "size": 314572800, "failed": 0}
   ],
   "watch": [
@@ -3019,6 +3088,11 @@ watched series and per rule no series matches:
   ]
 }
 ```
+
+`last_id`, `last_received` and `last_accepted` (with `last_accepted_seq`
+when not 0) are of the upload accepted last (see Acceptance order); an
+entry or result without an acceptance order compares by
+`last_received`.
 
 A watch record holds `storage`, `rule` (1-based), the series
 (`pipeline`, `origin`, `file`; empty for a rule no series matches),
@@ -4047,8 +4121,8 @@ then `reveal` or `download`, then `private` or `any`, then `permanent`,
 comma separated; `-` for none), newest first, under a header line;
 nothing at all for no links (exit 0). When versions of permanent names
 are among the links, a blank line and a second table follow, by name:
-`PERMANENT` (the name), `VERSIONS` (its versions listed), `NEWEST` (the
-sent time of the newest) and `URL` (the permanent URL). A truncated answer adds `luk: the server lists the newest
+`PERMANENT` (the name), `SENT` (the sent time of its newest version
+listed, the current one) and `URL` (the permanent URL). A truncated answer adds `luk: the server lists the newest
 <n> links only` on stderr. `--json` prints the server answer instead.
 Exit codes as for `send`.
 
@@ -4494,7 +4568,7 @@ disk. Test on lukd.vm / luk.vm.
 
 - `alias` (a relative name, same rules as a stored path) in a file's
   pipeline meta: lukd keeps `<base>/file/<alias>` as a hardlink of the newest
-  file (by `received`) declaring it, with its own sidecar marked
+  file (by acceptance order) declaring it, with its own sidecar marked
   `alias_of`; the catalog lists it under `latest`. When the target goes,
   the alias moves to the newest remaining file declaring it, or goes too.
 - Details:
@@ -4518,8 +4592,8 @@ disk. Test on lukd.vm / luk.vm.
     under `latest`. `created` is `received`, `tags` the client tags,
     `meta` the pipeline meta (`{}` when none). `once` and portal
     (`reveal`, `download`) uploads are never listed.
-  - Aliases work with or without `catalog`. Ties in `received` go to the
-    greater name. An alias that is not a string, is invalid, names an
+  - Aliases work with or without `catalog`. Ties in acceptance order (the
+    files of one upload) go to the greater id, then the greater name. An alias that is not a string, is invalid, names an
     existing stored (non-alias) file, or is declared by a `once` or
     portal upload fails the store before the file is placed; an alias
     equal to the file's own stored path is ignored, and so is, later, a
@@ -4548,7 +4622,7 @@ disk. Test on lukd.vm / luk.vm.
 
 - lukd keeps `<root>/status.json` (atomic writes, loaded at start), one
   entry per (pipeline, sender) under `pipelines`: `pipeline`, `sender`,
-  `tags`, `last_id`, `last_received`, `last_success`, `last_failure`,
+  `tags`, `last_id`, `last_received`, `last_accepted`, `last_success`, `last_failure`,
   `failed_step`, `error` (last failure, up to 4 KiB), `size`; and the
   watch evaluations under `watch` (see Status).
 - `lukd status` prints it: a table of the pipelines and, when there are

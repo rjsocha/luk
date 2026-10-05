@@ -242,3 +242,53 @@ func TestRetainWithin(t *testing.T) {
 	}
 	mustExist(t, filepath.Join(l.Base, DataDir, "c"))
 }
+
+// TestAcceptanceOrdersFiles: the acceptance order, not the received
+// time, decides which file of a series is the newest: for retention, the
+// watch copies and aliases. A file stored before the acceptance order
+// counts by its received time.
+func TestAcceptanceOrdersFiles(t *testing.T) {
+	l := Local{Base: t.TempDir(), Conflict: "version", Hardlink: true}
+	s := Series{"nightly", "db1-prod", "db.sql"}
+	t0 := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
+	put := func(rel string, received time.Time, ns int64, seq int) {
+		t.Helper()
+		sc := Sidecar{ID: "id-" + rel, Sender: "robert.socha", Endpoint: "up", Received: received.Format(time.RFC3339), Accepted: ns, AcceptedSeq: seq,
+			Size: int64(len(rel)), SHA256: shaOf(rel), Pipeline: s.Pipeline, Origin: s.Origin,
+			Client: wire.Meta{File: s.File, Portal: wire.PortalDirect}, Meta: json.RawMessage(`{"alias":"latest"}`)}
+		if _, err := l.Put(srcFile(t, t.TempDir(), rel), rel, sc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := t0.Add(10 * time.Second).UnixNano()
+	// "started" began first (received earlier) and was committed last.
+	put("started", t0, base+500, 0)
+	put("tie-1", t0.Add(5*time.Second), base, 1)
+	put("tie-0", t0.Add(5*time.Second), base, 0)
+	// Stored before the acceptance order: received a second before t0.
+	put("old", t0.Add(-time.Second), 0, 0)
+	want := []string{"started", "tie-1", "tie-0", "old"}
+	series, err := l.SeriesCopies()
+	if err != nil || len(series) != 1 {
+		t.Fatalf("series %+v %v", series, err)
+	}
+	var got []string
+	for _, c := range series[0].Copies {
+		got = append(got, c.Name)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("copies %v, want %v", got, want)
+	}
+	plans, err := l.RetentionPlan(&config.Storage{Retention: []config.Retention{{Keep: config.Keep{Last: 1}}}}, t0)
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("plans %+v %v", plans, err)
+	}
+	got = nil
+	for _, f := range plans[0].Files {
+		got = append(got, f.Name)
+	}
+	if !slices.Equal(got, want) || !plans[0].Files[0].Keep || plans[0].Files[1].Keep {
+		t.Fatalf("retention %+v, want %v first and kept", plans[0].Files, want)
+	}
+	checkAlias(t, l, "latest", "started", "started")
+}

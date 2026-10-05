@@ -352,7 +352,7 @@ type Endpoint struct {
 // Permanent is the permanent names of an endpoint: Path is the prefix of
 // their names in the respond storage (DefaultPermanentPath), Names the
 // exact names and patterns that may be published, each with who may
-// publish it and how many versions it keeps.
+// publish it.
 type Permanent struct {
 	Path  string                    `yaml:"path"`
 	Names map[string]*PermanentName `yaml:"names"`
@@ -364,38 +364,25 @@ func (p *Permanent) UnmarshalYAML(n *yaml.Node) error {
 }
 
 // PermanentName is an entry of permanent.names: who may publish the
-// names it covers (Allow), the versions kept per name (Keep, default
-// DefaultPermanentKeep) and, for a pattern, the most distinct names it
+// names it covers (Allow) and, for a pattern, the most distinct names it
 // holds (Max, default DefaultPermanentMax).
 type PermanentName struct {
 	Allow Identities `yaml:"allow"`
-	Keep  *int       `yaml:"keep"`
 	Max   *int       `yaml:"max"`
 }
 
 func (e *PermanentName) UnmarshalYAML(n *yaml.Node) error {
 	type raw PermanentName
-	return decodeCapabilities(n, "permanent.names entry", []string{"allow", "keep", "max"}, []string{"allow"}, (*raw)(e))
+	return decodeCapabilities(n, "permanent.names entry", []string{"allow", "max"}, []string{"allow"}, (*raw)(e))
 }
 
 const (
 	// DefaultPermanentPath is permanent.path when absent.
 	DefaultPermanentPath = "permanent"
-	// DefaultPermanentKeep is the keep of a permanent.names entry
-	// without one.
-	DefaultPermanentKeep = 1
 	// DefaultPermanentMax is the max of a pattern of permanent.names
 	// without one.
 	DefaultPermanentMax = 100
 )
-
-// KeepOf is the versions kept per name of the entry.
-func (e *PermanentName) KeepOf() int {
-	if e.Keep == nil {
-		return DefaultPermanentKeep
-	}
-	return *e.Keep
-}
 
 // MaxOf is the most distinct names a pattern entry holds.
 func (e *PermanentName) MaxOf() int {
@@ -1919,9 +1906,6 @@ func (c *Config) validatePermanent(bad func(string, ...any), names, cas map[stri
 				bad("%s: allow is required: %s", what, identitiesHint)
 			}
 			checkAllow(bad, what+": allow", ne.Allow, names, cas)
-			if ne.Keep != nil && *ne.Keep < 1 {
-				bad("%s: keep must be at least 1", what)
-			}
 			switch {
 			case ne.Max != nil && !IsPattern(k):
 				bad("%s: max applies to patterns only", what)

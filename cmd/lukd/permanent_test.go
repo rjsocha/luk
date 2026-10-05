@@ -49,7 +49,7 @@ func permanentConfig(t *testing.T, root, cfgPath, names string) *config.Config {
 
 func TestStoragePermanent(t *testing.T) {
 	root, cfgPath := t.TempDir(), filepath.Join(t.TempDir(), "config.yaml")
-	cfg := permanentConfig(t, root, cfgPath, `{one: {allow: ['*']}, two: {allow: ['*'], keep: 3}}`)
+	cfg := permanentConfig(t, root, cfgPath, `{one: {allow: ['*']}, two: {allow: ['*']}}`)
 	l := store.FromConfig(cfg.Storage["drop"])
 	if err := os.MkdirAll(l.Base, 0o750); err != nil {
 		t.Fatal(err)
@@ -70,7 +70,8 @@ func TestStoragePermanent(t *testing.T) {
 	if err != nil || names(out) != "permanent,permanent" || strings.Count(out, "ORPHAN") != 1 { // the header only
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if !strings.Contains(out, "two") || !strings.Contains(out, " 2 ") || !strings.HasPrefix(out, "PATH ") {
+	// c replaced b: one version per name, the current one listed.
+	if !strings.HasPrefix(out, "PATH       NAME  CURRENT  RECEIVED") || !strings.Contains(out, "two   c ") || !strings.Contains(out, "never") {
 		t.Fatalf("list\n%s", out)
 	}
 	// The entry of two goes: an orphan, reported by lukd check, kept by
@@ -92,7 +93,7 @@ func TestStoragePermanent(t *testing.T) {
 	}
 	stdinIsTerminal = func() bool { return true }
 	if _, prompt, err := runLukdIn(t, "n\n", "storage", "permanent", "--storage", "drop", "--prune-orphans", "-c", cfgPath); err == nil ||
-		!strings.Contains(prompt, "permanent/two (2 versions)") {
+		!strings.Contains(prompt, "permanent/two (current c)") {
 		t.Fatalf("declined: %v %q", err, prompt)
 	}
 	out, _, err = runLukdIn(t, "", "storage", "permanent", "--storage", "drop", "--prune-orphans", "--yes", "-c", cfgPath)
@@ -103,7 +104,7 @@ func TestStoragePermanent(t *testing.T) {
 		t.Fatalf("orphan left: %v", err)
 	}
 	// The versions stay; one is untouched.
-	if out, err := runLukd(t, "storage", "ls", "--storage", "drop", "-c", cfgPath); err != nil || names(out) != "c,b,a" {
+	if out, err := runLukd(t, "storage", "ls", "--storage", "drop", "-c", cfgPath); err != nil || names(out) != "c,a" {
 		t.Fatalf("versions: %v\n%s", err, out)
 	}
 	out, err = runLukd(t, "storage", "permanent", "--storage", "drop", "--json", "-c", cfgPath)
@@ -113,5 +114,21 @@ func TestStoragePermanent(t *testing.T) {
 	_, errOut, err = runLukdIn(t, "", "check", "--no-running", "-c", cfgPath)
 	if err != nil || strings.Contains(errOut, "orphan") {
 		t.Fatalf("check after prune: %v %q", err, errOut)
+	}
+	// The version of one goes: the name is empty, listed without a
+	// current version until --prune-empty removes it.
+	if err := l.Remove("a"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = runLukd(t, "storage", "permanent", "--storage", "drop", "-c", cfgPath)
+	if err != nil || !strings.Contains(out, "permanent  one   -        -         -        -") {
+		t.Fatalf("empty list: %v\n%s", err, out)
+	}
+	out, _, err = runLukdIn(t, "", "storage", "permanent", "--storage", "drop", "--prune-empty", "--yes", "-c", cfgPath)
+	if err != nil || out != "permanent/one: removed\n" {
+		t.Fatalf("prune empty: %v %q", err, out)
+	}
+	if out, err := runLukd(t, "storage", "permanent", "--storage", "drop", "-c", cfgPath); err != nil || out != "" {
+		t.Fatalf("after prune empty: %v\n%s", err, out)
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"luk/internal/queue"
 	"luk/internal/wire"
 )
 
@@ -49,12 +50,16 @@ type Entry struct {
 	Tags         []string `json:"tags"`
 	LastID       string   `json:"last_id"`
 	LastReceived string   `json:"last_received"`
-	LastSuccess  string   `json:"last_success,omitempty"`
-	LastFailure  string   `json:"last_failure,omitempty"`
-	FailedStep   int      `json:"failed_step"`
-	Error        string   `json:"error,omitempty"`
-	Size         int64    `json:"size"`
-	Failed       int      `json:"failed"`
+	// LastAccepted and LastAcceptedSeq are the acceptance order of the
+	// last upload (see queue.Accepted); 0 for one recorded before them.
+	LastAccepted    int64  `json:"last_accepted,omitempty"`
+	LastAcceptedSeq int    `json:"last_accepted_seq,omitempty"`
+	LastSuccess     string `json:"last_success,omitempty"`
+	LastFailure     string `json:"last_failure,omitempty"`
+	FailedStep      int    `json:"failed_step"`
+	Error           string `json:"error,omitempty"`
+	Size            int64  `json:"size"`
+	Failed          int    `json:"failed"`
 }
 
 // Watch is the evaluation of one series a watch rule of a storage applies
@@ -84,10 +89,12 @@ type file struct {
 // at Step.
 type Result struct {
 	Pipeline, Sender, ID, Received string
-	Tags                           []string
-	Size                           int64
-	Step                           int
-	Error                          string
+	// Accepted is the acceptance order of the upload; zero when unknown.
+	Accepted queue.Acceptance
+	Tags     []string
+	Size     int64
+	Step     int
+	Error    string
 }
 
 // Key identifies an entry.
@@ -189,8 +196,9 @@ func (s *Store) Record(r Result) error {
 	k := Key{r.Pipeline, r.Sender}
 	e, seen := s.entries[k]
 	e.Pipeline, e.Sender = r.Pipeline, r.Sender
-	if !seen || !older(r.Received, e.LastReceived) {
+	if !seen || !olderThan(r, e) {
 		e.LastID, e.LastReceived, e.Size = r.ID, r.Received, r.Size
+		e.LastAccepted, e.LastAcceptedSeq = r.Accepted.NS, r.Accepted.Seq
 		e.Tags = append([]string{}, r.Tags...)
 	}
 	now := s.now().UTC().Format(time.RFC3339)
@@ -201,6 +209,15 @@ func (s *Store) Record(r Result) error {
 	}
 	s.entries[k] = e
 	return s.persist()
+}
+
+// olderThan reports whether the upload of r came before the last one of
+// e: by acceptance order when both have one, else by received time.
+func olderThan(r Result, e Entry) bool {
+	if r.Accepted.NS != 0 && e.LastAccepted != 0 {
+		return r.Accepted.Compare(queue.Acceptance{NS: e.LastAccepted, Seq: e.LastAcceptedSeq}) < 0
+	}
+	return older(r.Received, e.LastReceived)
 }
 
 // older reports whether received a is before b; unparsable times are not.

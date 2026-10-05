@@ -96,8 +96,8 @@ func TestPrintLinksPermanent(t *testing.T) {
 		"a          1 B   2026-10-01 12:00  never    -          https://d.example/d/other\n" +
 		"hosts.krl  3 B   2026-10-01 10:00  never    permanent  https://d.example/d/v2\n" +
 		"\n" +
-		"PERMANENT      VERSIONS  NEWEST            URL\n" +
-		"rev/hosts.krl  2         2026-10-02 10:00  https://d.example/d/permanent/rev/hosts.krl\n"
+		"PERMANENT      SENT              URL\n" +
+		"rev/hosts.krl  2026-10-02 10:00  https://d.example/d/permanent/rev/hosts.krl\n"
 	if err != nil || b.String() != want {
 		t.Fatalf("%v\n%s\nwant\n%s", err, b.String(), want)
 	}

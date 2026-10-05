@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,25 +20,30 @@ import (
 )
 
 // storagePermanentCmd is lukd storage permanent: the permanent names of a
-// storage, and the removal of the orphaned ones.
+// storage, and the removal of the orphaned and the empty ones.
 func storagePermanentCmd(cfgPath *string) *cobra.Command {
 	var storage string
-	var asJSON, prune, yes bool
+	var asJSON, orphans, empty, yes bool
 	cmd := &cobra.Command{
 		Use:   "permanent",
-		Short: "List the permanent names of a storage, remove orphaned ones",
+		Short: "List the permanent names of a storage, remove orphaned or empty ones",
 		Long: "List the permanent names of a local storage (the directories under\n" +
-			".db/permanent): PATH and NAME (as the current version records them), NEWEST\n" +
-			"(the received time of the current version), VERSIONS (live versions of the\n" +
-			"name in the storage), CURRENT (the stored name of the current version) and\n" +
-			"ORPHAN when the configuration no longer allocates the name: no endpoint of\n" +
-			"the storage has its permanent.path, or no entry of that endpoint covers it.\n" +
+			".db/permanent): PATH and NAME (as published), CURRENT (the stored name of\n" +
+			"the current version, the version published last), RECEIVED and EXPIRES (of\n" +
+			"that version; never without an expiry) and ORPHAN when the configuration no\n" +
+			"longer allocates the name: no endpoint of the storage has its\n" +
+			"permanent.path, or no entry of that endpoint covers it. A name whose\n" +
+			"version is gone (removed, expired) is empty: CURRENT, RECEIVED and EXPIRES\n" +
+			"are -, it answers 404 until a later version is published.\n" +
 			"An orphan is not served and never removed by lukd itself. --prune-orphans\n" +
 			"removes the directories of the orphans under the base lock; the versions\n" +
 			"stay, they are ordinary stored files (lukd storage rm, ttl, retention).\n" +
-			"It asks for confirmation on a terminal; elsewhere --yes is required.",
+			"--prune-empty removes the directories of the empty names (with the record\n" +
+			"of the version published last). Both ask for confirmation on a terminal;\n" +
+			"elsewhere --yes is required.",
 		Example: "  lukd storage permanent --storage drop\n" +
-			"  lukd storage permanent --storage drop --prune-orphans",
+			"  lukd storage permanent --storage drop --prune-orphans\n" +
+			"  lukd storage permanent --storage drop --prune-empty --yes",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			_, _, l, err := openStorage(*cfgPath, storage)
@@ -45,8 +51,15 @@ func storagePermanentCmd(cfgPath *string) *cobra.Command {
 				return err
 			}
 			list, lerr := l.PermanentList()
-			if prune {
-				if err := pruneOrphans(l, storage, list, yes, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+			var p *pruning
+			switch {
+			case orphans:
+				p = &pruning{what: "orphaned", pick: func(p store.PermanentInfo) bool { return p.Orphan }, prune: l.PruneOrphan}
+			case empty:
+				p = &pruning{what: "empty", pick: func(p store.PermanentInfo) bool { return !p.Orphan && p.Current == "" }, prune: l.PruneEmpty}
+			}
+			if p != nil {
+				if err := p.run(storage, list, yes, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
 					return errors.Join(err, lerr)
 				}
 				return lerr
@@ -60,10 +73,11 @@ func storagePermanentCmd(cfgPath *string) *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&storage, "storage", "", "storage name")
 	f.BoolVar(&asJSON, "json", false, "print JSON")
-	f.BoolVar(&prune, "prune-orphans", false, "remove the directories of the orphaned permanent names")
-	f.BoolVar(&yes, "yes", false, "with --prune-orphans: do not ask for confirmation")
+	f.BoolVar(&orphans, "prune-orphans", false, "remove the directories of the orphaned permanent names")
+	f.BoolVar(&empty, "prune-empty", false, "remove the directories of the permanent names without a current version")
+	f.BoolVar(&yes, "yes", false, "with --prune-orphans or --prune-empty: do not ask for confirmation")
 	cmd.MarkFlagRequired("storage")
-	cmd.MarkFlagsMutuallyExclusive("json", "prune-orphans")
+	cmd.MarkFlagsMutuallyExclusive("json", "prune-orphans", "prune-empty")
 	completeFlags(cmd, map[string]cobra.CompletionFunc{"storage": completeStorage})
 	return cmd
 }
@@ -85,43 +99,55 @@ func printPermanent(w io.Writer, list []store.PermanentInfo, asJSON bool) error 
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "PATH\tNAME\tNEWEST\tVERSIONS\tCURRENT\tORPHAN")
+	fmt.Fprintln(tw, "PATH\tNAME\tCURRENT\tRECEIVED\tEXPIRES\tORPHAN")
 	for _, p := range list {
 		path, name := p.Path, p.Name
 		if name == "" {
-			// The current version cannot be read: the directory tells.
+			// Nothing of the name can be read: the directory tells.
 			name = p.Key
 		}
 		orphan := "-"
 		if p.Orphan {
 			orphan = "ORPHAN"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\n", dash(status.Clean(path)), status.Clean(name), dash(status.Clean(p.Received)),
-			p.Versions, dash(status.Clean(p.Current)), orphan)
+		exp := "-"
+		if p.Current != "" {
+			exp = cmp.Or(p.Expires, "never")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", dash(status.Clean(path)), status.Clean(name), dash(status.Clean(p.Current)),
+			dash(status.Clean(p.Received)), status.Clean(exp), orphan)
 	}
 	return tw.Flush()
 }
 
-// pruneOrphans removes the directories of the orphans of list, after a
-// confirmation on a terminal unless yes.
-func pruneOrphans(l store.Local, storage string, list []store.PermanentInfo, yes bool, in io.Reader, w, errw io.Writer) error {
-	var orphans []store.PermanentInfo
-	for _, p := range list {
-		if p.Orphan {
-			orphans = append(orphans, p)
+// pruning removes the permanent names pick selects with prune: what
+// names them in the messages.
+type pruning struct {
+	what  string
+	pick  func(store.PermanentInfo) bool
+	prune func(key string) error
+}
+
+// run removes the names of list p selects, after a confirmation on a
+// terminal unless yes.
+func (p *pruning) run(storage string, list []store.PermanentInfo, yes bool, in io.Reader, w, errw io.Writer) error {
+	var names []store.PermanentInfo
+	for _, pi := range list {
+		if p.pick(pi) {
+			names = append(names, pi)
 		}
 	}
-	if len(orphans) == 0 {
-		fmt.Fprintf(errw, "storage %s: no orphaned permanent names\n", storage)
+	if len(names) == 0 {
+		fmt.Fprintf(errw, "storage %s: no %s permanent names\n", storage, p.what)
 		return nil
 	}
 	if !yes {
 		if !stdinIsTerminal() {
 			return errors.New("refusing to remove without --yes: stdin is not a terminal")
 		}
-		fmt.Fprintf(errw, "Remove the orphaned permanent names of storage %s (the versions stay):\n", storage)
-		for _, p := range orphans {
-			fmt.Fprintf(errw, "  %s (%d versions)\n", status.Clean(p.Key), p.Versions)
+		fmt.Fprintf(errw, "Remove the %s permanent names of storage %s (stored versions stay):\n", p.what, storage)
+		for _, pi := range names {
+			fmt.Fprintf(errw, "  %s (current %s)\n", status.Clean(pi.Key), dash(status.Clean(pi.Current)))
 		}
 		fmt.Fprint(errw, "[y/N] ")
 		line, _ := bufio.NewReader(in).ReadString('\n')
@@ -130,12 +156,12 @@ func pruneOrphans(l store.Local, storage string, list []store.PermanentInfo, yes
 		}
 	}
 	var errs []error
-	for _, p := range orphans {
-		if err := l.PruneOrphan(p.Key); err != nil {
+	for _, pi := range names {
+		if err := p.prune(pi.Key); err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		fmt.Fprintf(w, "%s: removed\n", status.Clean(p.Key))
+		fmt.Fprintf(w, "%s: removed\n", status.Clean(pi.Key))
 	}
 	return errors.Join(errs...)
 }

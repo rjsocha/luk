@@ -13,8 +13,8 @@ func withPermanent(p string) string {
 }
 
 const permanentNames = `      names:
-        revocation/hosts.krl: {allow: [robert.socha], keep: 5}
-        builds/*: {allow: ["hosts:*"], keep: 3, max: 50}
+        revocation/hosts.krl: {allow: [robert.socha]}
+        builds/*: {allow: ["hosts:*"], max: 50}
         "builds/release-*": {allow: [robert.socha]}
 `
 
@@ -46,11 +46,11 @@ func TestPermanentConfig(t *testing.T) {
 			t.Errorf("%s covered by %q", name, key)
 		}
 	}
-	if e := p.Names["revocation/hosts.krl"]; e.KeepOf() != 5 || e.MaxOf() != DefaultPermanentMax {
-		t.Fatalf("exact entry %d %d", e.KeepOf(), e.MaxOf())
+	if e := p.Names["builds/*"]; e.MaxOf() != 50 {
+		t.Fatalf("max %d", e.MaxOf())
 	}
-	if e := p.Names["builds/release-*"]; e.KeepOf() != DefaultPermanentKeep || e.MaxOf() != DefaultPermanentMax {
-		t.Fatalf("defaults %d %d", e.KeepOf(), e.MaxOf())
+	if e := p.Names["builds/release-*"]; e.MaxOf() != DefaultPermanentMax {
+		t.Fatalf("default max %d", e.MaxOf())
 	}
 	if c.Storage["archive"].Permanents() != nil {
 		t.Fatal("archive has permanent names")
@@ -82,10 +82,10 @@ func TestPermanentPrecedenceTie(t *testing.T) {
 func TestPermanentConfigErrors(t *testing.T) {
 	for p, msg := range map[string]string{
 		"      names: {}\n":                                     "permanent.names is empty",
-		"      names: {x: {keep: 1}}\n":                         `permanent.names "x": allow is required`,
+		"      names: {x: {max: 1}}\n":                          `permanent.names "x": allow is required`,
 		"      names: {x: {allow: [nobody]}}\n":                 `permanent.names "x": allow: allow "nobody" is not a known key`,
 		"      names: {x: {allow: true}}\n":                     "a list of identities",
-		"      names: {x: {allow: ['*'], keep: 0}}\n":           "keep must be at least 1",
+		"      names: {x: {allow: ['*'], keep: 1}}\n":           "field keep not found",
 		"      names: {x: {allow: ['*'], max: 2}}\n":            "max applies to patterns only",
 		"      names: {'x/*': {allow: ['*'], max: 0}}\n":        "max must be at least 1",
 		"      names: {'x/../y': {allow: ['*']}}\n":             `element ".." is not a name`,

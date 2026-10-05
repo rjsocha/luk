@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"luk/internal/auth"
 	"luk/internal/config"
 	"luk/internal/pipeline"
+	"luk/internal/queue"
 	"luk/internal/store"
 	"luk/internal/wire"
 )
@@ -284,8 +286,9 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 	}
 	key := auth.OwnerKey(id)
 	type item struct {
-		at time.Time
-		e  wire.LinkEntry
+		order queue.Acceptance
+		id    string
+		e     wire.LinkEntry
 	}
 	var items []item
 	for _, sn := range storages {
@@ -301,7 +304,6 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 			if !ok {
 				return nil
 			}
-			at, _ := time.Parse(time.RFC3339, sc.Received)
 			e := wire.LinkEntry{
 				URL: u, File: sc.Client.File, Size: sc.Size, Received: sc.Received, Expires: sc.Expires,
 				Once: sc.Client.Once, Mutable: sc.Client.Mutable, Portal: sc.Client.Portal, Access: sc.Client.Access, Updated: sc.Updated,
@@ -312,7 +314,7 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 					e.PermanentURL, _ = s.fileURL(cfg, sn, p.Path+"/"+sc.Client.Permanent, "")
 				}
 			}
-			items = append(items, item{at, e})
+			items = append(items, item{sc.Order(), sc.ID, e})
 			return nil
 		})
 		if err != nil {
@@ -321,10 +323,7 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 		}
 	}
 	slices.SortFunc(items, func(a, b item) int {
-		if c := b.at.Compare(a.at); c != 0 {
-			return c
-		}
-		return strings.Compare(a.e.URL, b.e.URL)
+		return cmp.Or(b.order.Compare(a.order), strings.Compare(b.id, a.id), strings.Compare(a.e.URL, b.e.URL))
 	})
 	a := &wire.LinkListAnswer{Links: []wire.LinkEntry{}}
 	for i, it := range items {

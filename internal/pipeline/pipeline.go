@@ -52,6 +52,11 @@ type QueueMeta struct {
 	Failed    []Failure         `json:"failed,omitempty"`
 	Replace   *Replace          `json:"replace,omitempty"`
 	Secret    string            `json:"secret,omitempty"`
+	// Accepted and AcceptedSeq are the acceptance order of the entry (a
+	// copy of sidecar.accepted and accepted_seq), where queue.Pending
+	// reads it.
+	Accepted    int64 `json:"accepted,omitempty"`
+	AcceptedSeq int   `json:"accepted_seq,omitempty"`
 }
 
 // SecretPipeline is the pipeline of a secret upload (endpoint secret): a
@@ -155,7 +160,8 @@ type Job struct {
 }
 
 func (j Job) Meta() QueueMeta {
-	return QueueMeta{Pipelines: j.Pipelines, Stages: j.Stages, Vars: j.Vars, Sidecar: j.Sidecar, Expires: j.Expires, Failed: j.Failed, Replace: j.Replace, Secret: j.Secret}
+	return QueueMeta{Pipelines: j.Pipelines, Stages: j.Stages, Vars: j.Vars, Sidecar: j.Sidecar, Expires: j.Expires, Failed: j.Failed, Replace: j.Replace, Secret: j.Secret,
+		Accepted: j.Sidecar.Accepted, AcceptedSeq: j.Sidecar.AcceptedSeq}
 }
 
 // LoadJob rebuilds a Job from the meta.json of an accepted entry.
@@ -167,6 +173,9 @@ func LoadJob(e queue.Entry) (Job, error) {
 	var m QueueMeta
 	if err := json.Unmarshal(b, &m); err != nil {
 		return Job{}, fmt.Errorf("%s: %w", e.Dir, err)
+	}
+	if m.Sidecar.Accepted == 0 {
+		m.Sidecar.Accepted, m.Sidecar.AcceptedSeq = m.Accepted, m.AcceptedSeq
 	}
 	return Job{Entry: e, Pipelines: m.Pipelines, Stages: m.Stages, Vars: m.Vars, Sidecar: m.Sidecar, Expires: m.Expires, Failed: m.Failed, Replace: m.Replace, Secret: m.Secret}, nil
 }
@@ -610,7 +619,7 @@ func (d *Dispatcher) report(j Job, name string, step int, err error, output stri
 		return
 	}
 	r := status.Result{
-		Pipeline: name, Sender: j.Sidecar.Sender, ID: j.Entry.ID, Received: j.Sidecar.Received,
+		Pipeline: name, Sender: j.Sidecar.Sender, ID: j.Entry.ID, Received: j.Sidecar.Received, Accepted: j.Sidecar.Order(),
 		Tags: j.Vars.Tags, Size: j.Sidecar.Size,
 	}
 	if err != nil {
@@ -731,8 +740,12 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, *Failure) {
 				}
 				for _, f := range set {
 					res, err := d.store(j, cfg, name, sn, f)
-					for _, v := range res.Pruned {
-						d.log.Info("permanent version pruned", "id", j.Entry.ID, "pipeline", name, "storage", sn,
+					for _, v := range res.Replaced {
+						d.log.Info("permanent version replaced", "id", j.Entry.ID, "pipeline", name, "storage", sn,
+							"permanent", j.Sidecar.Client.Permanent, "name", v.Name, "version", v.ID)
+					}
+					if v := res.Superseded; v != nil {
+						d.log.Info("permanent version superseded", "id", j.Entry.ID, "pipeline", name, "storage", sn,
 							"permanent", j.Sidecar.Client.Permanent, "name", v.Name, "version", v.ID)
 					}
 					if err != nil {

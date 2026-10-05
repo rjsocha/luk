@@ -22,19 +22,26 @@ const permT0 = 1_790_000_000
 func ip(n int) *int { return &n }
 
 // permLocal is a storage of the endpoint drop with the permanent names
-// rev/hosts.krl (keep 2), builds/* (max 2) and one (keep 1) under path
-// permanent.
+// rev/hosts.krl, builds/* (max 2) and one under path permanent.
 func permLocal(t *testing.T) Local {
 	t.Helper()
 	fixedNow(t, permT0+1000)
 	return Local{Base: t.TempDir(), Conflict: "version", Dedup: true, Hardlink: true, MaxLinks: 100,
 		Permanent: map[string]*config.Permanent{"drop": {Path: "permanent", Names: map[string]*config.PermanentName{
-			"rev/hosts.krl": {Keep: ip(2)}, "builds/*": {Max: ip(2), Keep: ip(5)}, "one": {}}}}}
+			"rev/hosts.krl": {}, "builds/*": {Max: ip(2)}, "one": {}}}}}
 }
 
+// permSidecar is a version of name received at sec and accepted at sec
+// (in nanoseconds).
 func permSidecar(name, content string, sec int64, expires string) Sidecar {
+	return permAccepted(name, content, sec, sec*int64(time.Second), expires)
+}
+
+// permAccepted is a version of name received at sec with the acceptance
+// order acc.
+func permAccepted(name, content string, sec, acc int64, expires string) Sidecar {
 	sz := int64(len(content))
-	return Sidecar{ID: fmt.Sprint(content, "@", sec), Sender: "alice", Endpoint: "drop", Received: time.Unix(sec, 0).UTC().Format(time.RFC3339),
+	return Sidecar{ID: fmt.Sprint(content, "@", sec), Sender: "alice", Endpoint: "drop", Received: time.Unix(sec, 0).UTC().Format(time.RFC3339), Accepted: acc,
 		Size: sz, SHA256: shaOf(content), Expires: expires, OwnerKey: "key:alice", PermanentPath: "permanent",
 		Client: wire.Meta{File: "hosts.krl", Source: wire.SourceFile, Size: &sz, SHA256: shaOf(content), Portal: wire.PortalDirect, Permanent: name}}
 }
@@ -42,6 +49,15 @@ func permSidecar(name, content string, sec int64, expires string) Sidecar {
 func putPerm(t *testing.T, l Local, rel, name, content string, sec int64, expires string) (Stored, error) {
 	t.Helper()
 	return l.Store(srcFile(t, t.TempDir(), content), rel, permSidecar(name, content, sec, expires))
+}
+
+func mustPermSC(t *testing.T, l Local, rel, content string, sc Sidecar) Stored {
+	t.Helper()
+	res, err := l.Store(srcFile(t, t.TempDir(), content), rel, sc)
+	if err != nil {
+		t.Fatalf("put %s (%s): %v", rel, sc.Client.Permanent, err)
+	}
+	return res
 }
 
 func mustPerm(t *testing.T, l Local, rel, name, content string, sec int64) Stored {
@@ -91,53 +107,96 @@ func permEntries(t *testing.T, l Local, key string) []string {
 	return out
 }
 
-func TestPermanentNewestKeepAndFallback(t *testing.T) {
+// onlyCurrent wants the directory of the name key to hold its current
+// version and the record of the version published last, nothing else.
+func onlyCurrent(t *testing.T, l Local, key string) {
+	t.Helper()
+	if got := permEntries(t, l, key); !slices.Equal(got, []string{permCurrent, permLast}) {
+		t.Fatalf("%s: entries %v", key, got)
+	}
+}
+
+func TestPermanentLastPublished(t *testing.T) {
 	l := permLocal(t)
 	const url = "permanent/rev/hosts.krl"
 	checkNoPerm(t, l, url)
 	mustPerm(t, l, "r1", "rev/hosts.krl", "v1", permT0+1)
 	checkPerm(t, l, url, "r1", "v1")
-	mustPerm(t, l, "r2", "rev/hosts.krl", "v2", permT0+2)
+	res := mustPerm(t, l, "r2", "rev/hosts.krl", "v2", permT0+2)
 	checkPerm(t, l, url, "r2", "v2")
-	res := mustPerm(t, l, "r3", "rev/hosts.krl", "v3", permT0+3)
-	checkPerm(t, l, url, "r3", "v3")
-	if len(res.Pruned) != 1 || res.Pruned[0].Name != "r1" {
-		t.Fatalf("pruned %+v, want r1", res.Pruned)
+	// A new version removes the previous one.
+	if len(res.Replaced) != 1 || res.Replaced[0].Name != "r1" || res.Superseded != nil {
+		t.Fatalf("replaced %+v superseded %+v, want r1", res.Replaced, res.Superseded)
 	}
-	if got := storedNames(t, l); !slices.Equal(got, []string{"r2", "r3"}) {
+	if got := storedNames(t, l); !slices.Equal(got, []string{"r2"}) {
 		t.Fatalf("stored %v", got)
 	}
-	if got := permEntries(t, l, "permanent/rev/hosts.krl"); !slices.Equal(got, []string{"current"}) {
-		t.Fatalf("entries %v", got)
-	}
-	// An older version arriving late does not take the name.
-	mustPerm(t, l, "r0", "rev/hosts.krl", "v0", permT0)
-	checkPerm(t, l, url, "r3", "v3")
-	if got := storedNames(t, l); !slices.Equal(got, []string{"r2", "r3"}) {
-		t.Fatalf("stored after a late version %v", got)
-	}
-	if err := l.Remove("r3"); err != nil {
-		t.Fatal(err)
+	onlyCurrent(t, l, "permanent/rev/hosts.krl")
+	// An older version stored late is superseded: stored, then removed.
+	res = mustPerm(t, l, "r0", "rev/hosts.krl", "v0", permT0)
+	if res.Superseded == nil || res.Superseded.Name != "r0" || len(res.Replaced) != 0 {
+		t.Fatalf("late version: replaced %+v superseded %+v", res.Replaced, res.Superseded)
 	}
 	checkPerm(t, l, url, "r2", "v2")
+	if got := storedNames(t, l); !slices.Equal(got, []string{"r2"}) {
+		t.Fatalf("stored after a late version %v", got)
+	}
+	// Removing the current version leaves the name empty: 404, never an
+	// older version.
 	if err := l.Remove("r2"); err != nil {
 		t.Fatal(err)
 	}
 	checkNoPerm(t, l, url)
-	if _, err := os.Lstat(filepath.Join(l.Base, PermanentDir, "permanent")); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("permanent directories left: %v", err)
+	if got := permEntries(t, l, "permanent/rev/hosts.krl"); !slices.Equal(got, []string{permLast}) {
+		t.Fatalf("entries of an empty name %v", got)
 	}
-	if _, err := os.Lstat(filepath.Join(l.Base, PermanentDir)); err != nil {
+	// Still older than the version published last: superseded.
+	if res := mustPerm(t, l, "r1b", "rev/hosts.krl", "v1b", permT0+1); res.Superseded == nil {
+		t.Fatal("an older version became current of an empty name")
+	}
+	checkNoPerm(t, l, url)
+	if err := l.Reconcile(); err != nil {
 		t.Fatal(err)
+	}
+	checkNoPerm(t, l, url)
+	list, err := l.PermanentList()
+	if err != nil || len(list) != 1 || list[0].Current != "" || list[0].Name != "rev/hosts.krl" || list[0].Path != "permanent" || list[0].Orphan {
+		t.Fatalf("list of an empty name %+v %v", list, err)
+	}
+	// A later version takes the name again.
+	mustPerm(t, l, "r3", "rev/hosts.krl", "v3", permT0+3)
+	checkPerm(t, l, url, "r3", "v3")
+	onlyCurrent(t, l, "permanent/rev/hosts.krl")
+}
+
+// TestPermanentAcceptanceOrder stores versions received in one second in
+// another order than they were accepted: the last accepted is current
+// and the others go, whatever the order of the stores and their ids.
+func TestPermanentAcceptanceOrder(t *testing.T) {
+	for _, order := range [][]int{{2, 0, 1}, {1, 2, 0}, {0, 1, 2}, {2, 1, 0}} {
+		t.Run(fmt.Sprint(order), func(t *testing.T) {
+			l := permLocal(t)
+			base := int64(permT0+5) * int64(time.Second)
+			// The ids sort against the acceptance order.
+			contents := []string{"zz", "mm", "aa"}
+			for _, i := range order {
+				sc := permAccepted("one", contents[i], permT0+5, base+int64(i)*1000, "")
+				mustPermSC(t, l, fmt.Sprint("v", i), contents[i], sc)
+			}
+			checkPerm(t, l, "permanent/one", "v2", "aa")
+			if got := storedNames(t, l); !slices.Equal(got, []string{"v2"}) {
+				t.Fatalf("stored %v", got)
+			}
+			onlyCurrent(t, l, "permanent/one")
+		})
 	}
 }
 
-func TestPermanentExpiredFallsBack(t *testing.T) {
+// TestPermanentExpiredIs404 expires the current version: 404 at once,
+// before any maintenance, and no fallback afterwards either.
+func TestPermanentExpiredIs404(t *testing.T) {
 	l := permLocal(t)
 	const url = "permanent/one"
-	// keep 1 of one prunes the older live version; an expiring newest
-	// leaves nothing to fall back to, so this name keeps 2.
-	l.Permanent["drop"].Names["one"].Keep = ip(2)
 	mustPerm(t, l, "a", "one", "old", permT0+1)
 	exp := time.Unix(permT0+2000, 0).UTC().Format(time.RFC3339)
 	if _, err := putPerm(t, l, "b", "one", "new", permT0+2, exp); err != nil {
@@ -145,15 +204,35 @@ func TestPermanentExpiredFallsBack(t *testing.T) {
 	}
 	checkPerm(t, l, url, "b", "new")
 	fixedNow(t, permT0+3000)
+	checkNoPerm(t, l, url)
 	if err := l.Reconcile(); err != nil {
 		t.Fatal(err)
 	}
-	checkPerm(t, l, url, "a", "old")
-	// The expiry pass removes the expired version; the name stays.
+	checkNoPerm(t, l, url)
+	if got := permEntries(t, l, "permanent/one"); !slices.Equal(got, []string{permLast}) {
+		t.Fatalf("entries %v", got)
+	}
+	if got := storedNames(t, l); len(got) != 0 {
+		t.Fatalf("stored %v", got)
+	}
+}
+
+// TestPermanentExpiryPass removes the expired current version through the
+// expiry pass: the name goes with it.
+func TestPermanentExpiryPass(t *testing.T) {
+	l := permLocal(t)
+	exp := time.Unix(permT0+2000, 0).UTC().Format(time.RFC3339)
+	if _, err := putPerm(t, l, "b", "one", "new", permT0+2, exp); err != nil {
+		t.Fatal(err)
+	}
+	fixedNow(t, permT0+3000)
 	if err := l.RemoveExpired("b", "new@"+fmt.Sprint(permT0+2), exp); err != nil {
 		t.Fatal(err)
 	}
-	checkPerm(t, l, url, "a", "old")
+	checkNoPerm(t, l, "permanent/one")
+	if got := permEntries(t, l, "permanent/one"); !slices.Equal(got, []string{permLast}) {
+		t.Fatalf("entries %v", got)
+	}
 }
 
 func TestPermanentTTLUpdateRepublishes(t *testing.T) {
@@ -163,13 +242,28 @@ func TestPermanentTTLUpdateRepublishes(t *testing.T) {
 	if _, err := l.Update("a", "x@"+fmt.Sprint(permT0+1), func(sc *Sidecar) error { sc.Expires = exp; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	_, sc, err := l.Open("permanent/one")
+	f, sc, err := l.Open("permanent/one")
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.Close()
 	if sc.Expires != exp {
 		t.Fatalf("expires %q, want %q", sc.Expires, exp)
 	}
+}
+
+// TestPermanentStoreRetry stores the version published last again (a
+// retry of its queue entry): it stays current.
+func TestPermanentStoreRetry(t *testing.T) {
+	l := permLocal(t)
+	sc := permSidecar("one", "x", permT0+1, "")
+	mustPermSC(t, l, "a", "x", sc)
+	res := mustPermSC(t, l, "a", "x", sc)
+	if res.Superseded != nil || len(res.Replaced) != 0 {
+		t.Fatalf("retry %+v %v", res, storedNames(t, l))
+	}
+	checkPerm(t, l, "permanent/one", "a", "x")
+	onlyCurrent(t, l, "permanent/one")
 }
 
 func TestPermanentAdmission(t *testing.T) {
@@ -186,7 +280,7 @@ func TestPermanentAdmission(t *testing.T) {
 	if _, err := putPerm(t, l, "x", "other", "5", permT0+5, ""); !errors.As(err, &pr) || !strings.Contains(err.Error(), "not allocated") {
 		t.Fatalf("unallocated name: %v", err)
 	}
-	if got := storedNames(t, l); !slices.Equal(got, []string{"b1", "b2", "b4"}) {
+	if got := storedNames(t, l); !slices.Equal(got, []string{"b2", "b4"}) {
 		t.Fatalf("stored %v", got)
 	}
 	live, err := l.PermanentNames("drop")
@@ -263,19 +357,17 @@ func TestPermanentSwitchAtomic(t *testing.T) {
 		t.Fatalf("removed old directory: %v", err)
 	}
 	oldDir.Close()
-	if got := permEntries(t, l, "permanent/one"); !slices.Equal(got, []string{"current"}) {
-		t.Fatalf("entries %v", got)
-	}
+	onlyCurrent(t, l, "permanent/one")
 }
 
 // TestPermanentCrash leaves the state of a crash before and after the
 // exchange: readers see one version whole, and the next taker of the base
-// lock removes the leftover and publishes the newest.
+// lock removes the leftover, publishes the version accepted last and
+// removes the other one.
 func TestPermanentCrash(t *testing.T) {
 	for _, step := range []int{1, 2} {
 		t.Run(fmt.Sprint("step", step), func(t *testing.T) {
 			l := permLocal(t)
-			l.Permanent["drop"].Names["one"].Keep = ip(3)
 			const url = "permanent/one"
 			mustPerm(t, l, "a", "one", "old", permT0+1)
 			old := hookPermanent
@@ -297,15 +389,16 @@ func TestPermanentCrash(t *testing.T) {
 			// After the exchange the old version is left beside current (a
 			// panic before it runs the cleanup of publish, a crash would
 			// not: TestPermanentLeftoverRemovedUnderLock covers that).
-			if got := permEntries(t, l, "permanent/one"); step == 2 && len(got) != 2 {
+			if got := permEntries(t, l, "permanent/one"); step == 2 && len(got) != 3 {
 				t.Fatalf("entries after the crash %v", got)
 			}
 			if err := l.Reconcile(); err != nil {
 				t.Fatal(err)
 			}
 			checkPerm(t, l, url, "b", "new")
-			if got := permEntries(t, l, "permanent/one"); !slices.Equal(got, []string{"current"}) {
-				t.Fatalf("entries after reconcile %v", got)
+			onlyCurrent(t, l, "permanent/one")
+			if got := storedNames(t, l); !slices.Equal(got, []string{"b"}) {
+				t.Fatalf("stored after reconcile %v", got)
 			}
 		})
 	}
@@ -316,7 +409,6 @@ func TestPermanentCrash(t *testing.T) {
 // the base lock) and goes before the next version is prepared.
 func TestPermanentLeftoverRemovedUnderLock(t *testing.T) {
 	l := permLocal(t)
-	l.Permanent["drop"].Names["one"].Keep = ip(3)
 	mustPerm(t, l, "a", "one", "old", permT0+1)
 	stale := filepath.Join(l.Base, PermanentDir, "permanent/one", "current.0123456789abcdef")
 	if err := os.Mkdir(stale, 0o750); err != nil {
@@ -336,16 +428,14 @@ func TestPermanentLeftoverRemovedUnderLock(t *testing.T) {
 	}
 	t.Cleanup(func() { hookPermanent = old })
 	mustPerm(t, l, "b", "one", "new", permT0+2)
-	if got := permEntries(t, l, "permanent/one"); !slices.Equal(got, []string{"current"}) {
-		t.Fatalf("entries %v", got)
-	}
+	onlyCurrent(t, l, "permanent/one")
 }
 
 // TestPermanentConcurrent publishes versions of one name at once: they
-// apply one after the other and the newest wins.
+// apply one after the other, the one accepted last wins and the others
+// go.
 func TestPermanentConcurrent(t *testing.T) {
 	l := permLocal(t)
-	l.Permanent["drop"].Names["one"].Keep = ip(20)
 	var wg sync.WaitGroup
 	for i := range 8 {
 		wg.Go(func() {
@@ -356,8 +446,9 @@ func TestPermanentConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 	checkPerm(t, l, "permanent/one", "v7", "c7")
-	if got := permEntries(t, l, "permanent/one"); !slices.Equal(got, []string{"current"}) {
-		t.Fatalf("entries %v", got)
+	onlyCurrent(t, l, "permanent/one")
+	if got := storedNames(t, l); !slices.Equal(got, []string{"v7"}) {
+		t.Fatalf("stored %v", got)
 	}
 }
 
@@ -371,9 +462,7 @@ func TestPermanentNoExchange(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 	checkPerm(t, l, "permanent/one", "a", "old")
-	if got := permEntries(t, l, "permanent/one"); !slices.Equal(got, []string{"current"}) {
-		t.Fatalf("entries %v", got)
-	}
+	onlyCurrent(t, l, "permanent/one")
 	if err := ProbeExchange(l.Base); !errors.Is(err, ErrNoExchange) {
 		t.Fatalf("probe: %v", err)
 	}
@@ -400,8 +489,8 @@ func TestPermanentOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []PermanentInfo{
-		{Key: "permanent/one", Path: "permanent", Name: "one", Current: "a", ID: "x@" + fmt.Sprint(permT0+1), Received: time.Unix(permT0+1, 0).UTC().Format(time.RFC3339), Versions: 1, Orphan: true},
-		{Key: "permanent/rev/hosts.krl", Path: "permanent", Name: "rev/hosts.krl", Current: "b", ID: "y@" + fmt.Sprint(permT0+2), Received: time.Unix(permT0+2, 0).UTC().Format(time.RFC3339), Versions: 1},
+		{Key: "permanent/one", Path: "permanent", Name: "one", Current: "a", ID: "x@" + fmt.Sprint(permT0+1), Received: time.Unix(permT0+1, 0).UTC().Format(time.RFC3339), Orphan: true},
+		{Key: "permanent/rev/hosts.krl", Path: "permanent", Name: "rev/hosts.krl", Current: "b", ID: "y@" + fmt.Sprint(permT0+2), Received: time.Unix(permT0+2, 0).UTC().Format(time.RFC3339)},
 	}
 	if !slices.Equal(list, want) {
 		t.Fatalf("list %+v\nwant %+v", list, want)
@@ -455,4 +544,18 @@ func TestPermanentNestedNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkPerm(t, l, "permanent/a/b", "y", "AB")
+	// The empty name a goes with prune-empty, a/b stays.
+	if err := l.PruneEmpty("permanent/a/b"); err == nil {
+		t.Fatal("pruned a name with a current version")
+	}
+	if err := l.PruneEmpty("permanent/a"); err != nil {
+		t.Fatal(err)
+	}
+	if got := permEntries(t, l, "permanent/a"); !slices.Equal(got, []string{"b"}) {
+		t.Fatalf("entries of a %v", got)
+	}
+	checkPerm(t, l, "permanent/a/b", "y", "AB")
+	// Without the record any later store becomes current again.
+	mustPerm(t, l, "z", "a", "Z", permT0)
+	checkPerm(t, l, "permanent/a", "z", "Z")
 }

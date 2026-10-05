@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"luk/internal/queue"
 )
 
 // Copy is one stored file of a series as the watch rules see it.
@@ -17,10 +19,13 @@ type Copy struct {
 	Received time.Time
 	Size     int64
 	SHA256   string
+	// order is the acceptance order of the file (Sidecar.Order).
+	order queue.Acceptance
+	id    string
 }
 
-// SeriesCopies is a series and its copies, newest first (by received,
-// then by name); Unreadable counts its files whose received time cannot
+// SeriesCopies is a series and its copies, newest first (by acceptance
+// order, see Newer); Unreadable counts its files whose received time cannot
 // be read, which are not among the copies.
 type SeriesCopies struct {
 	Series
@@ -71,13 +76,13 @@ func (l Local) SeriesCopies() ([]SeriesCopies, error) {
 			g.Unreadable++
 			return nil
 		}
-		g.Copies = append(g.Copies, Copy{Name: rel, Received: at, Size: sc.Size, SHA256: sc.SHA256})
+		g.Copies = append(g.Copies, Copy{Name: rel, Received: at, Size: sc.Size, SHA256: sc.SHA256, order: sc.Order(), id: sc.ID})
 		return nil
 	})
 	out := make([]SeriesCopies, 0, len(groups))
 	for _, g := range groups {
 		slices.SortFunc(g.Copies, func(a, b Copy) int {
-			return cmp.Or(b.Received.Compare(a.Received), strings.Compare(a.Name, b.Name))
+			return cmp.Or(b.order.Compare(a.order), strings.Compare(b.id, a.id), strings.Compare(a.Name, b.Name))
 		})
 		out = append(out, *g)
 	}

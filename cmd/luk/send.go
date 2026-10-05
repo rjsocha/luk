@@ -71,9 +71,9 @@ twice, which ends the run with the links made so far. --progress reports on stde
 caps the upload rate in bytes per second (K, M, G, T suffixes; 0 = unlimited).
 --permanent NAME publishes the file as a new version of the permanent name NAME
 of the endpoint (permanent.names in lukd); the URL printed is the permanent URL,
-which always serves the newest version, and --json adds the URL of the stored
-version (version_url). It takes no --once, --secret, --portal, --private,
---mutable, --pretty-url or --links above 1.
+which serves the version published last (404 once it is gone), and --json adds
+the URL of the stored version (version_url). It takes no --once, --secret,
+--portal, --private, --mutable, --pretty-url or --links above 1.
 Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 4 hash mismatch, 130 interrupted.`,
 		Example: `  luk send --file report.pdf

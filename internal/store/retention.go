@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"luk/internal/config"
+	"luk/internal/queue"
 )
 
 // Series is the retention series of a stored file: the pipeline that
@@ -60,7 +61,7 @@ type SeriesPlan struct {
 	Files []RetainedFile `json:"files"`
 }
 
-// SelectRetained returns for each time of at (newest first) the reasons
+// SelectRetained returns for each time of at (newest file first) the reasons
 // k keeps it, nil when it is pruned: the k.Last newest, every time at
 // most k.Within before now, and for each of days, ISO weeks, months and
 // years (UTC) the newest time of each distinct bucket until that many
@@ -87,12 +88,13 @@ func SelectRetained(at []time.Time, k config.Keep, now time.Time) [][]string {
 		{k.Monthly, "monthly", func(t time.Time) string { return t.Format("2006-01") }},
 		{k.Yearly, "yearly", func(t time.Time) string { return t.Format("2006") }},
 	} {
-		n, last := b.n, ""
+		n, seen := b.n, map[string]bool{}
 		for i := 0; i < len(at) && n > 0; i++ {
-			// Newest first: the buckets of a kind never come back, so a
-			// key unlike the previous one is a new bucket.
-			if key := b.key(at[i].UTC()); key != last {
-				last = key
+			// Newest first: the first time of a bucket is its newest. A
+			// bucket may come back (the files are in acceptance order,
+			// their received times need not be), it is kept once.
+			if key := b.key(at[i].UTC()); !seen[key] {
+				seen[key] = true
 				out[i] = append(out[i], b.kind+" "+key)
 				n--
 			}
@@ -110,8 +112,9 @@ func SelectRetained(at []time.Time, k config.Keep, now time.Time) [][]string {
 func (l Local) RetentionPlan(st *config.Storage, now time.Time) ([]SeriesPlan, error) {
 	type file struct {
 		RetainedFile
-		at time.Time
-		ok bool
+		at    time.Time
+		order queue.Acceptance
+		ok    bool
 	}
 	groups := map[Series][]file{}
 	err := l.Walk(func(rel string, sc Sidecar) error {
@@ -120,7 +123,7 @@ func (l Local) RetentionPlan(st *config.Storage, now time.Time) ([]SeriesPlan, e
 		}
 		at, perr := time.Parse(time.RFC3339, sc.Received)
 		s := SeriesOf(sc)
-		groups[s] = append(groups[s], file{RetainedFile{Name: rel, ID: sc.ID, Received: sc.Received}, at, perr == nil})
+		groups[s] = append(groups[s], file{RetainedFile{Name: rel, ID: sc.ID, Received: sc.Received}, at, sc.Order(), perr == nil})
 		return nil
 	})
 	plans := make([]SeriesPlan, 0, len(groups))
@@ -132,10 +135,7 @@ func (l Local) RetentionPlan(st *config.Storage, now time.Time) ([]SeriesPlan, e
 				}
 				return 1
 			}
-			if c := b.at.Compare(a.at); c != 0 {
-				return c
-			}
-			return strings.Compare(a.Name, b.Name)
+			return cmp.Or(b.order.Compare(a.order), strings.Compare(b.ID, a.ID), strings.Compare(a.Name, b.Name))
 		})
 		p := SeriesPlan{Series: s, Files: make([]RetainedFile, len(files))}
 		rule := st.RetentionRule(s.Origin)

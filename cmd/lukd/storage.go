@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -405,12 +406,7 @@ func storageFiles(cfg *config.Config, name string, l store.Local, owner string, 
 		return nil
 	})
 	slices.SortFunc(files, func(a, b storageFile) int {
-		ta, _ := time.Parse(time.RFC3339, a.Received)
-		tb, _ := time.Parse(time.RFC3339, b.Received)
-		if c := tb.Compare(ta); c != 0 {
-			return c
-		}
-		return strings.Compare(a.Name, b.Name)
+		return cmp.Or(b.Order().Compare(a.Order()), strings.Compare(b.ID, a.ID), strings.Compare(a.Name, b.Name))
 	})
 	return files, err
 }

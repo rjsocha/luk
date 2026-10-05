@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"luk/internal/config"
+	"luk/internal/queue"
 	"luk/internal/wire"
 )
 
@@ -149,14 +150,33 @@ func receivedTime(s string) time.Time {
 	return t
 }
 
-// newer orders files by received, then by name.
-func newer(aRecv, aRel, bRecv, bRel string) bool {
-	a, b := receivedTime(aRecv), receivedTime(bRecv)
-	if !a.Equal(b) {
-		return a.After(b)
+// Order is the acceptance order of the file of sc: accepted and
+// accepted_seq, else (a file stored before them) received in Unix
+// nanoseconds, zero without either.
+func (sc Sidecar) Order() queue.Acceptance {
+	if sc.Accepted != 0 {
+		return queue.Acceptance{NS: sc.Accepted, Seq: sc.AcceptedSeq}
+	}
+	if t := receivedTime(sc.Received); !t.IsZero() {
+		return queue.Acceptance{NS: t.UnixNano()}
+	}
+	return queue.Acceptance{}
+}
+
+// Newer reports whether the file a (stored as aRel) is newer than b
+// (stored as bRel): by acceptance order (Order), then by id, then by
+// stored name.
+func Newer(a Sidecar, aRel string, b Sidecar, bRel string) bool {
+	if c := a.Order().Compare(b.Order()); c != 0 {
+		return c > 0
+	}
+	if a.ID != b.ID {
+		return a.ID > b.ID
 	}
 	return aRel > bRel
 }
+
+func newer(a target, b target) bool { return Newer(a.sc, a.rel, b.sc, b.rel) }
 
 type target struct {
 	rel string
@@ -172,7 +192,7 @@ func (l Local) pointAlias(r *os.Root, alias, stored string, sc Sidecar) error {
 		return fmt.Errorf("alias %q: a stored file: %w", alias, ErrInvalid)
 	case err == nil && cur.AliasOf == stored:
 		return l.repoint(r, alias, "")
-	case err == nil && !newer(sc.Received, stored, cur.Received, cur.AliasOf):
+	case err == nil && !newer(target{stored, sc}, target{cur.AliasOf, cur}):
 		return nil
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
 		return err
@@ -190,7 +210,7 @@ func (l Local) newest(r *os.Root) (map[string]target, map[string]Sidecar, error)
 			return nil
 		}
 		if a := l.declares(r, rel, sc); a != "" {
-			if b, ok := best[a]; !ok || newer(sc.Received, rel, b.sc.Received, b.rel) {
+			if b, ok := best[a]; !ok || newer(target{rel, sc}, b) {
 				best[a] = target{rel, sc}
 			}
 		}
@@ -224,7 +244,7 @@ func (l Local) repoint(r *os.Root, alias, gone string) error {
 // sound reports whether the alias sidecar cur describes t and the alias
 // data is t's file.
 func (l Local) sound(r *os.Root, alias string, cur Sidecar, t target) bool {
-	if cur.AliasOf != t.rel || cur.ID != t.sc.ID || cur.Received != t.sc.Received || cur.SHA256 != t.sc.SHA256 || cur.Produced != t.sc.Produced {
+	if cur.AliasOf != t.rel || cur.ID != t.sc.ID || cur.Received != t.sc.Received || cur.Order() != t.sc.Order() || cur.SHA256 != t.sc.SHA256 || cur.Produced != t.sc.Produced {
 		return false
 	}
 	afi, err := r.Lstat(l.phys(alias))
@@ -272,10 +292,11 @@ func (l Local) reconcileAliases(r *os.Root, dry bool) (changed, any bool, err er
 	return changed, len(best) > 0 || len(present) > 0, errors.Join(errs...)
 }
 
-// reconcileLinks is reconcileAliases and reconcilePermanent together.
-func (l Local) reconcileLinks(r *os.Root, dry bool) (changed, any bool, err error) {
+// reconcileLinks is reconcileAliases and reconcilePermanent together,
+// under the base lock h (nil with dry).
+func (l Local) reconcileLinks(r *os.Root, h *held, dry bool) (changed, any bool, err error) {
 	ac, aa, aerr := l.reconcileAliases(r, dry)
-	pc, pa, perr := l.reconcilePermanent(r, dry)
+	pc, pa, perr := l.reconcilePermanent(r, h, dry)
 	return ac || pc, aa || pa, errors.Join(aerr, perr)
 }
 
@@ -449,7 +470,7 @@ func (l Local) Reconcile() error {
 		return err
 	}
 	defer r.Close()
-	needed, any, derr := l.reconcileLinks(r, true)
+	needed, any, derr := l.reconcileLinks(r, nil, true)
 	if derr != nil {
 		if prev, ok := unreadable.Load(l.key()); !ok || prev.(string) != derr.Error() {
 			needed = true
@@ -470,7 +491,7 @@ func (l Local) Reconcile() error {
 	defer h.unlock()
 	stale := l.Catalog && !l.fresh(r, h.prev)
 	if !stale {
-		needed, _, derr = l.reconcileLinks(r, true)
+		needed, _, derr = l.reconcileLinks(r, h, true)
 		if !needed {
 			if derr != nil {
 				unreadable.Store(l.key(), derr.Error())
@@ -483,7 +504,7 @@ func (l Local) Reconcile() error {
 	if err := h.bump(); err != nil {
 		return err
 	}
-	changed, _, err := l.reconcileLinks(r, false)
+	changed, _, err := l.reconcileLinks(r, h, false)
 	if err != nil {
 		unreadable.Store(l.key(), err.Error())
 	} else {

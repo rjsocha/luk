@@ -1,6 +1,8 @@
 package server
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,7 +16,7 @@ import (
 )
 
 const permanentBlock = `respond: url, storage: drop, link: {remove: ['*'], ttl: ['*'], list: ['*']},
-    permanent: {names: {"rev/hosts.krl": {allow: [robert.socha], keep: 2}, "builds/*": {allow: [robert.socha], max: 1}, "certs/*": {allow: ["hosts:*"]}}}}`
+    permanent: {names: {"rev/hosts.krl": {allow: [robert.socha]}, "builds/*": {allow: [robert.socha], max: 1}, "certs/*": {allow: ["hosts:*"]}}}}`
 
 func permanentFixture(t *testing.T) (*fixture, *time.Time) {
 	t.Helper()
@@ -37,13 +39,19 @@ func permMeta(name string, body []byte) wire.Meta {
 func (f *fixture) sendPermanent(t *testing.T, clock *time.Time, name, body string) wire.Receipt {
 	t.Helper()
 	*clock = clock.Add(time.Second)
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: permMeta(name, []byte(body)), body: []byte(body)})
-	out := receipt(t, rec, http.StatusCreated)
+	out := f.queuePermanent(t, name, body)
 	f.settle(t)
 	return out
 }
 
-func TestPermanentUploadServesNewest(t *testing.T) {
+// queuePermanent sends a version of name and leaves it in the queue.
+func (f *fixture) queuePermanent(t *testing.T, name, body string) wire.Receipt {
+	t.Helper()
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: permMeta(name, []byte(body)), body: []byte(body)})
+	return receipt(t, rec, http.StatusCreated)
+}
+
+func TestPermanentUploadServesLast(t *testing.T) {
 	f, clock := permanentFixture(t)
 	const perm = "https://lukd.vm:8443/d/permanent/rev/hosts.krl"
 	if code, _ := f.fetch(t, perm); code != http.StatusNotFound {
@@ -59,7 +67,7 @@ func TestPermanentUploadServesNewest(t *testing.T) {
 	if code, body := f.fetch(t, v1.VersionURL); code != 200 || body != "one" {
 		t.Fatalf("v1 version: %d %q", code, body)
 	}
-	if sc := f.dropSidecar(t, v1.VersionURL); sc.Client.Permanent != "rev/hosts.krl" || sc.PermanentPath != "permanent" {
+	if sc := f.dropSidecar(t, v1.VersionURL); sc.Client.Permanent != "rev/hosts.krl" || sc.PermanentPath != "permanent" || sc.Accepted == 0 {
 		t.Fatalf("sidecar %+v", sc)
 	}
 	v2 := f.sendPermanent(t, clock, "rev/hosts.krl", "two")
@@ -69,31 +77,69 @@ func TestPermanentUploadServesNewest(t *testing.T) {
 		!strings.Contains(rec.Header().Get("Content-Disposition"), `filename="f"`) {
 		t.Fatalf("v2: %d %q %v", rec.Code, rec.Body, rec.Header())
 	}
+	// The new version removed the previous one.
+	if code, _ := f.fetch(t, v1.VersionURL); code != http.StatusNotFound {
+		t.Fatalf("v1 after v2: %d", code)
+	}
 	v3 := f.sendPermanent(t, clock, "rev/hosts.krl", "three")
 	if code, body := f.fetch(t, perm); code != 200 || body != "three" {
 		t.Fatalf("v3: %d %q", code, body)
 	}
-	// keep 2: the first version went.
-	if code, _ := f.fetch(t, v1.VersionURL); code != http.StatusNotFound {
-		t.Fatalf("v1 after keep: %d", code)
+	if code, _ := f.fetch(t, v2.VersionURL); code != http.StatusNotFound {
+		t.Fatalf("v2 after v3: %d", code)
 	}
 	// Listed per version, with the permanent name and URL.
 	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
-	if len(a.Links) != 2 || a.Links[0].URL != v3.VersionURL || a.Links[0].Permanent != "rev/hosts.krl" || a.Links[0].PermanentURL != perm {
+	if len(a.Links) != 1 || a.Links[0].URL != v3.VersionURL || a.Links[0].Permanent != "rev/hosts.krl" || a.Links[0].PermanentURL != perm {
 		t.Fatalf("list %+v", a.Links)
 	}
 	// A link action takes the version URL; the permanent URL is no link.
 	wantNoLink(t, "permanent url", f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: perm}))
 	linkAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: v3.VersionURL}), http.StatusOK)
-	if code, body := f.fetch(t, perm); code != 200 || body != "two" {
-		t.Fatalf("after removing v3: %d %q", code, body)
-	}
-	linkAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: v2.VersionURL}), http.StatusOK)
+	// No fallback: the name is empty.
 	if code, _ := f.fetch(t, perm); code != http.StatusNotFound {
-		t.Fatalf("nothing left: %d", code)
+		t.Fatalf("after removing v3: %d", code)
 	}
-	if _, err := os.Lstat(filepath.Join(f.root, "s/drop/.db/permanent/permanent")); !os.IsNotExist(err) {
-		t.Fatalf("permanent directory left: %v", err)
+	if got := entries(t, filepath.Join(f.root, "s/drop/.db/permanent/permanent/rev/hosts.krl")); strings.Join(got, ",") != "current.last" {
+		t.Fatalf("permanent directory %v", got)
+	}
+	f.sendPermanent(t, clock, "rev/hosts.krl", "four")
+	if code, body := f.fetch(t, perm); code != 200 || body != "four" {
+		t.Fatalf("v4: %d %q", code, body)
+	}
+}
+
+// TestPermanentCommitOrder: the version committed last is current, also
+// when it was received earlier, and whatever the order the queue entries
+// of one second are processed in.
+func TestPermanentCommitOrder(t *testing.T) {
+	f, clock := permanentFixture(t)
+	const perm = "https://lukd.vm:8443/d/permanent/rev/hosts.krl"
+	start := *clock
+	*clock = start.Add(10 * time.Second)
+	f.queuePermanent(t, "rev/hosts.krl", "received-later")
+	// Received earlier (a request started before), committed after.
+	*clock = start
+	last := f.queuePermanent(t, "rev/hosts.krl", "committed-last")
+	f.settle(t)
+	if code, body := f.fetch(t, perm); code != 200 || body != "committed-last" {
+		t.Fatalf("current: %d %q", code, body)
+	}
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); len(a.Links) != 1 || a.Links[0].URL != last.VersionURL {
+		t.Fatalf("list %+v", a.Links)
+	}
+	// Many uploads in one second, processed at once in any order.
+	*clock = start.Add(20 * time.Second)
+	var want wire.Receipt
+	for i := range 8 {
+		want = f.queuePermanent(t, "rev/hosts.krl", fmt.Sprint("same-second-", i))
+	}
+	f.settle(t)
+	if code, body := f.fetch(t, perm); code != 200 || body != "same-second-7" {
+		t.Fatalf("same second: %d %q", code, body)
+	}
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); len(a.Links) != 1 || a.Links[0].URL != want.VersionURL {
+		t.Fatalf("list after the same second %+v", a.Links)
 	}
 }
 
@@ -187,17 +233,39 @@ func TestPermanentNotOffered(t *testing.T) {
 	}
 }
 
-func TestPermanentExpiredVersionFallsBack(t *testing.T) {
+func TestPermanentExpiredVersionIs404(t *testing.T) {
 	f, clock := permanentFixture(t)
 	const perm = "https://lukd.vm:8443/d/permanent/rev/hosts.krl"
 	f.sendPermanent(t, clock, "rev/hosts.krl", "old")
 	v2 := f.sendPermanent(t, clock, "rev/hosts.krl", "new")
 	f.setSidecar(t, v2.VersionURL, func(sc *store.Sidecar) { sc.Expires = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339) })
-	// The maintenance pass moves the name to the newest live version.
+	// The published copy still holds the old expiry: the request checks
+	// the version itself.
+	expired := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	meta := filepath.Join(f.root, "s/drop/.db/permanent/permanent/rev/hosts.krl/current/meta.json")
+	b, err := os.ReadFile(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sc store.Sidecar
+	if err := json.Unmarshal(b, &sc); err != nil {
+		t.Fatal(err)
+	}
+	sc.Expires = expired
+	if b, err = json.Marshal(sc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(meta, b, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := f.fetch(t, perm); code != http.StatusNotFound {
+		t.Fatalf("expired before maintenance: %d", code)
+	}
+	// The maintenance pass unpublishes it: no fallback to an older one.
 	if err := store.FromConfig(f.srv.config().Storage["drop"]).Reconcile(); err != nil {
 		t.Fatal(err)
 	}
-	if code, body := f.fetch(t, perm); code != 200 || body != "old" {
-		t.Fatalf("after expiry: %d %q", code, body)
+	if code, _ := f.fetch(t, perm); code != http.StatusNotFound {
+		t.Fatalf("after expiry: %d", code)
 	}
 }

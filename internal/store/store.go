@@ -516,14 +516,20 @@ func execute(t *template.Template, v Vars) (string, error) {
 }
 
 type Sidecar struct {
-	ID       string    `json:"id"`
-	Sender   string    `json:"sender"`
-	Endpoint string    `json:"endpoint"`
-	Received string    `json:"received"`
-	Size     int64     `json:"size"`
-	SHA256   string    `json:"sha256"`
-	Expires  string    `json:"expires,omitempty"`
-	Client   wire.Meta `json:"client"`
+	ID       string `json:"id"`
+	Sender   string `json:"sender"`
+	Endpoint string `json:"endpoint"`
+	Received string `json:"received"`
+	// Accepted and AcceptedSeq are the acceptance order of the upload
+	// (see queue.Accepted): they decide which of two files is newer;
+	// received stays the time shown. Files stored before them have none
+	// (see Order).
+	Accepted    int64     `json:"accepted,omitempty"`
+	AcceptedSeq int       `json:"accepted_seq,omitempty"`
+	Size        int64     `json:"size"`
+	SHA256      string    `json:"sha256"`
+	Expires     string    `json:"expires,omitempty"`
+	Client      wire.Meta `json:"client"`
 	// Owner is what the portal pages show as the sender of the upload
 	// (empty with no_owner): the key name, or "host" or "user" for a
 	// certificate.
@@ -557,7 +563,7 @@ type Sidecar struct {
 // replace; Catalog keeps <base>/.db/catalog.json.
 //
 // A file whose pipeline meta has `alias` gets file/<alias> as a hardlink
-// while it is the newest (by received, then by name) file declaring it;
+// while it is the newest (by acceptance order, see Newer) file declaring it;
 // every removal of a target moves the alias to the next newest or removes
 // it. An alias is not a stored file of its own: it never expires, claiming
 // it claims its target, and a stored path never replaces it. Once and
@@ -858,12 +864,15 @@ func (l Local) Put(src, rel string, sc Sidecar) (string, error) {
 }
 
 // Stored is the outcome of Store: the final relative path, whether it
-// is an existing version kept by Dedup, with nothing placed, and the
-// versions of its permanent name the store removed beyond keep.
+// is an existing version kept by Dedup, with nothing placed, and for a
+// version of a permanent name the other versions the store removed
+// (Replaced) or, for a version accepted before the one published last,
+// the version itself, stored and removed again (Superseded).
 type Stored struct {
-	Rel    string
-	Dedup  bool
-	Pruned []PermanentVersion
+	Rel        string
+	Dedup      bool
+	Replaced   []PermanentVersion
+	Superseded *PermanentVersion
 }
 
 // Store is Put reporting a deduplicated store.
@@ -986,11 +995,17 @@ func (l Local) StoreStaged(s *Staged, rel string, sc Sidecar) (Stored, error) {
 	}
 	stored, old, dedup, err := l.put(r, src, tmp, staged, rel, sc)
 	if err != nil || dedup {
-		if dedup && err == nil {
-			// A retry of a store whose publish failed finds its file.
-			err = l.syncPermanent(r, l.permanentKey(sc))
+		res := Stored{Rel: stored, Dedup: dedup}
+		if key := l.permanentKey(sc); dedup && err == nil && key != "" {
+			// A retry of a store whose publish failed finds its file,
+			// another upload of the content the version kept.
+			var kept Sidecar
+			if kept, err = readSidecar(r, l.phys(stored)); err == nil && l.permanentKey(kept) == key {
+				res.Replaced, res.Superseded, err = l.placePermanent(r, h, key, target{stored, kept})
+			}
+			l.rebuild(r)
 		}
-		return Stored{Rel: stored, Dedup: dedup}, err
+		return res, err
 	}
 	l.track(r, rel, stored, old, prev, perr == nil, sc)
 	if oldAlias != "" && oldAlias != alias && stored == rel {
@@ -1003,10 +1018,14 @@ func (l Local) StoreStaged(s *Staged, rel string, sc Sidecar) (Stored, error) {
 	if pk := l.permanentKey(prev); perr == nil && pk != "" && pk != key {
 		err = errors.Join(err, l.syncPermanent(r, pk))
 	}
-	err = errors.Join(err, l.syncPermanent(r, key))
-	pruned, perr2 := l.prunePermanent(r, h, sc)
+	res := Stored{Rel: stored}
+	if key != "" {
+		var perr2 error
+		res.Replaced, res.Superseded, perr2 = l.placePermanent(r, h, key, target{stored, sc})
+		err = errors.Join(err, perr2)
+	}
 	l.rebuild(r)
-	return Stored{Rel: stored, Pruned: pruned}, errors.Join(err, perr2)
+	return res, err
 }
 
 func (l Local) versioning() bool { return l.Conflict != "replace" && l.Conflict != "reject" }

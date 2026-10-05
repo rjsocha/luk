@@ -48,6 +48,8 @@ type Server struct {
 	floor atomic.Int64
 	log   *slog.Logger
 	queue *queue.Queue
+	// accepted hands out the acceptance order of committed entries.
+	accepted *queue.Accepted
 	// quota holds the buckets of the endpoint quotas; it survives a
 	// reload, the limits come from the configuration of each upload.
 	quota *quota.Book
@@ -77,11 +79,12 @@ type listener struct {
 
 func New(cfg *config.Config, log *slog.Logger) *Server {
 	s := &Server{
-		nonces: auth.NewNonceCache(2 * time.Duration(cfg.Auth.ClockSkew)),
-		now:    time.Now,
-		start:  time.Now(),
-		log:    log,
-		queue:  queue.New(int64(cfg.Limits.Queue.Reserve), nil),
+		nonces:   auth.NewNonceCache(2 * time.Duration(cfg.Auth.ClockSkew)),
+		now:      time.Now,
+		start:    time.Now(),
+		log:      log,
+		queue:    queue.New(int64(cfg.Limits.Queue.Reserve), nil),
+		accepted: queue.NewAccepted(),
 	}
 	s.queue.SetDirReserves(cfg.SecretReserves())
 	s.quota = quota.New(log, func() time.Time { return s.now() })
@@ -1008,6 +1011,10 @@ func (s *Server) accept(u *upload, e queue.Entry, n int64, sum string, dedup boo
 	if u.version != "" {
 		sc.PermanentPath = u.ep.Permanent.Path
 	}
+	// The acceptance order, taken right before the commit: the order in
+	// which the entries are committed, whatever their start.
+	acc := s.accepted.Next()
+	sc.Accepted, sc.AcceptedSeq = acc.NS, acc.Seq
 	job := pipeline.Job{Entry: e, Pipelines: u.pipes, Stages: pipeline.Stages(u.sn.cfg, u.pipes), Vars: u.vars, Sidecar: sc, Expires: exp, Replace: u.replace, Secret: u.secret}
 	if err := s.queue.Commit(e, job.Meta()); errors.Is(err, queue.ErrNotSynced) {
 		s.log.Warn("upload committed", "id", e.ID, "error", err)

@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -171,12 +173,14 @@ func TestPendingCommitRemoveCleanup(t *testing.T) {
 		}
 		es = append(es, e)
 	}
+	// b was accepted before a (the ids sort the other way), whatever the
+	// times of the files.
 	base := time.Now().Add(-time.Hour)
 	for i, e := range es[:2] {
-		if err := q.Commit(e, map[string]string{"id": e.ID}); err != nil {
+		if err := q.Commit(e, map[string]any{"id": e.ID, "accepted": 1000 + i}); err != nil {
 			t.Fatal(err)
 		}
-		mt := base.Add(time.Duration(i) * time.Minute)
+		mt := base.Add(time.Duration(-i) * time.Minute)
 		if err := os.Chtimes(filepath.Join(e.Dir, "meta.json"), mt, mt); err != nil {
 			t.Fatal(err)
 		}
@@ -441,5 +445,84 @@ func TestRemoveMetaFirst(t *testing.T) {
 	}
 	if p, err := Pending(dir); err != nil || len(p) != 0 {
 		t.Fatalf("pending %v %v", p, err)
+	}
+}
+
+// TestPendingAcceptanceOrder lists entries by acceptance (ns, then seq),
+// an entry of an older lukd by its received time, then by id.
+func TestPendingAcceptanceOrder(t *testing.T) {
+	dir := t.TempDir()
+	q := New(0, func(string) (int64, error) { return 1 << 40, nil })
+	t0 := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
+	metas := map[string]any{
+		"20261004T100000Z-00000001": map[string]any{"accepted": t0.UnixNano() + 5, "accepted_seq": 1},
+		"20261004T100000Z-00000002": map[string]any{"accepted": t0.UnixNano() + 5},
+		"20261004T100000Z-00000003": map[string]any{"accepted": t0.UnixNano() + 2},
+		// Older entries: received only, a second before and at t0.
+		"20261004T100000Z-00000004": map[string]any{"sidecar": map[string]any{"received": t0.Format(time.RFC3339)}},
+		"20261004T095959Z-00000005": map[string]any{"sidecar": map[string]any{"received": t0.Add(-time.Second).Format(time.RFC3339)}},
+	}
+	for id, m := range metas {
+		e, _, _, err := q.Receive(context.Background(), dir, id, bytes.NewReader([]byte(id)), 0, nil, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Commit(e, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := Pending(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, e := range got {
+		ids = append(ids, e.ID[len(e.ID)-1:])
+	}
+	if strings.Join(ids, "") != "54321" {
+		t.Fatalf("order %v", ids)
+	}
+}
+
+// TestAcceptedOrder: the acceptance order increases with the monotonic
+// time elapsed since the start, ties within a nanosecond get increasing
+// seq, and a wall clock that steps back changes nothing.
+func TestAcceptedOrder(t *testing.T) {
+	start := time.Date(2026, 10, 4, 10, 0, 0, 0, time.UTC)
+	var elapsed time.Duration
+	a := newAccepted(start, func() time.Duration { return elapsed })
+	var got []Acceptance
+	for _, d := range []time.Duration{10, 10, 10, 11, 500} {
+		elapsed = d
+		got = append(got, a.Next())
+	}
+	want := []Acceptance{
+		{start.UnixNano() + 10, 0}, {start.UnixNano() + 10, 1}, {start.UnixNano() + 10, 2},
+		{start.UnixNano() + 11, 0}, {start.UnixNano() + 500, 0},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Compare(got[i-1]) <= 0 {
+			t.Fatalf("%v not after %v", got[i], got[i-1])
+		}
+	}
+	// A clock read that goes back (never from the monotonic clock) still
+	// orders after the last value.
+	elapsed = 3
+	if n := a.Next(); n.Compare(got[len(got)-1]) <= 0 {
+		t.Fatalf("%v after a step back", n)
+	}
+	// The real clock: the wall clock is read once, so stepping it back
+	// (as NTP may) cannot reorder; consecutive values only increase.
+	r := NewAccepted()
+	prev := r.Next()
+	for range 1000 {
+		n := r.Next()
+		if n.Compare(prev) <= 0 {
+			t.Fatalf("%v not after %v", n, prev)
+		}
+		prev = n
 	}
 }
