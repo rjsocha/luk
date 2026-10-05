@@ -27,6 +27,9 @@ jobs:
           go vet ./...
           go test -race ./...
 
+      - name: Vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:

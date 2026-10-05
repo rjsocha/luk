@@ -3,7 +3,7 @@ GOFLAGS = -trimpath
 LDFLAGS = -s -w -X main.buildVersion=$(VERSION)
 BINS    = luk lukd luk-job
 
-.PHONY: all build $(BINS) test checkmk vet clean
+.PHONY: all build $(BINS) test checkmk vet vuln clean
 
 all: vet test checkmk build
 
@@ -26,6 +26,10 @@ checkmk:
 vet:
 	go vet ./...
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; echo "gofmt needed"; exit 1; }
+
+# Known vulnerabilities in the code paths luk calls (needs network).
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@latest -show verbose ./...
 
 clean:
 	rm -f $(BINS)
