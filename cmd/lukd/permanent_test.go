@@ -77,6 +77,7 @@ func TestStoragePermanent(t *testing.T) {
 	// The entry of two goes: an orphan, reported by lukd check, kept by
 	// lukd, removed by --prune.
 	permanentConfig(t, root, cfgPath, `{one: {allow: ['*']}}`)
+	writeIdentity(t, cfgPath)
 	_, errOut, err := runLukdIn(t, "", "check", "--no-running", "-c", cfgPath)
 	if err != nil || !strings.Contains(errOut, "warning: storage drop: permanent name permanent/two is an orphan") {
 		t.Fatalf("check: %v %q", err, errOut)

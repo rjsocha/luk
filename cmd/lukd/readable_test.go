@@ -152,6 +152,7 @@ func TestCheckCommandReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := filepath.Join(dir, "config.yaml")
+	writeIdentity(t, cfg)
 	// Not root: skipped.
 	if out, errOut, err := runCheck(t, "-c", cfg, "--no-running"); err != nil || out != "ok\n" {
 		t.Fatalf("not root: %q %q %v", out, errOut, err)

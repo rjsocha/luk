@@ -28,6 +28,7 @@ func runCheck(t *testing.T, args ...string) (string, string, error) {
 
 func TestCheckAgainstRunningRole(t *testing.T) {
 	cfgPath, root := statusConfig(t)
+	writeIdentity(t, cfgPath)
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +97,7 @@ func TestCheckWarnsRelayWithoutJobFile(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(relays), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	writeIdentity(t, cfgPath)
 	jobs := t.TempDir()
 	for _, f := range []string{"s3-upload.yaml", "notify.yaml~", "notify.yaml.dpkg-old", ".notify.yaml"} {
 		if err := os.WriteFile(filepath.Join(jobs, f), nil, 0o600); err != nil {

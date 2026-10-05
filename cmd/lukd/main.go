@@ -98,6 +98,7 @@ func rootCmd() *cobra.Command {
 			"would refuse. A local storage base holding anything but .db/ and file/ (an\n" +
 			"older layout) fails the check; an orphaned permanent name in a readable\n" +
 			"base (see lukd storage permanent) is a warning.\n" +
+			"The identity key (see lukd key) must exist and be loadable.\n" +
 			"--no-running skips that comparison, before a restart. Run as root, it also\n" +
 			"checks that the service user (--user) can read every configuration input:\n" +
 			"config.yaml, config.d, ssh.d, the tls files, the eab key file and gpg.keys.\n" +
@@ -114,6 +115,10 @@ func rootCmd() *cobra.Command {
 				fmt.Fprintln(errw, "warning: "+w)
 			}
 			failed := false
+			if err := checkIdentity(cfg); err != nil {
+				fmt.Fprintln(errw, err)
+				failed = true
+			}
 			for _, err := range storageLayouts(cfg) {
 				fmt.Fprintln(errw, err)
 				failed = true
@@ -205,6 +210,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(storageCmd(&cfgPath))
 	root.AddCommand(quotaCmd(&cfgPath))
 	root.AddCommand(runCmd())
+	root.AddCommand(keyCmd(&cfgPath))
 	cliflags.Guard(root, func(err error) error { return err })
 	return root
 }

@@ -22,9 +22,12 @@ const (
 	// ca/<type>/<name>.pub per CA.
 	SSHDir = "ssh.d"
 	// GPGDir, next to the main file, is the default gpg.keys.
-	GPGDir     = "gpg.d"
-	caDir      = "ca"
-	maxKeyFile = 1 << 20
+	GPGDir = "gpg.d"
+	// IdentityFile, next to the main file, is the identity key of lukd (see
+	// lukd key).
+	IdentityFile = "identity.key"
+	caDir        = "ca"
+	maxKeyFile   = 1 << 20
 )
 
 // Sections whose entries are keyed by name: mappings by their key, lists
@@ -33,6 +36,11 @@ var (
 	namedMaps  = map[string]bool{"listen": true, "endpoint": true, "pipeline": true, "storage": true, "expose": true}
 	namedLists = map[string]bool{"auth.keys": true, "auth.ca": true}
 )
+
+// IdentityPath is the identity key file belonging to the main file cfgPath.
+func IdentityPath(cfgPath string) string {
+	return filepath.Join(filepath.Dir(cfgPath), IdentityFile)
+}
 
 // Load reads the main file p, the snippets of config.d and the identities
 // and CAs of ssh.d next to it, and validates the merged result. Errors name the
@@ -80,6 +88,7 @@ func Load(p string) (*Config, error) {
 		return nil, errors.Join(errs...)
 	}
 	c.Path = p
+	c.IdentityPath = IdentityPath(p)
 	c.Files = append([]string{p}, snippets...)
 	for _, k := range c.Auth.Keys {
 		if k.File != "" {

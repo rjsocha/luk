@@ -114,6 +114,9 @@ type Config struct {
 	// the snippets, the ssh.d files); empty after Parse.
 	Path  string   `yaml:"-"`
 	Files []string `yaml:"-"`
+	// IdentityPath is the identity key file next to the main file; empty
+	// after Parse.
+	IdentityPath string `yaml:"-"`
 }
 
 // Log configures the lukd log: Level is debug, info (the default), warn or

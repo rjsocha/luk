@@ -38,7 +38,7 @@ PrivateTmp=yes
 # run programs, which share the user luk: the TLS and ACME keys and the
 # nonce cache are hidden ("-": absent is fine). A root other than
 # /var/lib/luk or tls files elsewhere need their paths in a drop-in.
-InaccessiblePaths=-/var/lib/luk/tls -/var/lib/luk/acme -/run/luk/nonces
+InaccessiblePaths=-/var/lib/luk/tls -/var/lib/luk/acme -/run/luk/nonces -/etc/site/lukd/identity.key
 # No ptrace or process_vm_readv, and an own PID namespace: the memory of
 # lukd receive cannot be read from here.
 SystemCallFilter=~@debug

@@ -8,6 +8,10 @@ if [ "$1" = configure ]; then
     [ -d "$d" ] || install -d -o root -g luk -m 0750 "$d"
   done
   [ -d /etc/site/lukd/run.d ] || install -d -o root -g root -m 0755 /etc/site/lukd/run.d
+  # The identity key authenticates lukd to its clients; an existing one is
+  # kept (a package upgrade must not change the pin).
+  lukd key generate --if-missing
+  [ ! -e /etc/site/lukd/identity.key ] || { chown root:luk /etc/site/lukd/identity.key; chmod 0640 /etc/site/lukd/identity.key; }
   systemctl daemon-reload || true
   if [ -n "$2" ]; then
     systemctl try-restart lukd-receive.service lukd-process.service || true

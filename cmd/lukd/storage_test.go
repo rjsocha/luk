@@ -325,6 +325,7 @@ func TestStorageOldLayout(t *testing.T) {
 			t.Errorf("%s: %v", args[1], err)
 		}
 	}
+	writeIdentity(t, cfg)
 	_, errOut, err := runCheck(t, "--no-running", "-c", cfg)
 	if err == nil || !strings.Contains(errOut, "storage drop: "+base+": holds .luk-lock besides") {
 		t.Fatalf("check: %q %v", errOut, err)
