@@ -312,9 +312,9 @@ mode 0640, owner root:luk
 - Rotation: `lukd key generate --force` writes the new key and prints its
   pin, then on stderr `reload lukd (systemctl reload lukd) for the new
   key to take effect`; the receive role keeps the old key until its next
-  reload or restart. Clients get the new pin next to the old one (an endpoint takes
-  several pins), then `systemctl reload lukd` switches the key, then the
-  clients drop the old pin.
+  reload or restart. Clients get the new pin next to the old one (an
+  endpoint takes several pins), then `systemctl reload lukd` switches the
+  key, then the clients drop the old pin.
 - The key is the identity clients pin: a reinstall without the file
   means a new pin on every client. Keep it with the configuration.
 
