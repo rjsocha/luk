@@ -277,12 +277,15 @@ func (c *Channel) Do(ctx context.Context, req channel.Request, body io.Reader) (
 	return c.message(ctx, channel.Nonce{Kind: channel.KindOp}, plain)
 }
 
-// Send sends one PART, COMPLETE or ABORT message under n; body may be nil.
+// Send sends one PART, COMPLETE, ABORT or KEEPALIVE message under n; body
+// may be nil.
 // The caller picks the attempt: a nonce already sent in this Channel is
 // refused, as a second encryption under it would reuse the AEAD nonce.
 func (c *Channel) Send(ctx context.Context, n channel.Nonce, body io.Reader) (*InnerResponse, error) {
-	if n.Kind != channel.KindPart && n.Kind != channel.KindComplete && n.Kind != channel.KindAbort {
-		return nil, fmt.Errorf("channel: Send takes PART, COMPLETE or ABORT, not kind %d", n.Kind)
+	switch n.Kind {
+	case channel.KindPart, channel.KindComplete, channel.KindAbort, channel.KindKeepalive:
+	default:
+		return nil, fmt.Errorf("channel: Send takes PART, COMPLETE, ABORT or KEEPALIVE, not kind %d", n.Kind)
 	}
 	if n.Attempt > maxAttempt {
 		return nil, fmt.Errorf("channel: attempt %d over %d", n.Attempt, maxAttempt)

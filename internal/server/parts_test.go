@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"luk/internal/channel"
+	"luk/internal/client"
 	"luk/internal/queue"
 	"luk/internal/wire"
 )
@@ -804,3 +806,60 @@ func TestKeepalive(t *testing.T) {
 	wantInner(t, "complete", head, body, http.StatusCreated)
 }
 
+// slowSource gives its chunks one per read, pausing before each but the
+// first.
+type slowSource struct {
+	chunks [][]byte
+	pause  time.Duration
+	reads  int
+}
+
+func (s *slowSource) Read(p []byte) (int, error) {
+	if len(s.chunks) == 0 {
+		return 0, io.EOF
+	}
+	if s.reads++; s.reads > 1 {
+		time.Sleep(s.pause)
+	}
+	n := copy(p, s.chunks[0])
+	if s.chunks[0] = s.chunks[0][n:]; len(s.chunks[0]) == 0 {
+		s.chunks = s.chunks[1:]
+	}
+	return n, nil
+}
+
+// TestKeepaliveSlowStream: luk keeps the upload of a stream open with
+// KEEPALIVEs while its source pauses longer than limits.body.idle.
+func TestKeepaliveSlowStream(t *testing.T) {
+	f, srvURL, pin := partsFixture(t, "4", func(s string) string {
+		return strings.Replace(s, `parts: {size: 64K`, `limits: {body: {idle: 1s}}, parts: {size: 64K`, 1)
+	})
+	stop := make(chan struct{})
+	swept := make(chan struct{})
+	go func() {
+		defer close(swept)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(50 * time.Millisecond):
+				f.srv.sweepChannels()
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-swept })
+	pins, err := channel.ParsePins(channel.Words(pin))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := content(testPart + 100)
+	src := &slowSource{chunks: [][]byte{data[:30000], data[30000:60000], data[60000:]}, pause: 1400 * time.Millisecond}
+	a, err := client.Upload(context.Background(), client.Options{URL: srvURL + "/drop", Pins: pins, Signer: f.user, Body: src, Size: -1,
+		Meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourcePipe}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Receipt.SHA256 != sha(data) {
+		t.Fatalf("%+v", a.Receipt)
+	}
+}

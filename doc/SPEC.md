@@ -847,7 +847,7 @@ refusal are answered at the OP and end the session there; any other OP
 that passed every check before the body is answered:
 
 ```
-200 {"parts": {"size": 8388608, "parallel": 4}}
+200 {"parts": {"size": 8388608, "parallel": 4, "idle": 120, "rate": 65536}}
 ```
 
 ```yaml
@@ -980,8 +980,16 @@ luk sends the parts with `--parallel` workers (default 1):
 - Missing parts listed by the COMPLETE are sent again, up to 3 rounds; a
   stream cannot send a part again (an error). A COMPLETE whose answer is
   lost is sent again (5 attempts) and gets the kept answer.
+- A stream is read ahead into two buffers of `parts.size` per worker,
+  so the next part is read while one goes. While luk waits on the
+  source it sends a KEEPALIVE every `idle`/3 of the offer, and not
+  otherwise.
 - `--bwlimit` paces all the parts together; `--progress` counts the
-  bytes of the parts, a part sent again once.
+  bytes of the parts, a part sent again once. A `--bwlimit` below the
+  `rate` of the offer fails before any part (after an ABORT):
+  `--bwlimit <x> is below the minimum rate of this endpoint (<rate>/s)`;
+  otherwise luk sends at most `--bwlimit` / `rate` parts at once, so
+  each part gets the rate.
 
 ## Transfer dedup
 

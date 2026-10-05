@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"luk/internal/channel"
@@ -117,13 +118,30 @@ func uploadOnce(ctx context.Context, o Options, u *url.URL, op opFunc, meter *pa
 		return nil, fmt.Errorf("bad parts offer: %s", Printable(string(resp.Body)))
 	}
 	r := &partsRun{c: c, o: &o, host: u.Host, partSize: offer.Parts.Size, meter: meter, pace: newPacer(o.BWLimit),
-		attempts: map[channel.Nonce]uint16{}, done: map[uint32]bool{}}
-	r.limit = min(max(o.Parallel, 1), offer.Parts.Parallel)
+		idle: time.Duration(offer.Parts.Idle) * time.Second, attempts: map[channel.Nonce]uint16{}, done: map[uint32]bool{}}
+	r.limit = partsWorkers(o.Parallel, offer.Parts.Parallel, o.BWLimit, offer.Parts.Rate)
 	if o.NoBody || (o.Source == nil && o.Body == nil) {
 		r.abort()
 		return nil, ErrBodyWanted
 	}
+	// Every part must arrive at the rate of the offer: below it lukd
+	// refuses each part (408) whatever luk does.
+	if rate := offer.Parts.Rate; o.BWLimit > 0 && rate > 0 && o.BWLimit < rate {
+		r.abort()
+		return nil, fmt.Errorf("--bwlimit %s/s is below the minimum rate of this endpoint (%s/s)", HumanBytes(o.BWLimit), HumanBytes(rate))
+	}
 	return r.run(ctx)
+}
+
+// partsWorkers is the number of workers of an upload: --parallel (at
+// least one) within the offer, and under --bwlimit so few that each part
+// still gets the rate lukd asks of it.
+func partsWorkers(parallel, offer int, bwlimit, rate int64) int {
+	n := min(max(parallel, 1), offer)
+	if bwlimit > 0 && rate > 0 {
+		n = int(min(int64(n), max(bwlimit/rate, 1)))
+	}
+	return n
 }
 
 // partJob is one part to send: n, and a reader of its bytes for each
@@ -143,6 +161,9 @@ type partsRun struct {
 	partSize int64
 	meter    *partsMeter
 	pace     *pacer
+	// idle is the time lukd keeps the upload open without activity (0:
+	// not offered).
+	idle time.Duration
 
 	mu sync.Mutex
 	// limit is the number of workers that send; a timeout of lukd
@@ -328,15 +349,24 @@ func (r *partsRun) filePart(n uint32) partJob {
 	}, done: func() {}}
 }
 
-// feedStream reads the stream part by part into one buffer per worker; a
-// buffer goes back once its part is verified. The short (or empty) part
-// that ends the stream is its last.
+// feedStream reads the stream part by part into two buffers per worker,
+// so the next part is read while the last one goes; a buffer goes back
+// once its part is verified. The short (or empty) part that ends the
+// stream is its last.
 func (r *partsRun) feedStream(ctx context.Context, jobs chan<- partJob) error {
 	r.sum = sha256.New()
-	free := make(chan []byte, r.workers())
+	free := make(chan []byte, 2*r.workers())
 	for range cap(free) {
 		free <- make([]byte, r.partSize)
 	}
+	var waiting atomic.Bool
+	kctx, stop := context.WithCancel(ctx)
+	var kwg sync.WaitGroup
+	kwg.Go(func() { r.keepalive(kctx, &waiting) })
+	defer func() {
+		stop()
+		kwg.Wait()
+	}()
 	for n := uint32(0); ; n++ {
 		var buf []byte
 		select {
@@ -344,7 +374,9 @@ func (r *partsRun) feedStream(ctx context.Context, jobs chan<- partJob) error {
 		case <-ctx.Done():
 			return context.Cause(ctx)
 		}
+		waiting.Store(true)
 		k, err := io.ReadFull(r.o.Body, buf)
+		waiting.Store(false)
 		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 			return &sourceError{err}
 		}
@@ -357,6 +389,37 @@ func (r *partsRun) feedStream(ctx context.Context, jobs chan<- partJob) error {
 		if k < len(buf) {
 			return nil
 		}
+	}
+}
+
+// keepalive sends a KEEPALIVE every idle/3 while waiting is set (the
+// feed waits on its source), so lukd keeps the upload of a slow source
+// open; parts and their answers keep it open otherwise. Its failures are
+// left to the parts that follow.
+func (r *partsRun) keepalive(ctx context.Context, waiting *atomic.Bool) {
+	if r.idle <= 0 {
+		return
+	}
+	every := r.idle / 3
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for seq := uint32(0); ; {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if !waiting.Load() {
+			continue
+		}
+		n, err := r.nonce(channel.Nonce{Kind: channel.KindKeepalive, Number: seq})
+		seq++
+		if err != nil {
+			continue
+		}
+		sctx, cancel := context.WithTimeout(ctx, every)
+		_, _ = r.c.Send(sctx, n, nil)
+		cancel()
 	}
 }
 
