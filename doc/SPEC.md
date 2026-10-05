@@ -3148,7 +3148,6 @@ fsync, rename, fsync of the directory), mode 0640:
 ```json
 {
   "role": "process",
-  "pid": 4242,
   "started": "2026-10-05T12:00:00Z",
   "version": "0.9.0"
 }

@@ -551,7 +551,7 @@ func TestRolesAlive(t *testing.T) {
 			waitFor(t, "alive.json", func() bool { return exists(p) })
 			b, _ := os.ReadFile(p)
 			var info status.AliveInfo
-			if err := json.Unmarshal(b, &info); err != nil || info.Role != c.name || info.PID != os.Getpid() || info.Version != Version {
+			if err := json.Unmarshal(b, &info); err != nil || info.Role != c.name || info.Version != Version {
 				t.Fatalf("%s: %+v %v", b, info, err)
 			}
 			if _, err := time.Parse(time.RFC3339, info.Started); err != nil {

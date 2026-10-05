@@ -28,7 +28,6 @@ const aliveTmpPattern = ".alive.json.tmp-*"
 // role.
 type AliveInfo struct {
 	Role    string `json:"role"`
-	PID     int    `json:"pid"`
 	Started string `json:"started"`
 	Version string `json:"version"`
 }
@@ -45,7 +44,7 @@ type Alive struct {
 func StartAlive(root, role, version string, now time.Time) (*Alive, error) {
 	a := &Alive{
 		path: AlivePath(root, role),
-		info: AliveInfo{Role: role, PID: os.Getpid(), Started: now.UTC().Format(time.RFC3339), Version: version},
+		info: AliveInfo{Role: role, Started: now.UTC().Format(time.RFC3339), Version: version},
 	}
 	dir := filepath.Dir(a.path)
 	if tmps, err := filepath.Glob(filepath.Join(dir, aliveTmpPattern)); err == nil {

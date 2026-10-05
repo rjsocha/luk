@@ -70,7 +70,7 @@ func TestStartAliveWritesAtomically(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatalf("%s: %v", b, err)
 	}
-	want := AliveInfo{Role: "receive", PID: os.Getpid(), Started: "2026-09-30T12:00:00Z", Version: "1.2.3"}
+	want := AliveInfo{Role: "receive", Started: "2026-09-30T12:00:00Z", Version: "1.2.3"}
 	if got != want {
 		t.Fatalf("%+v, want %+v", got, want)
 	}
