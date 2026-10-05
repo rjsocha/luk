@@ -20,10 +20,12 @@ import (
 	"luk/internal/wire"
 )
 
-// Answer is an inner response: a status and a JSON body (nil: none).
+// Answer is an inner response: a status, its header and a JSON body
+// (nil: none).
 type Answer struct {
 	Status int
 	Body   any
+	Header http.Header
 }
 
 // Server is the stand-in. Set its handlers before the first request.
@@ -32,9 +34,12 @@ type Server struct {
 	Key channel.Key
 	// Op answers an OP; a nil answer offers the content in parts.
 	Op func(req channel.Request, body []byte) *Answer
-	// Complete answers a COMPLETE with the parts received, joined in
+	// Complete answers the COMPLETE n with the parts received, joined in
 	// the order of their numbers.
-	Complete func(req channel.Request, content []byte) Answer
+	Complete func(req channel.Request, n channel.Nonce, content []byte) Answer
+	// PartAnswer, when set, answers a PART once it was read; nil keeps
+	// the part and answers 200.
+	PartAnswer func(n channel.Nonce, data []byte) *Answer
 	// Part, when set, runs when a PART arrives, before it is read; true
 	// lets the PART go on.
 	Part func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool
@@ -132,7 +137,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case channel.KindOp:
 		pr := bytes.NewReader(plain)
 		if err := channel.ReadHead(pr, &cs.req); err != nil {
-			a = Answer{http.StatusBadRequest, wire.ErrorResponse{Error: err.Error()}}
+			a = Answer{Status: http.StatusBadRequest, Body: wire.ErrorResponse{Error: err.Error()}}
 			break
 		}
 		rest, _ := io.ReadAll(pr)
@@ -148,12 +153,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		if offer.Parts.Parallel == 0 {
 			offer.Parts.Parallel = 4
 		}
-		a = Answer{http.StatusOK, offer}
+		a = Answer{Status: http.StatusOK, Body: offer}
 	case channel.KindPart:
+		if s.PartAnswer != nil {
+			if pa := s.PartAnswer(n, plain); pa != nil {
+				a = *pa
+				break
+			}
+		}
 		s.mu.Lock()
 		cs.parts[n.Number] = plain
 		s.mu.Unlock()
-		a = Answer{http.StatusOK, struct{}{}}
+		a = Answer{Status: http.StatusOK, Body: struct{}{}}
 	case channel.KindComplete:
 		s.mu.Lock()
 		nums := make([]uint32, 0, len(cs.parts))
@@ -166,16 +177,19 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			content = append(content, cs.parts[k]...)
 		}
 		s.mu.Unlock()
-		a = s.Complete(cs.req, content)
+		a = s.Complete(cs.req, n, content)
 	default:
-		a = Answer{http.StatusOK, struct{}{}}
+		a = Answer{Status: http.StatusOK, Body: struct{}{}}
 	}
 	w.Header().Set("Content-Type", channel.ContentType)
 	fw, err := cs.s.SealResponse(w, n)
 	if err != nil {
 		return
 	}
-	h := http.Header{}
+	h := a.Header.Clone()
+	if h == nil {
+		h = http.Header{}
+	}
 	var out []byte
 	if a.Body != nil {
 		h.Set("Content-Type", "application/json")

@@ -66,8 +66,8 @@ the mode (private.owner, private.any). --dry-run runs every server check up to t
 sends no body, stores nothing and prints the debug JSON. --links N uploads N times with the same
 options, one link each (N at most 25), and prints the N URLs one per line (--json: an array
 of the N answers); the repeats carry the size and sha256 of the first answer,
-so the server can answer them without the content, and resend a --file when
-it asks for it; a stream (--stdin, a pipe, a prompted --secret) cannot be sent
+so the server can answer them without the content, and resend a --file or a
+prompted --secret when it asks for it; a stream (--stdin, a pipe) cannot be sent
 twice, which ends the run with the links made so far. --progress reports on stderr when it is a terminal; --bwlimit
 caps the upload rate in bytes per second (K, M, G, T suffixes; 0 = unlimited).
 The content goes in parts through the channel, authenticated by the lukd pin

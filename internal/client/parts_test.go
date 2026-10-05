@@ -22,6 +22,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"luk/internal/channel"
+	"luk/internal/channel/chantest"
 	"luk/internal/wire"
 )
 
@@ -313,9 +314,16 @@ func TestUploadSessionLost(t *testing.T) {
 	e := newPartsEnv(t)
 	data := patterned(3*testPartSize + 1)
 	e.setHook(lostSession(channel.KindPart, 1))
-	a, err := Upload(context.Background(), e.file("/backup", data))
+	o := e.file("/backup", data)
+	var progress bytes.Buffer
+	o.Progress = &progress
+	a, err := Upload(context.Background(), o)
 	if err != nil || a.Receipt.SHA256 != hex.EncodeToString(sha256Sum(string(data))) {
 		t.Fatalf("file started over: %+v %v", a, err)
+	}
+	// The parts of the first session do not count again.
+	if !strings.Contains(progress.String(), "\r\x1b[K"+HumanBytes(int64(len(data)))+" in ") {
+		t.Fatalf("progress %q", progress.String())
 	}
 	e.setHook(lostSession(channel.KindPart, 1))
 	if _, err := Upload(context.Background(), e.stream("/backup", data)); err == nil || err.Error() != "server lost the upload; the stream cannot be sent again" {
@@ -460,5 +468,211 @@ func TestUploadSlowSourceNotStalled(t *testing.T) {
 	o.Body = r
 	if _, err := Upload(context.Background(), o); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// fakeParts is a chantest lukd that offers parts of 64KiB, at most 4 at
+// once, and answers a COMPLETE with complete, given the COMPLETE nonce
+// and the content.
+func fakeParts(t *testing.T, complete func(n channel.Nonce, content []byte) chantest.Answer) *chantest.Server {
+	t.Helper()
+	shortRetries(t)
+	srv := chantest.New(t)
+	srv.Op = func(channel.Request, []byte) *chantest.Answer { return nil }
+	srv.Complete = func(_ channel.Request, n channel.Nonce, content []byte) chantest.Answer { return complete(n, content) }
+	return srv
+}
+
+// receipt is the 201 answer storing content.
+func receipt(content []byte) chantest.Answer {
+	return chantest.Answer{Status: http.StatusCreated, Body: wire.Receipt{ID: "a", URL: "https://x/d/a", Size: int64(len(content)), SHA256: hex.EncodeToString(sha256Sum(string(content)))}}
+}
+
+func fakeFile(srv *chantest.Server, data []byte) Options {
+	n := int64(len(data))
+	return Options{URL: srv.URL + "/backup", Pins: nil, Signer: nil, Source: bytes.NewReader(data), Size: n,
+		Meta: wire.Meta{Portal: wire.PortalDirect, File: "f", Source: wire.SourceFile, Size: &n, SHA256: hex.EncodeToString(sha256Sum(string(data)))}}
+}
+
+// fakeOpts is fakeFile with the pins of srv and a signer.
+func fakeOpts(t *testing.T, srv *chantest.Server, data []byte) Options {
+	o := fakeFile(srv, data)
+	o.Pins, o.Signer = mustPins(t, srv.Pin()), newSigner(t)
+	return o
+}
+
+// A COMPLETE that lists a missing part gets it again and completes with
+// the next sequence; the part counts once in the progress.
+func TestUploadCompleteMissing(t *testing.T) {
+	var mu sync.Mutex
+	var seqs []uint32
+	got := map[uint32]int{}
+	srv := fakeParts(t, func(n channel.Nonce, content []byte) chantest.Answer {
+		mu.Lock()
+		defer mu.Unlock()
+		seqs = append(seqs, n.Number)
+		if len(seqs) == 1 {
+			return chantest.Answer{Status: http.StatusConflict, Body: wire.PartsMissing{Missing: []uint32{1}}}
+		}
+		return receipt(content)
+	})
+	srv.Part = func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool {
+		mu.Lock()
+		got[n.Number]++
+		mu.Unlock()
+		return true
+	}
+	data := patterned(3 << 16)
+	o := fakeOpts(t, srv, data)
+	var progress bytes.Buffer
+	o.Progress = &progress
+	if _, err := Upload(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	if got[1] != 2 || got[0] != 1 || len(seqs) != 2 || seqs[0] != 0 || seqs[1] != 1 {
+		t.Fatalf("parts %v, completes %v", got, seqs)
+	}
+	if !strings.Contains(progress.String(), "192.0 KiB in ") {
+		t.Fatalf("progress %q", progress.String())
+	}
+}
+
+func TestUploadCompleteMissingRounds(t *testing.T) {
+	srv := fakeParts(t, func(channel.Nonce, []byte) chantest.Answer {
+		return chantest.Answer{Status: http.StatusConflict, Body: wire.PartsMissing{Missing: []uint32{1}}}
+	})
+	_, err := Upload(context.Background(), fakeOpts(t, srv, patterned(3<<16)))
+	if err == nil || err.Error() != "the server still misses 1 parts after 3 rounds" {
+		t.Fatalf("%v", err)
+	}
+	if srv.Count(channel.KindComplete) != 4 || srv.Count(channel.KindAbort) != 1 {
+		t.Fatalf("%d completes, %d aborts", srv.Count(channel.KindComplete), srv.Count(channel.KindAbort))
+	}
+}
+
+// A COMPLETE listing a part the upload does not have is a bad answer.
+func TestUploadCompleteMissingOutOfRange(t *testing.T) {
+	srv := fakeParts(t, func(channel.Nonce, []byte) chantest.Answer {
+		return chantest.Answer{Status: http.StatusConflict, Body: wire.PartsMissing{Missing: []uint32{3}}}
+	})
+	_, err := Upload(context.Background(), fakeOpts(t, srv, patterned(3<<16)))
+	if err == nil || !strings.Contains(err.Error(), "bad answer") {
+		t.Fatalf("%v", err)
+	}
+	if srv.Count(channel.KindComplete) != 1 || srv.Count(channel.KindAbort) != 1 {
+		t.Fatalf("%d completes, %d aborts", srv.Count(channel.KindComplete), srv.Count(channel.KindAbort))
+	}
+}
+
+// inflight tracks the parts lukd is answering at once, from part from on.
+type inflight struct {
+	mu        sync.Mutex
+	from      uint32
+	now, peak int
+}
+
+func (f *inflight) enter(n channel.Nonce) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.now++
+	if n.Number >= f.from {
+		f.peak = max(f.peak, f.now)
+	}
+}
+
+func (f *inflight) leave() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.now--
+}
+
+// A timeout of lukd on a part sends it again with one worker less.
+func TestUploadPartTimeoutSlower(t *testing.T) {
+	for _, timeout := range []bool{false, true} {
+		t.Run(fmt.Sprint("408=", timeout), func(t *testing.T) {
+			data := patterned(16 << 16)
+			srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+			f := &inflight{from: 8}
+			var timeouts atomic.Int32
+			srv.Part = func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool {
+				f.enter(n)
+				return true
+			}
+			srv.PartAnswer = func(n channel.Nonce, _ []byte) *chantest.Answer {
+				time.Sleep(50 * time.Millisecond)
+				f.leave()
+				if timeout && n.Number == 0 && n.Attempt == 0 {
+					timeouts.Add(1)
+					return &chantest.Answer{Status: http.StatusRequestTimeout, Body: wire.ErrorResponse{Error: "slow"}}
+				}
+				return nil
+			}
+			o := fakeOpts(t, srv, data)
+			o.Parallel = 4
+			if _, err := Upload(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			want := 4
+			if timeout {
+				want = 3
+			}
+			if f.peak != want || (timeout && timeouts.Load() != 1) {
+				t.Fatalf("peak %d parts at once, want %d; %d timeouts", f.peak, want, timeouts.Load())
+			}
+		})
+	}
+}
+
+// Another refusal of a part ends the upload: ABORT, and the refusal is
+// the error.
+func TestUploadPartRefused(t *testing.T) {
+	for _, code := range []int{http.StatusForbidden, http.StatusBadRequest} {
+		srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+		srv.PartAnswer = func(n channel.Nonce, _ []byte) *chantest.Answer {
+			if n.Number == 1 {
+				return &chantest.Answer{Status: code, Body: wire.ErrorResponse{Error: "no"}}
+			}
+			return nil
+		}
+		_, err := Upload(context.Background(), fakeOpts(t, srv, patterned(3<<16)))
+		var re *RejectedError
+		if !errors.As(err, &re) || re.Status != code || re.Message != "no" {
+			t.Fatalf("%d: %v", code, err)
+		}
+		if srv.Count(channel.KindAbort) != 1 || srv.Count(channel.KindComplete) != 0 {
+			t.Fatalf("%d: %d aborts, %d completes", code, srv.Count(channel.KindAbort), srv.Count(channel.KindComplete))
+		}
+	}
+}
+
+// A refusal that ended the upload wins over a lost session another part
+// saw meanwhile: the file is not sent again.
+func TestUploadRefusalWinsOverLostSession(t *testing.T) {
+	srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
+	srv.Part = func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool {
+		if n.Number == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"error":"unknown session"}`)
+			return false
+		}
+		return true
+	}
+	srv.PartAnswer = func(n channel.Nonce, _ []byte) *chantest.Answer {
+		if n.Number == 0 {
+			time.Sleep(200 * time.Millisecond)
+			return &chantest.Answer{Status: http.StatusTooManyRequests, Body: wire.ErrorResponse{Error: wire.ErrQuotaExceeded}}
+		}
+		return nil
+	}
+	o := fakeOpts(t, srv, patterned(3<<16))
+	o.Parallel = 2
+	_, err := Upload(context.Background(), o)
+	var re *RejectedError
+	if !errors.As(err, &re) || re.Status != http.StatusTooManyRequests {
+		t.Fatalf("%v", err)
+	}
+	if srv.Count(channel.KindOp) != 1 {
+		t.Fatalf("%d OPs", srv.Count(channel.KindOp))
 	}
 }

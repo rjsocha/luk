@@ -105,6 +105,17 @@ func (m *partsMeter) add(d int64) {
 	}
 }
 
+// restart counts from zero again, for an upload sent anew; the line holds
+// what it showed until the new count passes it.
+func (m *partsMeter) restart() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.n = 0
+}
+
 // finish replaces the live line with a summary of the bytes that arrived;
 // it prints nothing when no part went out.
 func (m *partsMeter) finish() {

@@ -404,7 +404,7 @@ func TestUploadStatusMustFitDryRun(t *testing.T) {
 func TestUploadReceiptHashMismatch(t *testing.T) {
 	srv := chantest.New(t)
 	srv.Op = func(channel.Request, []byte) *chantest.Answer { return nil }
-	srv.Complete = func(channel.Request, []byte) chantest.Answer {
+	srv.Complete = func(channel.Request, channel.Nonce, []byte) chantest.Answer {
 		return chantest.Answer{Status: 202, Body: wire.Receipt{ID: "a", Size: 5, SHA256: strings.Repeat("0", 64)}}
 	}
 	_, err := Upload(context.Background(), fileOpts(t, srv.URL+"/backup", mustPins(t, srv.Pin()), newSigner(t), []byte("hello")))

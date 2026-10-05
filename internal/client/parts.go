@@ -90,6 +90,7 @@ func uploadParts(ctx context.Context, o Options, op opFunc) (*partsResult, error
 		case !again:
 			return nil, err
 		}
+		meter.restart()
 	}
 }
 
@@ -116,7 +117,7 @@ func uploadOnce(ctx context.Context, o Options, u *url.URL, op opFunc, meter *pa
 		return nil, fmt.Errorf("bad parts offer: %s", Printable(string(resp.Body)))
 	}
 	r := &partsRun{c: c, o: &o, host: u.Host, partSize: offer.Parts.Size, meter: meter, pace: newPacer(o.BWLimit),
-		attempts: map[channel.Nonce]uint16{}}
+		attempts: map[channel.Nonce]uint16{}, done: map[uint32]bool{}}
 	r.limit = min(max(o.Parallel, 1), offer.Parts.Parallel)
 	if o.NoBody || (o.Source == nil && o.Body == nil) {
 		r.abort()
@@ -150,8 +151,10 @@ type partsRun struct {
 	// attempts is the next attempt per base nonce: a Channel never
 	// sends a nonce twice.
 	attempts map[channel.Nonce]uint16
-	// verified is the bytes of the parts lukd verified.
+	// verified is the bytes of the parts lukd verified, done those parts:
+	// a part sent again counts once.
 	verified int64
+	done     map[uint32]bool
 	// sum is the hash of a stream as it is read.
 	sum hash.Hash
 }
@@ -204,6 +207,8 @@ func (r *partsRun) run(ctx context.Context) (*partsResult, error) {
 		switch {
 		case json.Unmarshal(resp.Body, &m) != nil || len(m.Missing) == 0:
 			err = rejection(resp)
+		case !r.inRange(m.Missing):
+			err = fmt.Errorf("bad answer (409): missing parts %v beyond the upload", m.Missing)
 		case round == completeRounds:
 			err = fmt.Errorf("the server still misses %d parts after %d rounds", len(m.Missing), completeRounds)
 		case r.o.Source == nil:
@@ -222,6 +227,22 @@ func (r *partsRun) run(ctx context.Context) (*partsResult, error) {
 	return nil, r.fail(ctx, err)
 }
 
+// inRange reports whether every part of ns is one of a file, or one of a
+// stream read so far.
+func (r *partsRun) inRange(ns []uint32) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, n := range ns {
+		if r.o.Source != nil && int64(n)*r.partSize >= r.o.Size {
+			return false
+		}
+		if r.o.Source == nil && !r.done[n] {
+			return false
+		}
+	}
+	return true
+}
+
 // fail ends the upload with err: lukd drops it (ABORT) unless it lost it
 // already. A file that changed is reported as such whatever failed before
 // the COMPLETE, and a transfer error carries the bytes lukd verified.
@@ -232,11 +253,11 @@ func (r *partsRun) fail(ctx context.Context, err error) error {
 	if !errors.Is(err, errSessionGone) {
 		r.abort()
 	}
-	if errors.Is(r.unchanged(), errFileChanged) {
-		return errFileChanged
-	}
-	if ctx.Err() != nil {
+	switch {
+	case ctx.Err() != nil:
 		err = &TransferError{Reason: Interrupted, Host: r.host}
+	case errors.Is(r.unchanged(), errFileChanged):
+		return errFileChanged
 	}
 	var te *TransferError
 	if errors.As(err, &te) {
@@ -340,14 +361,28 @@ func (r *partsRun) feedStream(ctx context.Context, jobs chan<- partJob) error {
 }
 
 // send runs feed to its end and sends what it hands out with the
-// workers; the first error ends both.
+// workers. The first error ends both, except a lost session: the parts in
+// flight then finish, as one of them may end the upload with a more
+// telling answer (a refusal that ended it) that must win, so a file is
+// not sent again for nothing.
 func (r *partsRun) send(parent context.Context, feed func(context.Context, chan<- partJob) error) error {
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
+	// fctx ends the feed and the taking of parts: on any error.
+	fctx, halt := context.WithCancelCause(ctx)
+	defer halt(nil)
 	jobs := make(chan partJob)
 	var wg sync.WaitGroup
+	var emu sync.Mutex
+	var first error
 	fail := func(err error) {
-		if err != nil {
+		emu.Lock()
+		if first == nil || (errors.Is(first, errSessionGone) && !errors.Is(err, errSessionGone) && !errors.Is(err, context.Canceled)) {
+			first = err
+		}
+		emu.Unlock()
+		halt(err)
+		if !errors.Is(err, errSessionGone) {
 			cancel(err)
 		}
 	}
@@ -358,7 +393,7 @@ func (r *partsRun) send(parent context.Context, feed func(context.Context, chan<
 				var ok bool
 				select {
 				case j, ok = <-jobs:
-				case <-ctx.Done():
+				case <-fctx.Done():
 					return
 				}
 				if !ok {
@@ -375,22 +410,24 @@ func (r *partsRun) send(parent context.Context, feed func(context.Context, chan<
 	}
 	ferr := make(chan error, 1)
 	go func() {
-		err := feed(ctx, jobs)
+		err := feed(fctx, jobs)
 		if err != nil {
-			cancel(err)
+			fail(err)
 		} else {
 			close(jobs)
 		}
 		ferr <- err
 	}()
 	wg.Wait()
-	cause := context.Cause(ctx)
 	cancel(nil)
+	emu.Lock()
+	err := first
+	emu.Unlock()
 	switch {
 	case parent.Err() != nil:
 		return parent.Err()
-	case cause != nil:
-		return cause
+	case err != nil:
+		return err
 	}
 	// Without a failure the workers left as the feed closed the parts:
 	// it returned nil. A stream feed is never waited for otherwise, as
@@ -408,7 +445,7 @@ func (r *partsRun) sendPart(ctx context.Context, j partJob) error {
 		if err != nil {
 			return err
 		}
-		resp, err := r.attempt(ctx, j, n)
+		resp, sent, err := r.attempt(ctx, j, n)
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
@@ -423,8 +460,15 @@ func (r *partsRun) sendPart(ctx context.Context, j partJob) error {
 			last = err
 		case resp.Status == http.StatusOK:
 			r.mu.Lock()
-			r.verified += j.size
+			again := r.done[j.n]
+			if !again {
+				r.done[j.n] = true
+				r.verified += j.size
+			}
 			r.mu.Unlock()
+			if again {
+				r.meter.add(-sent)
+			}
 			return nil
 		case resp.Status == http.StatusTooManyRequests && message(errorText(resp.Body)) != wire.ErrQuotaExceeded:
 			if err := sleep(ctx, retryAfter(resp)); err != nil {
@@ -448,14 +492,14 @@ func (r *partsRun) sendPart(ctx context.Context, j partJob) error {
 
 // attempt sends part j once under n. The watchdog cuts an attempt that
 // waits for lukd longer than partIdle, while it takes the bytes or
-// before it answers; its bytes count as progress until it fails.
-func (r *partsRun) attempt(ctx context.Context, j partJob, n channel.Nonce) (*InnerResponse, error) {
+// before it answers; its bytes (sent) count as progress until it fails.
+func (r *partsRun) attempt(ctx context.Context, j partJob, n channel.Nonce) (resp *InnerResponse, sent int64, err error) {
 	actx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	wd := newWatchdog(partIdle, cancel)
 	cr := &meterReader{r: r.pace.reader(actx, j.open()), m: r.meter}
 	wd.arm()
-	resp, err := r.c.Send(actx, n, &sendIdle{cr, wd})
+	resp, err = r.c.Send(actx, n, &sendIdle{cr, wd})
 	stalled := wd.stop()
 	if err != nil || resp.Status != http.StatusOK {
 		r.meter.add(-cr.n)
@@ -470,7 +514,7 @@ func (r *partsRun) attempt(ctx context.Context, j partJob, n channel.Nonce) (*In
 		c.Reason = Closed
 		err = &c
 	}
-	return resp, err
+	return resp, cr.n, err
 }
 
 // complete sends the COMPLETE of round seq, again when its answer is

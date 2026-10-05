@@ -240,7 +240,7 @@ func newSendEnv(t *testing.T) *sendEnv {
 		}
 		return nil
 	}
-	srv.Complete = func(_ channel.Request, content []byte) chantest.Answer {
+	srv.Complete = func(_ channel.Request, _ channel.Nonce, content []byte) chantest.Answer {
 		e.body = content
 		sum := sha256.Sum256(e.body)
 		if e.bad {
