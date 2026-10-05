@@ -173,7 +173,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	wat.MarkFlagRequired("storage")
 	completeFlags(wat, map[string]cobra.CompletionFunc{"storage": completeStorage})
 
-	cmd.AddCommand(ls, rm, ret, wat)
+	cmd.AddCommand(ls, rm, ret, wat, storagePermanentCmd(cfgPath))
 	return cmd
 }
 

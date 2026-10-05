@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -94,7 +95,8 @@ func rootCmd() *cobra.Command {
 			"restart-only settings (root, listen, limits.conn, limits.header.timeout,\n" +
 			"auth.nonces) with the ones it runs with and fail on a change its reload\n" +
 			"would refuse. A local storage base holding anything but .db/ and file/ (an\n" +
-			"older layout) fails the check.\n" +
+			"older layout) fails the check; an orphaned permanent name in a readable\n" +
+			"base (see lukd storage permanent) is a warning.\n" +
 			"--no-running skips that comparison, before a restart. Run as root, it also\n" +
 			"checks that the service user (--user) can read every configuration input:\n" +
 			"config.yaml, config.d, ssh.d, the tls files, the eab key file and gpg.keys.\n" +
@@ -107,7 +109,7 @@ func rootCmd() *cobra.Command {
 				return err
 			}
 			errw := cmd.ErrOrStderr()
-			for _, w := range append(cfg.Warnings(), relayWarnings(cfg, runJobs)...) {
+			for _, w := range slices.Concat(cfg.Warnings(), relayWarnings(cfg, runJobs), permanentOrphans(cfg)) {
 				fmt.Fprintln(errw, "warning: "+w)
 			}
 			failed := false

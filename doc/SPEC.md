@@ -273,6 +273,7 @@ list of entries in the `allow` syntax (key names, `<ca>:<glob>`,
 | `secret.allow` | `--secret` uploads into the volatile storage (see Volatile secrets) |
 | `pretty.allow` | `--pretty-url` (see `endpoint.<n>.pretty`) |
 | `backup.hostname.any`, `backup.hostname.principal` | which `backup.hostname` (`--backup`) the signer may send (below) |
+| `permanent.names.<name>.allow` | `--permanent` of the names the entry covers (see Permanent names) |
 
 ```yaml
 endpoint:
@@ -359,7 +360,8 @@ it is true is not):
   "mutable": false,
   "access": "private",
   "dry_run": false,
-  "backup": {"hostname": "db1.example.net", "path": "/var/backups/dump.sql.gz", "mtime": "2026-09-30T03:58:10Z"}
+  "backup": {"hostname": "db1.example.net", "path": "/var/backups/dump.sql.gz", "mtime": "2026-09-30T03:58:10Z"},
+  "permanent": "revocation/hosts.krl"
 }
 ```
 
@@ -423,6 +425,9 @@ it is true is not):
   `/` or control character, not starting with `.`, at most 255 bytes).
   An endpoint with `backup.hostname` refuses a hostname the signer may
   not send with 403 before the body (see Capabilities).
+- `permanent` - set by `--permanent`; the upload is a new version of
+  that permanent name of the endpoint (see Permanent names). Omitted
+  for an ordinary upload.
 - `dry_run` - set by `--dry-run`; the server runs every check up to the
   body (verification, matching, the signed size against the limits, the
   storage names) and answers the debug JSON (200) with `"dry_run": true` in
@@ -487,7 +492,9 @@ Set per endpoint:
   private upload (`access`) gets the `luk://` URL of the protect expose
   of that storage instead (see Private files); a public upload to a
   storage whose `expose` has `auth.ssh` the `luk://` URL of that expose
-  (see Signed expose).
+  (see Signed expose). An upload of a permanent name gets the permanent
+  URL as `url`, with `permanent` (the name) and `version_url` (the URL
+  of the stored version) added (see Permanent names).
 
 Both answers carry `"deduplicated": true` when the server took the
 content from what it holds for the sender instead of reading the body
@@ -866,9 +873,11 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   the request and `owner_key` equal to the signer's, not expired; claimed
   (`once`) files and aliases are not listed. 200 `{"links": [{"url",
   "file", "size", "received", "expires", "once", "mutable", "portal",
-  "access", "updated"}, ...]}`, newest `received` first (`file`,
+  "access", "updated", "permanent", "permanent_url"}, ...]}`, newest `received` first (`file`,
   `expires`, `access` and `updated` omitted when empty, `links` is `[]`
-  for none). The `url` of a private file is its `luk://` URL, as the
+  for none). A version of a permanent name the endpoint allocates has
+  `permanent` (the name) and `permanent_url` (its permanent URL); both
+  are omitted for any other file. The `url` of a private file is its `luk://` URL, as the
   upload answered it (see Private files). At most 10000
   entries: the newest, with `"truncated": true`. Sidecars that cannot be
   read are left out and logged. Logged as `link list`.
@@ -880,6 +889,162 @@ Luk-Link`); a method that does not fit the action is 405
 with `Allow` set to the right one. Rejections are logged as `link
 rejected`, successes as `link removed`, `link ttl set` and `link replace
 accepted`.
+
+## Permanent names
+
+A permanent name is a fixed URL of a `respond: url` endpoint that always
+serves the newest version published under it, such as a key revocation
+list or the latest build. The names are allocated in the configuration
+only: there is no runtime reservation, and a name no entry covers can
+never be published.
+
+```yaml
+endpoint:
+  drop:
+    respond: url
+    storage: drop
+    permanent:
+      path: permanent                 # URL prefix under the expose of the storage (default permanent)
+      names:
+        revocation/hosts.krl:         # an exact name
+          allow: [robert.socha, kf, matt]
+          keep: 5                     # versions kept of this name (default 1)
+        builds/*:                     # a pattern
+          allow: ["ci:*"]
+          keep: 3
+          max: 50                     # distinct names the pattern may hold (default 100)
+```
+
+```
+luk send -e drop --file hosts.krl --permanent revocation/hosts.krl
+https://drop.example.com/d/permanent/revocation/hosts.krl
+```
+
+- Names: a permanent name is a clean relative name: not empty, at most
+  1024 bytes, not absolute, no control character, no empty, `.` or `..`
+  element, each element at most 255 bytes, and no element `current` or
+  starting with `current.` (lukd keeps the version of a name in such a
+  directory). A key of `names` is an exact name, or a pattern when it
+  holds `*`, `?`, `[` or `\`: `path.Match` on the whole name, so `*` and
+  `?` never match a `/` and `builds/*` covers `builds/x` but not
+  `builds/x/y`. A pattern has the element rules of a name.
+- Precedence: the exact entry of the name when there is one, else the
+  matching pattern with the most literal characters (every character but
+  `*`, `?`, a `[...]` class and the backslash of an escape, so `\*`
+  counts one), and among patterns with as many literal characters the
+  one that sorts first (byte order of the key). `lukd check` warns about
+  two patterns of one endpoint with as many literal characters that may
+  cover the same names (a guess: patterns of as many elements whose
+  elements are equal, a bare `*`, a literal one the other matches, or
+  two patterns of which one matches the shortest name of the other; a
+  class is assumed to meet anything).
+- Who: an upload of a permanent name needs the signer in the endpoint
+  `allow` and in the `allow` (identity list syntax) of the entry that
+  covers the name.
+- Upload: `luk send --permanent NAME` sends the client meta `permanent`.
+  Before the body the server checks, in order: the upload sets none of
+  `once`, a portal (`--secret`, `--portal`), `access` (`--private`),
+  `mutable` and `pretty_url` (422 `permanent excludes <options>`); an
+  entry grants the signer (else 422 `endpoint <n> does not offer
+  permanent names`, as on an endpoint without `permanent`); the name is
+  valid (422 naming the fault); the entry covering it grants the signer
+  (else 403 `permanent name "<name>" not allowed for this key`, the same
+  answer for a name no entry covers, so the answer tells nothing about
+  the other entries); a new name of a pattern that already holds `max`
+  names with a live version is 409 `limit of <max> permanent names of
+  this pattern reached`. The store checks again under the base lock (an
+  upload of a new name queued meanwhile, a reload): a version the
+  endpoint no longer allocates, or one over `max`, fails the store and
+  the entry goes to `failed/`. `luk send` refuses `--permanent` with
+  `--once`, `--secret`, `--portal`, `--private`, `--mutable`,
+  `--pretty-url` or `--links` above 1 itself (usage error).
+- Versions: each upload is an ordinary stored file of the respond
+  storage (its path template, a random name, its ttl, its URL); its
+  sidecar keeps the client `permanent` and `permanent_path` (the
+  `permanent.path` of the endpoint when it was accepted). The answer
+  (201) has `url` the permanent URL `<expose url><path>/<name>`,
+  `permanent` the name and `version_url` the URL of the stored version.
+  The version is a version of its name while its endpoint allocates the
+  name under that path; a version of another path is not.
+- Serving: `GET` and `HEAD` of the permanent URL on the expose of the
+  storage serve the newest live version of the name (newest `received`,
+  then the greater stored name; expired versions do not count) with its
+  own sidecar: its size, `ETag` (sha256), `Content-Type` and file name,
+  under the rules of any file (an expired version answers 404). A name
+  without a version, or one the configuration no longer allocates,
+  answers 404. Link actions take the version URL; the permanent URL is
+  no link (404 `link not found`).
+- `keep`: after a version is stored, the live versions of the name
+  beyond the newest `keep` are removed in the same store, as `lukd
+  storage rm` removes a file (sidecar, objects, catalog), logged as
+  `permanent version pruned`. Versions also expire by their ttl, and
+  any removal (expiry, `luk link --rm`, `lukd storage rm`, retention)
+  moves the name to the newest live version left, or removes it when none
+  is left. A version that expires leaves the name at the next
+  maintenance pass (every minute), when the name moves to the previous
+  version; a `luk link --ttl` of a version takes effect at once.
+- On disk: `<base>/.db/permanent/<path>/<name>/current/` holds `data`, a
+  hardlink of the current version, and `meta.json`, a copy of its
+  sidecar. A new version is prepared in full as
+  `<base>/.db/permanent/<path>/<name>/current.<random>/` (the hardlink,
+  the sidecar, both synced with the directory), then swapped with
+  `current` in one `renameat2(RENAME_EXCHANGE)` (a plain rename for the
+  first version), the directory synced, and the old version (now
+  `current.<random>`) removed. A name that goes is renamed away in one
+  step before its files are removed.
+- Atomic for readers: a reader opens `current` once (a directory
+  handle) and reads `meta.json` and opens `data` through it, so it gets
+  the old version or the new one whole, with its own size, sha256 and
+  type, never new content with an old sidecar, and never a missing name
+  in between. A reader that opened the old directory just before the
+  swap reads it whole while it exists, or finds it gone and opens
+  `current` again. A download in progress keeps streaming the version
+  it opened (the open file holds its inode).
+- Crash: a crash before the exchange leaves the old `current` and a
+  `current.<random>` beside it, after it the new `current` and the old
+  version beside it; either way `current` is one whole version. Every
+  publish, removal and repair of a permanent name runs under the base
+  lock of the storage, so permanent names of one storage change one at a
+  time (two uploads of one name apply one after the other, the newest
+  wins), and a `current.<random>` found under the lock is a crash
+  leftover by definition: it is removed before the next version is
+  prepared, and by the maintenance of the process role (which also
+  republishes a name whose `current` is not its newest live version).
+- `renameat2(RENAME_EXCHANGE)` is required: the receive and process
+  roles probe it on the base of every storage with permanent names at
+  start (two directories in `.db/tmp/`) and refuse to start without it
+  (`storage <n>: permanent names: the filesystem of the storage does not
+  support renameat2 RENAME_EXCHANGE, which permanent names need`). A
+  publish that meets a filesystem without it fails the store with that
+  error and leaves the published version as it was; there is no
+  fallback that readers could observe half done.
+- Namespaces: `permanent.path` names the namespace of an endpoint in
+  the storage, on disk and in the URL. Two endpoints storing into one
+  storage need different paths that do not nest (`lukd check`), so no
+  name of one can meet a name of the other. Changing `path` starts a new,
+  empty namespace (the permanent URLs change anyway): the versions keep
+  their `permanent_path` and are no versions of the new one.
+- Reserved: `<path>` and every stored name under `<path>/` of the
+  storage are refused for stored files (a path template rendering there
+  fails with 422 before the body, `reserved for the permanent names
+  under <path>/`) and for aliases; an expose nested in the expose of the
+  storage under `<path>/` (or containing it) is a configuration error.
+- Orphans: a directory of `.db/permanent/` that no endpoint of the
+  storage maps (its path is no `permanent.path` any more) or whose name
+  no entry of that endpoint covers any more is an orphan. It is not
+  served and lukd never removes it by itself (neither role); `lukd check`
+  warns about each (`storage <s>: permanent name <path>/<name> is an
+  orphan: no endpoint allocates it`), `lukd storage permanent` lists it
+  with `ORPHAN`, and `lukd storage permanent --prune-orphans` removes it.
+  Its versions stay ordinary stored files (ttl, retention, `lukd storage
+  rm`); adding the entry back publishes the name again.
+- Listing: the endpoint listing shows `permanent: true` when an entry
+  grants the signer, never the names or patterns. `luk link ls` lists
+  each version as a link with the flag `permanent`, and then the
+  permanent names those versions belong to (see Client).
+- Cost: a store, a removal and every maintenance pass of a storage with
+  permanent names read every sidecar of the base (O(files)), as aliases
+  do; the gate of an upload reads them once.
 
 ## Private files
 
@@ -1181,7 +1346,7 @@ Answers:
    "ttl": {"user": true, "min": "1h", "max": "7d", "default": "7d"},
    "secret_ttl": {"user": true, "max": "1d", "default": "1d"},
    "quota": {"mode": "enforce", "rate": "10G/1d", "burst": 53687091200, "tokens": 13421772800},
-   "backup_hostname": "principal"}
+   "backup_hostname": "principal", "permanent": true}
 ]}
 ```
 
@@ -1217,6 +1382,9 @@ Answers:
   `burst` and `tokens` (what the bucket holds now) in bytes; omitted when
   no class applies to the signer. It names no class and nothing of the
   other classes.
+- `permanent` - an entry of `permanent.names` grants the signer: its
+  `--permanent` uploads of the names that entry covers are accepted (see
+  Permanent names). The names and patterns are never listed.
 - `backup_hostname` - with `backup.hostname` on the endpoint, which
   `--backup` hostname the signer may send: `any`, `principal` (one of
   the principals of its certificate) or `none`; omitted without the
@@ -1445,6 +1613,9 @@ endpoint:
       remove: ["*"]
       ttl: ["*"]
       replace: [robert.socha]
+    permanent:                        # optional: fixed URLs of the newest version (see Permanent names)
+      names:
+        revocation/hosts.krl: {allow: [robert.socha], keep: 5}
     limits:
       body:
         size: 2G
@@ -1608,6 +1779,17 @@ and `ssh.d/ca/`):
   `https` public URL;
   `auth.ssh` and `auth.basic` exclude each other; `auth.ssh.allow`
   entries are those of an endpoint `allow`;
+- `permanent` requires `respond: url` and a local respond storage with
+  an `expose` without `auth.ssh`; `permanent.path` (default `permanent`)
+  is a permanent name without wildcards, does not overlap a nested
+  expose of that expose nor, with `catalog`, `catalog.json`, and differs
+  from the `permanent.path` of every other endpoint storing into the
+  same storage without nesting in it; `names` is not empty; every key
+  is a valid name or pattern; every entry has `allow` (an identity list,
+  checked as an endpoint `allow`), `keep` and `max` at least 1, and
+  `max` only on a pattern. Warnings: two patterns of one endpoint that
+  may tie, and orphaned permanent names in a readable base (see
+  Permanent names);
 - `pretty` requires `respond: url` and a respond storage `path` (and a
   secret storage `path`) that uses `.Random`; `pretty.bits` is 64 to 128;
 - `run` is an absolute path; `tee` only on a `run` step (`tee needs
@@ -2316,6 +2498,7 @@ pipeline:
   <base>/.db/catalog.json the catalog (catalog)
   <base>/.db/claimed/     once files taken out of file/ while they are downloaded
   <base>/.db/tmp/         temporary files: staged copies, files written before their rename
+  <base>/.db/permanent/   the permanent names: <path>/<name>/current/ (see Permanent names)
   ```
 
   Every stored name maps to `file/<name>` (with `shard`, under its hash
@@ -2548,6 +2731,23 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   `files`, each with `name`, `id`, `received`, `keep` (true or false) and
   `reasons`. Sidecars that cannot be read are reported after the plan
   (exit 1).
+- `lukd storage permanent --storage NAME [--json]`: the permanent
+  names of the storage (the directories of `.db/permanent/`), read only,
+  by key: aligned columns `PATH` and `NAME` (as the current version
+  records them; the key when it cannot be read), `NEWEST` (the
+  `received` of the current version), `VERSIONS` (live versions of the
+  name in the storage), `CURRENT` (the stored name of the current
+  version) and `ORPHAN` (`ORPHAN` for a name the configuration does not
+  allocate, see Permanent names, else `-`). `--json` prints an array of
+  `key`, `path`, `name`, `current`, `id`, `received`, `versions` and
+  `orphan`.
+  `--prune-orphans [--yes]` removes the directories of the orphans under
+  the base lock, each only while it is still an orphan, printing
+  `<path>/<name>: removed` per name; without `--yes` it lists them on
+  stderr with their versions and asks on a terminal (`[y/N]`), and
+  refuses when stdin is not one. The versions stay: they are ordinary
+  stored files that expire, are pruned by retention or removed with
+  `lukd storage rm`. Neither role ever removes an orphan.
 - `lukd storage watch --storage NAME [--json] [--suggest]`: the
   evaluation of the watch rules (see `watch`) now, read only. First the
   rules (`rule <i>: <globs>: <checks>`), then, per series in order of
@@ -2616,6 +2816,9 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   `storage.<n>.cleanup.age`, see Storage); an expose only serves the
   files until the janitor removes them. An expired file not removed yet
   answers 404.
+- `GET` and `HEAD` on `<url><path>/<name>`, `<path>` being the
+  `permanent.path` of an endpoint storing into the storage, serve the
+  current version of that permanent name (see Permanent names).
 - `GET` and `HEAD` on `<url><name>`: `<url>x` is `<base>/file/x`, so
   `<name>` may contain `/` (archive trees) and dot names (`.bashrc`) and
   never reaches `.db/`; an empty, `.` or `..` element is 404. `Range` is
@@ -3557,6 +3760,13 @@ luk send [flags]      (aliases: put, push)
       --links N             upload N times (default 1, at most 25) with
                             the same options, one link each (see below);
                             a usage error with --dry-run
+      --permanent NAME      publish as a new version of the permanent
+                            name NAME of the endpoint (meta permanent, see
+                            Permanent names); the URL printed is the
+                            permanent URL, --json adds version_url; a
+                            usage error with --once, --secret, --portal,
+                            --private, --mutable, --pretty-url, --links
+                            above 1, or an invalid NAME
       --progress            progress on stderr (only when it is a terminal)
       --bwlimit RATE        limit the upload rate, bytes per second with
                             K, M, G, T suffix (10M = 10 MiB/s); 0 or unset
@@ -3833,14 +4043,18 @@ the config`, exit 1), signed with the key chosen as for `send`. Output:
 aligned columns `URL` (the `luk://` URL of a private file), `SIZE`
 (binary units: `512 B`, `1.5 KiB`), `SENT` and `EXPIRES` (local time
 `2006-01-02 15:04`; `never` without an expiry), `FLAGS` (`once`, `mutable`,
-then `reveal` or `download`, then `private` or `any`, comma separated; `-`
-for none), newest first, under a header line; nothing at all for no
-links (exit 0). A truncated answer adds `luk: the server lists the newest
+then `reveal` or `download`, then `private` or `any`, then `permanent`,
+comma separated; `-` for none), newest first, under a header line;
+nothing at all for no links (exit 0). When versions of permanent names
+are among the links, a blank line and a second table follow, by name:
+`PERMANENT` (the name), `VERSIONS` (its versions listed), `NEWEST` (the
+sent time of the newest) and `URL` (the permanent URL). A truncated answer adds `luk: the server lists the newest
 <n> links only` on stderr. `--json` prints the server answer instead.
 Exit codes as for `send`.
 
 `luk send` output on stdout: for `respond: url` (201) the URL and a
-newline (the `luk://` URL of a `--private` upload); for `respond:
+newline (the `luk://` URL of a `--private` upload, the permanent URL of
+a `--permanent` upload); for `respond:
 accept` (202) nothing. `--json` prints the server
 answer (the `201`/`202` object) as JSON. `--dry-run` prints the debug JSON
 with or without `--json`. `-q` prints only the URL, and nothing for an
@@ -3934,7 +4148,7 @@ client ttl when the policy takes one: `(1h..7d)`, `(..7d)`, `(1h..)`,
 `(any)`; `-` without a policy) and `FLAGS` (the capabilities granted to
 the signing key, see Capabilities: `secret`, `pretty-url`, `private`,
 `any`, `mutable` for `link.replace`, `link-rm`, `link-ttl`, `link-ls`,
-and `backup-host:any`, `backup-host:principal` or `backup-host:none`
+`permanent`, and `backup-host:any`, `backup-host:principal` or `backup-host:none`
 when the endpoint restricts the `--backup` hostname (`backup_hostname`),
 comma separated; `-` for none), and when an endpoint has a
 quota for the signer `QUOTA` (`10G/1d 50G (12.5G left)`: the rate, the

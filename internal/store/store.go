@@ -42,6 +42,7 @@ import (
 	"text/template"
 	"time"
 
+	"luk/internal/config"
 	"luk/internal/wire"
 )
 
@@ -546,6 +547,10 @@ type Sidecar struct {
 	// AliasOf marks an alias: the stored path of its target, whose sidecar
 	// this is a copy of.
 	AliasOf string `json:"alias_of,omitempty"`
+	// PermanentPath is the permanent.path of the endpoint when the upload
+	// of a permanent name (client permanent) was accepted: the namespace
+	// the version belongs to.
+	PermanentPath string `json:"permanent_path,omitempty"`
 }
 
 // Local is a storage under Base; Conflict is version (default), reject or
@@ -578,6 +583,12 @@ type Local struct {
 	// storage, relative to it and ending with a slash (config
 	// Storage.Nested): no stored name lies under them.
 	Nested []string
+	// Permanent maps the endpoints with permanent names whose respond
+	// storage this is to their permanent block (config
+	// Storage.Permanents): no stored name lies under a permanent.path,
+	// and the uploads of the names they allocate are published as
+	// permanent names (see PermanentDir).
+	Permanent map[string]*config.Permanent
 
 	batch bool
 }
@@ -846,11 +857,13 @@ func (l Local) Put(src, rel string, sc Sidecar) (string, error) {
 	return res.Rel, err
 }
 
-// Stored is the outcome of Store: the final relative path, and whether it
-// is an existing version kept by Dedup, with nothing placed.
+// Stored is the outcome of Store: the final relative path, whether it
+// is an existing version kept by Dedup, with nothing placed, and the
+// versions of its permanent name the store removed beyond keep.
 type Stored struct {
-	Rel   string
-	Dedup bool
+	Rel    string
+	Dedup  bool
+	Pruned []PermanentVersion
 }
 
 // Store is Put reporting a deduplicated store.
@@ -964,12 +977,19 @@ func (l Local) StoreStaged(s *Staged, rel string, sc Sidecar) (Stored, error) {
 		}
 		oldAlias, _ = prev.alias()
 	}
+	if err := l.admitPermanent(r, sc); err != nil {
+		return Stored{}, err
+	}
 	if otmp, ofi, ok := l.fromObject(r, sc); ok {
 		defer r.Remove(otmp)
 		tmp, staged = otmp, ofi
 	}
 	stored, old, dedup, err := l.put(r, src, tmp, staged, rel, sc)
 	if err != nil || dedup {
+		if dedup && err == nil {
+			// A retry of a store whose publish failed finds its file.
+			err = l.syncPermanent(r, l.permanentKey(sc))
+		}
 		return Stored{Rel: stored, Dedup: dedup}, err
 	}
 	l.track(r, rel, stored, old, prev, perr == nil, sc)
@@ -979,8 +999,14 @@ func (l Local) StoreStaged(s *Staged, rel string, sc Sidecar) (Stored, error) {
 	if alias != "" && alias != stored {
 		err = errors.Join(err, l.pointAlias(r, alias, stored, sc))
 	}
+	key := l.permanentKey(sc)
+	if pk := l.permanentKey(prev); perr == nil && pk != "" && pk != key {
+		err = errors.Join(err, l.syncPermanent(r, pk))
+	}
+	err = errors.Join(err, l.syncPermanent(r, key))
+	pruned, perr2 := l.prunePermanent(r, h, sc)
 	l.rebuild(r)
-	return Stored{Rel: stored}, err
+	return Stored{Rel: stored, Pruned: pruned}, errors.Join(err, perr2)
 }
 
 func (l Local) versioning() bool { return l.Conflict != "replace" && l.Conflict != "reject" }
@@ -1465,6 +1491,9 @@ func readSidecar(r *os.Root, rel string) (Sidecar, error) {
 // base lock only when a mutation of the base ran meanwhile or the two do
 // not match.
 func (l Local) Open(rel string) (*os.File, Sidecar, error) {
+	if _, _, ok := l.PermanentPrefix(rel); ok {
+		return l.OpenPermanent(rel)
+	}
 	r, err := os.OpenRoot(l.Base)
 	if err != nil {
 		return nil, Sidecar{}, err
@@ -1545,6 +1574,14 @@ func (l Local) remove(rel string, keep func(Sidecar) bool) error {
 		return err
 	}
 	defer h.unlock()
+	err = l.removeHeld(r, h, rel, keep)
+	l.rebuild(r)
+	return err
+}
+
+// removeHeld is remove under the base lock h, without the catalog
+// rebuild.
+func (l Local) removeHeld(r *os.Root, h *held, rel string, keep func(Sidecar) bool) error {
 	p, err := l.path(r, rel)
 	if err != nil {
 		return err
@@ -1579,7 +1616,9 @@ func (l Local) remove(rel string, keep func(Sidecar) bool) error {
 	if a, _ := sc.alias(); scErr == nil && sc.AliasOf == "" && a != "" {
 		aerr = l.repoint(r, a, rel)
 	}
-	l.rebuild(r)
+	if scErr == nil {
+		aerr = errors.Join(aerr, l.syncPermanent(r, l.permanentKey(sc)))
+	}
 	return errors.Join(err, serr, aerr)
 }
 
@@ -1656,8 +1695,10 @@ func (l Local) Update(rel, id string, fn func(*Sidecar) error) (Sidecar, error) 
 	if err := writeSidecar(r, l.phys(rel), sc); err != nil {
 		return Sidecar{}, err
 	}
+	// A new expiry may make another version the newest live one.
+	err = l.syncPermanent(r, l.permanentKey(sc))
 	l.rebuild(r)
-	return sc, nil
+	return sc, err
 }
 
 // Replace puts a copy of src at the stored name rel in place of its

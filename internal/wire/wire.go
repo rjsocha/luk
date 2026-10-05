@@ -127,6 +127,61 @@ type Meta struct {
 	Access    string   `json:"access,omitempty"`
 	Backup    *Backup  `json:"backup,omitempty"`
 	DryRun    bool     `json:"dry_run,omitempty"`
+	// Permanent is the permanent name the upload is a new version of (see
+	// CheckPermanentName); empty for an ordinary upload.
+	Permanent string `json:"permanent,omitempty"`
+}
+
+// MaxPermanentName bounds the length of a permanent name.
+const MaxPermanentName = 1024
+
+// CheckPermanentName refuses a permanent name that is not a clean
+// relative name: empty, longer than MaxPermanentName, absolute, with a
+// control character, an empty, . or .. element, or an element longer
+// than MaxNameLen. An element current or starting with current. is
+// reserved: lukd keeps the version of a name in such a directory.
+func CheckPermanentName(name string) error {
+	switch {
+	case name == "":
+		return errors.New("empty permanent name")
+	case len(name) > MaxPermanentName:
+		return fmt.Errorf("permanent name longer than %d bytes", MaxPermanentName)
+	case HasControl(name):
+		return fmt.Errorf("permanent name %q holds a control character", name)
+	case strings.HasPrefix(name, "/"):
+		return fmt.Errorf("permanent name %q is absolute", name)
+	}
+	for _, e := range strings.Split(name, "/") {
+		switch {
+		case e == "":
+			return fmt.Errorf("permanent name %q has an empty element", name)
+		case e == "." || e == "..":
+			return fmt.Errorf("permanent name %q: element %q is not a name", name, e)
+		case len(e) > MaxNameLen:
+			return fmt.Errorf("permanent name %q: an element is longer than %d bytes", name, MaxNameLen)
+		case e == "current" || strings.HasPrefix(e, "current."):
+			return fmt.Errorf("permanent name %q: element %q is reserved", name, e)
+		}
+	}
+	return nil
+}
+
+// PermanentConflicts names the options a permanent upload must not set
+// (once, a portal, access, mutable, pretty_url); none when it sets none.
+func (m Meta) PermanentConflicts() []string {
+	var set []string
+	for _, f := range []struct {
+		name string
+		on   bool
+	}{
+		{"once", m.Once}, {"portal " + m.Portal, m.Portal != PortalDirect}, {"access " + m.Access, m.Access != ""},
+		{"mutable", m.Mutable}, {"pretty_url", m.PrettyURL},
+	} {
+		if f.on {
+			set = append(set, f.name)
+		}
+	}
+	return set
 }
 
 // Normalize lowercases, deduplicates and sorts the tags, then validates.
@@ -361,6 +416,7 @@ func (m Meta) ValidateReplace() error {
 		{"tags", len(m.Tags) > 0}, {"ttl", m.TTL != ""}, {"once", m.Once}, {"pretty_url", m.PrettyURL},
 		{"no_owner", m.NoOwner}, {"mutable", m.Mutable}, {"access", m.Access != ""},
 		{"backup", m.Backup != nil}, {"dry_run", m.DryRun}, {"portal", m.Portal != PortalDirect},
+		{"permanent", m.Permanent != ""},
 	} {
 		if f.on {
 			set = append(set, f.name)
@@ -572,6 +628,10 @@ type Receipt struct {
 	// Deduplicated marks an upload answered without its body: the server
 	// already held the content for the sender (see Created).
 	Deduplicated bool `json:"deduplicated,omitempty"`
+	// Permanent is the permanent name of a permanent upload, whose URL is
+	// the permanent URL; VersionURL is then the URL of the stored version.
+	Permanent  string `json:"permanent,omitempty"`
+	VersionURL string `json:"version_url,omitempty"`
 }
 
 // Created is the 201 answer; it always carries url and expires.
@@ -588,6 +648,10 @@ type Created struct {
 	Size         int64  `json:"size"`
 	SHA256       string `json:"sha256"`
 	Deduplicated bool   `json:"deduplicated,omitempty"`
+	// Permanent and VersionURL are those of a permanent upload (see
+	// Receipt).
+	Permanent  string `json:"permanent,omitempty"`
+	VersionURL string `json:"version_url,omitempty"`
 }
 
 // Response is the debug answer of a dry run. Schedule lists the matched
@@ -659,6 +723,10 @@ type LinkEntry struct {
 	Portal   string `json:"portal"`
 	Access   string `json:"access,omitempty"`
 	Updated  string `json:"updated,omitempty"`
+	// Permanent is the permanent name the file is a version of, and
+	// PermanentURL its permanent URL; empty for any other file.
+	Permanent    string `json:"permanent,omitempty"`
+	PermanentURL string `json:"permanent_url,omitempty"`
 }
 
 type ErrorResponse struct {
@@ -682,10 +750,12 @@ type EndpointInfo struct {
 	// Secret: reveal uploads (--secret) go to a volatile storage.
 	Secret bool `json:"secret"`
 	// Pretty: the endpoint offers pretty_url.
-	Pretty  bool         `json:"pretty"`
-	Private PrivateModes `json:"private"`
-	Link    LinkActions  `json:"link"`
-	TTL     *TTLPolicy   `json:"ttl,omitempty"`
+	Pretty bool `json:"pretty"`
+	// Permanent: an entry of permanent.names grants the signer.
+	Permanent bool         `json:"permanent"`
+	Private   PrivateModes `json:"private"`
+	Link      LinkActions  `json:"link"`
+	TTL       *TTLPolicy   `json:"ttl,omitempty"`
 	// SecretTTL is the policy of the secret storage when it differs from TTL.
 	SecretTTL *TTLPolicy `json:"secret_ttl,omitempty"`
 	// Quota is the upload quota of the signer on the endpoint; absent

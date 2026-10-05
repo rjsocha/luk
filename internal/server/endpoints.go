@@ -76,10 +76,11 @@ func endpointList(cfg *config.Config, l *listener, host string, id *wire.Identit
 		}
 		info := wire.EndpointInfo{
 			Name: ep.Name, Path: ep.Endpoint, URL: scheme + "://" + host + ep.Endpoint,
-			Respond: ep.Respond,
-			Secret:  ep.Secret != nil && auth.Allowed(id, ep.Secret.Allow),
-			Pretty:  ep.Pretty != nil && auth.Allowed(id, ep.Pretty.Allow),
-			Private: wire.PrivateModes{Owner: auth.Allowed(id, ep.Private.Owner), Any: auth.Allowed(id, ep.Private.Any)},
+			Respond:   ep.Respond,
+			Secret:    ep.Secret != nil && auth.Allowed(id, ep.Secret.Allow),
+			Pretty:    ep.Pretty != nil && auth.Allowed(id, ep.Pretty.Allow),
+			Permanent: permanentOffered(id, ep),
+			Private:   wire.PrivateModes{Owner: auth.Allowed(id, ep.Private.Owner), Any: auth.Allowed(id, ep.Private.Any)},
 			Link: wire.LinkActions{Remove: auth.Allowed(id, ep.Link.Remove), TTL: auth.Allowed(id, ep.Link.TTL),
 				Replace: auth.Allowed(id, ep.Link.Replace), List: auth.Allowed(id, ep.Link.List)},
 		}
@@ -115,6 +116,20 @@ func backupHostMode(id *wire.Identity, h *config.BackupHostname) string {
 		return wire.BackupHostPrincipal
 	}
 	return wire.BackupHostNone
+}
+
+// permanentOffered reports whether an entry of permanent.names of ep
+// grants id.
+func permanentOffered(id *wire.Identity, ep *config.Endpoint) bool {
+	if ep.Permanent == nil || ep.Respond != "url" {
+		return false
+	}
+	for _, e := range ep.Permanent.Names {
+		if e != nil && auth.Allowed(id, e.Allow) {
+			return true
+		}
+	}
+	return false
 }
 
 // backupHostAllowed reports whether id may send the backup hostname to

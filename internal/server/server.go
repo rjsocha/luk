@@ -320,6 +320,9 @@ type upload struct {
 	now     time.Time
 	vars    store.Vars
 	url     string
+	// version is the URL of the stored version of a permanent upload,
+	// whose url is the permanent URL; empty otherwise.
+	version string
 	// reveal marks a body capped at expose.MaxReveal.
 	reveal bool
 	// replace is the link whose content the body replaces; nil for an
@@ -377,6 +380,11 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 	if b := meta.Backup; b != nil && b.Hostname != "" && !backupHostAllowed(id, ep, b.Hostname) {
 		return 0, nil, fail(http.StatusForbidden, "backup hostname %q not allowed for this key", b.Hostname)
 	}
+	if meta.Permanent != "" {
+		if err := permanentGate(sn.cfg, ep, id, meta); err != nil {
+			return 0, nil, err
+		}
+	}
 	// A secret upload goes to the secret storage alone, whatever the tags.
 	secret := ""
 	pipes := []string{pipeline.SecretPipeline}
@@ -432,6 +440,43 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 		return s.accept(u, e, *meta.Size, meta.SHA256, true)
 	}
 	return s.receive(w, r, u, max)
+}
+
+// permanentGate checks an upload of a permanent name before the body: no
+// option it excludes, an endpoint offering permanent names to the signer,
+// a valid name that an entry granting the signer covers, and room for it
+// (see store.Local.AdmitPermanent). The answers name nothing of the other
+// entries.
+func permanentGate(cfg *config.Config, ep *config.Endpoint, id *wire.Identity, meta wire.Meta) error {
+	if c := meta.PermanentConflicts(); len(c) > 0 {
+		return fail(http.StatusUnprocessableEntity, "permanent excludes %s", strings.Join(c, ", "))
+	}
+	if !permanentOffered(id, ep) {
+		return fail(http.StatusUnprocessableEntity, "endpoint %s does not offer permanent names", ep.Name)
+	}
+	if err := wire.CheckPermanentName(meta.Permanent); err != nil {
+		return fail(http.StatusUnprocessableEntity, "%v", err)
+	}
+	if _, e, ok := ep.Permanent.Entry(meta.Permanent); !ok || !auth.Allowed(id, e.Allow) {
+		return fail(http.StatusForbidden, "permanent name %q not allowed for this key", meta.Permanent)
+	}
+	st := cfg.Storage[ep.Storage]
+	if st == nil || st.Type != "local" {
+		return fail(http.StatusUnprocessableEntity, "storage %s of endpoint %s is not a local storage", ep.Storage, ep.Name)
+	}
+	l := store.FromConfig(st)
+	live, err := l.PermanentNames(ep.Name)
+	if err != nil {
+		return fmt.Errorf("storage %s: permanent names: %w", ep.Storage, err)
+	}
+	var pr *store.PermanentRefused
+	sc := store.Sidecar{Endpoint: ep.Name, Client: meta, PermanentPath: ep.Permanent.Path}
+	if err := l.AdmitPermanent(sc, live); errors.As(err, &pr) {
+		return fail(http.StatusConflict, "%s", pr.Msg)
+	} else if err != nil {
+		return err
+	}
+	return nil
 }
 
 // dedup makes the queue entry of an upload from the content the sender
@@ -681,6 +726,13 @@ func (s *Server) prepare(u *upload) error {
 		if u.url, err = s.downloadURL(sn.cfg, u.storage(), u.vars, meta.Access); err != nil {
 			return fail(http.StatusUnprocessableEntity, "%v", err)
 		}
+		if meta.Permanent != "" {
+			pu, ok := s.fileURL(sn.cfg, u.storage(), ep.Permanent.Path+"/"+meta.Permanent, "")
+			if !ok {
+				return fail(http.StatusUnprocessableEntity, "storage %s is not exposed", u.storage())
+			}
+			u.version, u.url = u.url, pu
+		}
 	}
 	return checkPaths(sn.cfg, u.pipes, u.secret, u.vars, skip)
 }
@@ -867,6 +919,15 @@ func (u *upload) claimLog() []any {
 	return []any{"claimed", u.pipes[0], "skipped", strings.Join(u.skipped, ",")}
 }
 
+// permanentLog is the log attributes of a permanent upload: its name and
+// the URL of the stored version; none otherwise.
+func (u *upload) permanentLog() []any {
+	if u.version == "" {
+		return nil
+	}
+	return []any{"permanent", u.meta.Permanent, "version", u.version}
+}
+
 // schedule is the dry run view of the matched pipelines of u: those
 // without a group first, then the groups by name, each in ascending order.
 func schedule(u *upload) []wire.Scheduled {
@@ -944,6 +1005,9 @@ func (s *Server) accept(u *upload, e queue.Entry, n int64, sum string, dedup boo
 	if u.ep.Respond == "url" && u.replace == nil {
 		sc.Expires = exp[u.storage()]
 	}
+	if u.version != "" {
+		sc.PermanentPath = u.ep.Permanent.Path
+	}
 	job := pipeline.Job{Entry: e, Pipelines: u.pipes, Stages: pipeline.Stages(u.sn.cfg, u.pipes), Vars: u.vars, Sidecar: sc, Expires: exp, Replace: u.replace, Secret: u.secret}
 	if err := s.queue.Commit(e, job.Meta()); errors.Is(err, queue.ErrNotSynced) {
 		s.log.Warn("upload committed", "id", e.ID, "error", err)
@@ -972,10 +1036,13 @@ func (s *Server) accept(u *upload, e queue.Entry, n int64, sum string, dedup boo
 		what = "upload deduplicated"
 	}
 	s.log.Info(what, append([]any{"id", e.ID, "sender", u.id.Name, "endpoint", u.ep.Name,
-		"tags", strings.Join(u.meta.Tags, ","), "pipelines", strings.Join(u.pipes, ","), "size", n, "sha256", logSum, "url", u.url}, u.claimLog()...)...)
+		"tags", strings.Join(u.meta.Tags, ","), "pipelines", strings.Join(u.pipes, ","), "size", n, "sha256", logSum, "url", u.url}, append(u.claimLog(), u.permanentLog()...)...)...)
 	if u.ep.Respond == "url" {
 		lt := lts[u.storage()]
 		c := &wire.Created{ID: e.ID, URL: u.url, Expires: sc.Expires, Size: n, SHA256: sum, Deduplicated: dedup}
+		if u.version != "" {
+			c.Permanent, c.VersionURL = u.meta.Permanent, u.version
+		}
 		c.TTL, c.TTLNote = lt.ttl()
 		c.TTLMin, c.TTLMax = lt.bounds()
 		return http.StatusCreated, c, nil

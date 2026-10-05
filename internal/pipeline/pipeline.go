@@ -731,6 +731,10 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, *Failure) {
 				}
 				for _, f := range set {
 					res, err := d.store(j, cfg, name, sn, f)
+					for _, v := range res.Pruned {
+						d.log.Info("permanent version pruned", "id", j.Entry.ID, "pipeline", name, "storage", sn,
+							"permanent", j.Sidecar.Client.Permanent, "name", v.Name, "version", v.ID)
+					}
 					if err != nil {
 						return i + 1, fmt.Errorf("store %s: %w", sn, err)
 					}

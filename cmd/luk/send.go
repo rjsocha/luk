@@ -27,6 +27,7 @@ import (
 func newSendCmd(out io.Writer) *cobra.Command {
 	var (
 		endpoint, key, ttl, name, ctype, file, bwlimit string
+		permanent                                      string
 		tags                                           []string
 		backup, once, portal, secret, quiet, stdin     bool
 		dryRun, progress, asJSON, prettyURL, noOwner   bool
@@ -68,6 +69,11 @@ so the server can answer them without the content, and resend a --file when
 it asks for it; a stream (--stdin, a pipe, a prompted --secret) cannot be sent
 twice, which ends the run with the links made so far. --progress reports on stderr when it is a terminal; --bwlimit
 caps the upload rate in bytes per second (K, M, G, T suffixes; 0 = unlimited).
+--permanent NAME publishes the file as a new version of the permanent name NAME
+of the endpoint (permanent.names in lukd); the URL printed is the permanent URL,
+which always serves the newest version, and --json adds the URL of the stored
+version (version_url). It takes no --once, --secret, --portal, --private,
+--mutable, --pretty-url or --links above 1.
 Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 4 hash mismatch, 130 interrupted.`,
 		Example: `  luk send --file report.pdf
@@ -87,7 +93,8 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
   luk send --file notes.txt --private --any
   luk send --file report.pdf --json
   luk send --file report.pdf --links 3 --once
-  luk send --file report.pdf --dry-run`,
+  luk send --file report.pdf --dry-run
+  luk send -e drop --file hosts.krl --permanent revocation/hosts.krl`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hasFile := file != "" || cmd.Flags().Changed("file")
@@ -108,6 +115,11 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 				return usageError{fmt.Errorf("--links is at most %d", maxLinks)}
 			case dryRun && cmd.Flags().Changed("links"):
 				return usageError{errors.New("--links takes no --dry-run")}
+			}
+			if cmd.Flags().Changed("permanent") {
+				if err := permanentFlags(permanent, links, once, secret, portal, private, mutable, prettyURL); err != nil {
+					return err
+				}
 			}
 			prompt := secret && !hasFile && !stdin
 			if asJSON && quiet {
@@ -139,7 +151,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 			case portal:
 				portalMode = wire.PortalDownload
 			}
-			meta := wire.Meta{Tags: tags, TTL: ttl, Once: once, Portal: portalMode, File: name, Type: ctype, Source: wire.SourceStdin, PrettyURL: prettyURL, NoOwner: noOwner, Mutable: mutable, DryRun: dryRun}
+			meta := wire.Meta{Tags: tags, TTL: ttl, Once: once, Portal: portalMode, File: name, Type: ctype, Source: wire.SourceStdin, PrettyURL: prettyURL, NoOwner: noOwner, Mutable: mutable, DryRun: dryRun, Permanent: permanent}
 			switch {
 			case anyID:
 				meta.Access = wire.AccessAny
@@ -243,11 +255,36 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 	f.BoolVar(&asJSON, "json", false, "print the server answer as JSON")
 	f.BoolVarP(&quiet, "quiet", "q", false, "print only the URL, nothing when the endpoint answers without one (the upload id is in --json)")
 	f.IntVar(&links, "links", 1, "upload N times (1 to 25) with the same options, one link each")
+	f.StringVar(&permanent, "permanent", "", "publish as a new version of this permanent name of the endpoint")
 	completeFlags(cmd, map[string]cobra.CompletionFunc{
 		"file": completeFiles, "endpoint": completeEndpoint, "key": completeKey, "tag": completeNone,
-		"ttl": completeTTL, "name": completeNone, "type": completeNone, "bwlimit": completeNone, "links": completeNone,
+		"ttl": completeTTL, "name": completeNone, "permanent": completeNone, "type": completeNone, "bwlimit": completeNone, "links": completeNone,
 	})
 	return cmd
+}
+
+// permanentFlags refuses a --permanent name that is not a clean relative
+// name, and --permanent with an option it excludes.
+func permanentFlags(name string, links int, once, secret, portal, private, mutable, prettyURL bool) error {
+	if err := wire.CheckPermanentName(name); err != nil {
+		return usageError{fmt.Errorf("--permanent: %w", err)}
+	}
+	var with []string
+	for _, f := range []struct {
+		flag string
+		on   bool
+	}{
+		{"--once", once}, {"--secret", secret}, {"--portal", portal}, {"--private", private},
+		{"--mutable", mutable}, {"--pretty-url", prettyURL}, {"--links above 1", links > 1},
+	} {
+		if f.on {
+			with = append(with, f.flag)
+		}
+	}
+	if len(with) > 0 {
+		return usageError{fmt.Errorf("--permanent takes no %s", strings.Join(with, ", "))}
+	}
+	return nil
 }
 
 // again prepares opts for one more upload of the same content: the meta

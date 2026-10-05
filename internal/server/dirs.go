@@ -32,7 +32,7 @@ func prepareDirs(cfg *config.Config, tls bool) error {
 	}
 	for _, name := range sortedKeys(cfg.Storage) {
 		if s := cfg.Storage[name]; s.Type == "local" {
-			errs = append(errs, prepareStorage(name, s.Base))
+			errs = append(errs, prepareStorage(name, s))
 		}
 	}
 	acme := map[string]bool{}
@@ -59,12 +59,21 @@ func prepareWritable(dir string) error { return prepareWritableMode(dir, 0o750) 
 
 // prepareStorage refuses a local storage base holding anything but the
 // two trees of a base (see store.CheckLayout), then creates them and
-// checks that the process can write to them.
-func prepareStorage(name, base string) error {
+// checks that the process can write to them. A storage with permanent
+// names needs renameat2 RENAME_EXCHANGE on its filesystem (see
+// store.ProbeExchange).
+func prepareStorage(name string, st *config.Storage) error {
+	base := st.Base
 	if err := store.CheckLayout(base); err != nil {
 		return fmt.Errorf("storage %s: %w", name, err)
 	}
-	return errors.Join(prepareWritable(filepath.Join(base, store.DBDir)), prepareWritable(filepath.Join(base, store.DataDir)))
+	err := errors.Join(prepareWritable(filepath.Join(base, store.DBDir)), prepareWritable(filepath.Join(base, store.DataDir)))
+	if err == nil && len(st.Permanents()) > 0 {
+		if perr := store.ProbeExchange(base); perr != nil {
+			err = fmt.Errorf("storage %s: permanent names: %w", name, perr)
+		}
+	}
+	return err
 }
 
 // prepareWritableMode is prepareWritable creating missing directories with

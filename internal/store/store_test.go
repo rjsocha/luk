@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1101,10 +1102,10 @@ func TestPutDedup(t *testing.T) {
 	}
 
 	l := Local{Base: t.TempDir(), Conflict: "version", Dedup: true}
-	if res := store(l, "x", "same", "1"); res != (Stored{Rel: "x"}) {
+	if res := store(l, "x", "same", "1"); !reflect.DeepEqual(res, Stored{Rel: "x"}) {
 		t.Fatalf("first %+v", res)
 	}
-	if res := store(l, "x", "same", "2"); res != (Stored{Rel: "x", Dedup: true}) {
+	if res := store(l, "x", "same", "2"); !reflect.DeepEqual(res, Stored{Rel: "x", Dedup: true}) {
 		t.Fatalf("second %+v", res)
 	}
 	if got := names(l); strings.Join(got, ",") != "x" {
@@ -1205,14 +1206,14 @@ func TestVersionRotation(t *testing.T) {
 	for _, shard := range []int{0, 2} {
 		t.Run(fmt.Sprint("shard", shard), func(t *testing.T) {
 			l := Local{Base: t.TempDir(), Conflict: "version", Shard: shard}
-			if res := mustPutAt(t, l, "d/abc", "v1", 1000); res != (Stored{Rel: "d/abc"}) {
+			if res := mustPutAt(t, l, "d/abc", "v1", 1000); !reflect.DeepEqual(res, Stored{Rel: "d/abc"}) {
 				t.Fatalf("v1 %+v", res)
 			}
 			before, err := os.ReadFile(l.SidecarPath("d/abc"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if res := mustPutAt(t, l, "d/abc", "v2", 2000); res != (Stored{Rel: "d/abc"}) {
+			if res := mustPutAt(t, l, "d/abc", "v2", 2000); !reflect.DeepEqual(res, Stored{Rel: "d/abc"}) {
 				t.Fatalf("v2 %+v", res)
 			}
 			checkBody(t, l, "d/abc", "v2")
@@ -1266,14 +1267,14 @@ func TestVersionRotationMtimeFallback(t *testing.T) {
 func TestVersionRotationDedup(t *testing.T) {
 	l := Local{Base: t.TempDir(), Dedup: true}
 	mustPutAt(t, l, "abc", "A", 1000)
-	if res := mustPutAt(t, l, "abc", "A", 2000); res != (Stored{Rel: "abc", Dedup: true}) {
+	if res := mustPutAt(t, l, "abc", "A", 2000); !reflect.DeepEqual(res, Stored{Rel: "abc", Dedup: true}) {
 		t.Fatalf("identical %+v", res)
 	}
 	if got := storedNames(t, l); fmt.Sprint(got) != "[abc]" {
 		t.Fatalf("names %v", got)
 	}
 	mustPutAt(t, l, "abc", "B", 3000)
-	if res := mustPutAt(t, l, "abc", "A", 4000); res != (Stored{Rel: "abc"}) {
+	if res := mustPutAt(t, l, "abc", "A", 4000); !reflect.DeepEqual(res, Stored{Rel: "abc"}) {
 		t.Fatalf("A after B %+v", res)
 	}
 	checkBody(t, l, "abc", "A")
@@ -1318,7 +1319,7 @@ func TestVersionRotationCrash(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if res := mustPutAt(t, l, "abc", "v3", 3000); res != (Stored{Rel: "abc"}) {
+				if res := mustPutAt(t, l, "abc", "v3", 3000); !reflect.DeepEqual(res, Stored{Rel: "abc"}) {
 					t.Fatalf("retry %+v", res)
 				}
 				checkBody(t, l, "abc", "v3")
@@ -1327,7 +1328,7 @@ func TestVersionRotationCrash(t *testing.T) {
 				if got := storedNames(t, l); fmt.Sprint(got) != "[abc abc.1000 abc.2000]" {
 					t.Fatalf("names %v", got)
 				}
-				if res := mustPutAt(t, l, "abc", "v3", 3000); res != (Stored{Rel: "abc"}) {
+				if res := mustPutAt(t, l, "abc", "v3", 3000); !reflect.DeepEqual(res, Stored{Rel: "abc"}) {
 					t.Fatalf("second retry %+v", res)
 				}
 				if got := storedNames(t, l); len(got) != 3 {

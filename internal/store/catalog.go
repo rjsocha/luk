@@ -37,7 +37,7 @@ var hookAliasSidecar = func() {}
 // FromConfig is the Local of a local storage.
 func FromConfig(st *config.Storage) Local {
 	return Local{Base: st.Base, Conflict: st.Conflict, Catalog: st.Catalog, Shard: st.Shard, Dedup: st.Dedup == nil || *st.Dedup,
-		Hardlink: st.Hardlink == nil || *st.Hardlink, MaxLinks: st.MaxLinks(), Nested: st.Nested()}
+		Hardlink: st.Hardlink == nil || *st.Hardlink, MaxLinks: st.MaxLinks(), Nested: st.Nested(), Permanent: st.Permanents()}
 }
 
 // Batch returns l with catalog rebuilds deferred: its changes only mark
@@ -53,6 +53,9 @@ func (l Local) reserved(rel string) error {
 	}
 	if p, ok := l.Nests(rel); ok {
 		return fmt.Errorf("%q: reserved for the nested expose under %s: %w", rel, p, ErrInvalid)
+	}
+	if ep, _, ok := l.PermanentPrefix(rel); ok {
+		return fmt.Errorf("%q: reserved for the permanent names under %s/: %w", rel, l.Permanent[ep].Path, ErrInvalid)
 	}
 	return nil
 }
@@ -269,6 +272,13 @@ func (l Local) reconcileAliases(r *os.Root, dry bool) (changed, any bool, err er
 	return changed, len(best) > 0 || len(present) > 0, errors.Join(errs...)
 }
 
+// reconcileLinks is reconcileAliases and reconcilePermanent together.
+func (l Local) reconcileLinks(r *os.Root, dry bool) (changed, any bool, err error) {
+	ac, aa, aerr := l.reconcileAliases(r, dry)
+	pc, pa, perr := l.reconcilePermanent(r, dry)
+	return ac || pc, aa || pa, errors.Join(aerr, perr)
+}
+
 // linkAlias places alias as a hardlink of target with a copy of its
 // sidecar marked alias_of. The sidecar goes first: after a crash in
 // between the alias is still known as one and the next update fixes it.
@@ -421,13 +431,14 @@ func (l Local) writeCatalog(r *os.Root, gen int64) (bad, err error) {
 	return bad, syncDir(r, DBDir)
 }
 
-// Reconcile repairs the aliases of the base and rebuilds the catalog when
-// it is stale: after a failed or deferred rebuild, a repair, or the first
-// call in this process. The janitor calls it every pass. The check runs
-// without the lock, which is taken only to repair; a base without catalog
-// and without aliases is skipped after the first call.
+// Reconcile repairs the aliases and the permanent names of the base and
+// rebuilds the catalog when it is stale: after a failed or deferred
+// rebuild, a repair, or the first call in this process. The janitor calls
+// it every pass. The check runs without the lock, which is taken only to
+// repair; a base without catalog, aliases and permanent names is skipped
+// after the first call.
 func (l Local) Reconcile() error {
-	if has, known := aliasBases.Load(l.key()); !l.Catalog && known && !has.(bool) {
+	if has, known := aliasBases.Load(l.key()); !l.Catalog && len(l.Permanent) == 0 && known && !has.(bool) {
 		return nil
 	}
 	r, err := os.OpenRoot(l.Base)
@@ -438,7 +449,7 @@ func (l Local) Reconcile() error {
 		return err
 	}
 	defer r.Close()
-	needed, any, derr := l.reconcileAliases(r, true)
+	needed, any, derr := l.reconcileLinks(r, true)
 	if derr != nil {
 		if prev, ok := unreadable.Load(l.key()); !ok || prev.(string) != derr.Error() {
 			needed = true
@@ -459,7 +470,7 @@ func (l Local) Reconcile() error {
 	defer h.unlock()
 	stale := l.Catalog && !l.fresh(r, h.prev)
 	if !stale {
-		needed, _, derr = l.reconcileAliases(r, true)
+		needed, _, derr = l.reconcileLinks(r, true)
 		if !needed {
 			if derr != nil {
 				unreadable.Store(l.key(), derr.Error())
@@ -472,7 +483,7 @@ func (l Local) Reconcile() error {
 	if err := h.bump(); err != nil {
 		return err
 	}
-	changed, _, err := l.reconcileAliases(r, false)
+	changed, _, err := l.reconcileLinks(r, false)
 	if err != nil {
 		unreadable.Store(l.key(), err.Error())
 	} else {

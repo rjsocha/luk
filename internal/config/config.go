@@ -343,6 +343,122 @@ type Endpoint struct {
 	// Quota, when set, bounds how fast each identity uploads to the
 	// endpoint (see Quota).
 	Quota *Quota `yaml:"quota"`
+	// Permanent, when set, allocates the permanent names of the endpoint
+	// (respond url only): each upload with one is a new version of it,
+	// served at <expose url><path>/<name>.
+	Permanent *Permanent `yaml:"permanent"`
+}
+
+// Permanent is the permanent names of an endpoint: Path is the prefix of
+// their names in the respond storage (DefaultPermanentPath), Names the
+// exact names and patterns that may be published, each with who may
+// publish it and how many versions it keeps.
+type Permanent struct {
+	Path  string                    `yaml:"path"`
+	Names map[string]*PermanentName `yaml:"names"`
+}
+
+func (p *Permanent) UnmarshalYAML(n *yaml.Node) error {
+	type raw Permanent
+	return decodeCapabilities(n, "permanent", []string{"path", "names"}, nil, (*raw)(p))
+}
+
+// PermanentName is an entry of permanent.names: who may publish the
+// names it covers (Allow), the versions kept per name (Keep, default
+// DefaultPermanentKeep) and, for a pattern, the most distinct names it
+// holds (Max, default DefaultPermanentMax).
+type PermanentName struct {
+	Allow Identities `yaml:"allow"`
+	Keep  *int       `yaml:"keep"`
+	Max   *int       `yaml:"max"`
+}
+
+func (e *PermanentName) UnmarshalYAML(n *yaml.Node) error {
+	type raw PermanentName
+	return decodeCapabilities(n, "permanent.names entry", []string{"allow", "keep", "max"}, []string{"allow"}, (*raw)(e))
+}
+
+const (
+	// DefaultPermanentPath is permanent.path when absent.
+	DefaultPermanentPath = "permanent"
+	// DefaultPermanentKeep is the keep of a permanent.names entry
+	// without one.
+	DefaultPermanentKeep = 1
+	// DefaultPermanentMax is the max of a pattern of permanent.names
+	// without one.
+	DefaultPermanentMax = 100
+)
+
+// KeepOf is the versions kept per name of the entry.
+func (e *PermanentName) KeepOf() int {
+	if e.Keep == nil {
+		return DefaultPermanentKeep
+	}
+	return *e.Keep
+}
+
+// MaxOf is the most distinct names a pattern entry holds.
+func (e *PermanentName) MaxOf() int {
+	if e.Max == nil {
+		return DefaultPermanentMax
+	}
+	return *e.Max
+}
+
+// IsPattern reports whether a key of permanent.names is a pattern (holds
+// *, ? or [) rather than an exact name.
+func IsPattern(key string) bool { return strings.ContainsAny(key, `*?[\`) }
+
+// literals counts the characters of a pattern that match only
+// themselves: every character but *, ?, a [...] class and the backslash
+// of an escape.
+func literals(pat string) int {
+	n := 0
+	for i := 0; i < len(pat); i++ {
+		switch pat[i] {
+		case '*', '?':
+		case '\\':
+			if i+1 < len(pat) {
+				i++
+				n++
+			}
+		case '[':
+			for i++; i < len(pat) && pat[i] != ']'; i++ {
+				if pat[i] == '\\' {
+					i++
+				}
+			}
+		default:
+			n++
+		}
+	}
+	return n
+}
+
+// Entry finds the entry of permanent.names that covers name: the exact
+// entry of that name, else the matching pattern (path.Match, * within one
+// element) with the most literal characters, a tie going to the pattern
+// that sorts first. key is the entry's key; false when none covers it.
+func (p *Permanent) Entry(name string) (key string, e *PermanentName, ok bool) {
+	if p == nil {
+		return "", nil, false
+	}
+	if e, ok := p.Names[name]; ok && !IsPattern(name) {
+		return name, e, true
+	}
+	best := -1
+	for k, v := range p.Names {
+		if !IsPattern(k) {
+			continue
+		}
+		if m, err := path.Match(k, name); err != nil || !m {
+			continue
+		}
+		if n := literals(k); n > best || n == best && k < key {
+			key, e, best = k, v, n
+		}
+	}
+	return key, e, best >= 0
 }
 
 // Quota is a token bucket per identity on an endpoint: Rate refills it,
@@ -726,7 +842,15 @@ type Storage struct {
 
 	pathTmpl *template.Template
 	nested   []string
+	// permanent maps the endpoints whose respond storage this is and that
+	// have permanent names to their permanent block.
+	permanent map[string]*Permanent
 }
+
+// Permanents maps the endpoints whose respond storage this is and that
+// have permanent names to their permanent block (see Endpoint.Permanent);
+// nil for none.
+func (s *Storage) Permanents() map[string]*Permanent { return s.permanent }
 
 // Retention is one retention rule of a storage: Origin holds globs
 // (path.Match) on the origin of a file, none for every origin; Keep holds
@@ -1755,8 +1879,187 @@ func (c *Config) validate() []error {
 	}
 	c.checkPaths(bad)
 	c.nestExposes()
+	c.validatePermanent(bad, names, cas)
 	c.validateACME(bad)
 	return errs
+}
+
+// validatePermanent checks the permanent blocks of the endpoints and
+// records them in their respond storages (see Storage.Permanents).
+func (c *Config) validatePermanent(bad func(string, ...any), names, cas map[string]bool) {
+	for _, st := range c.Storage {
+		st.permanent = nil
+	}
+	for _, en := range sortedKeys(c.Endpoint) {
+		e := c.Endpoint[en]
+		p := e.Permanent
+		if p == nil {
+			continue
+		}
+		if p.Path == "" {
+			p.Path = DefaultPermanentPath
+		}
+		if err := wire.CheckPermanentName(p.Path); err != nil || IsPattern(p.Path) {
+			bad("endpoint %s: permanent.path %q must be a clean relative name without wildcards", en, p.Path)
+		}
+		if len(p.Names) == 0 {
+			bad("endpoint %s: permanent.names is empty", en)
+		}
+		for _, k := range sortedKeys(p.Names) {
+			ne := p.Names[k]
+			if ne == nil {
+				ne = &PermanentName{}
+				p.Names[k] = ne
+			}
+			what := fmt.Sprintf("endpoint %s: permanent.names %q", en, k)
+			if err := checkPermanentKey(k); err != nil {
+				bad("%s: %v", what, err)
+			}
+			if ne.Allow == nil {
+				bad("%s: allow is required: %s", what, identitiesHint)
+			}
+			checkAllow(bad, what+": allow", ne.Allow, names, cas)
+			if ne.Keep != nil && *ne.Keep < 1 {
+				bad("%s: keep must be at least 1", what)
+			}
+			switch {
+			case ne.Max != nil && !IsPattern(k):
+				bad("%s: max applies to patterns only", what)
+			case ne.Max != nil && *ne.Max < 1:
+				bad("%s: max must be at least 1", what)
+			}
+		}
+		if e.Respond != "url" {
+			bad("endpoint %s: permanent needs respond url", en)
+			continue
+		}
+		st := c.Storage[e.Storage]
+		if st == nil {
+			continue
+		}
+		x := c.Expose[st.Expose]
+		switch {
+		case st.Type != "local":
+			bad("endpoint %s: permanent needs a local storage, not %s", en, e.Storage)
+			continue
+		case x == nil:
+			bad("endpoint %s: permanent needs storage %s to have an expose", en, e.Storage)
+			continue
+		case x.Auth.SSH != nil:
+			bad("endpoint %s: permanent needs an expose without auth.ssh (storage %s, expose %s)", en, e.Storage, st.Expose)
+			continue
+		}
+		pre := p.Path + "/"
+		for _, n := range st.nested {
+			if strings.HasPrefix(pre, n) || strings.HasPrefix(n, pre) {
+				bad("endpoint %s: permanent.path %s overlaps the nested expose under %s of expose %s", en, p.Path, n, st.Expose)
+			}
+		}
+		if st.Catalog && (p.Path == CatalogName || strings.HasPrefix(p.Path, CatalogName+"/")) {
+			bad("endpoint %s: permanent.path %s overlaps the catalog of storage %s", en, p.Path, e.Storage)
+		}
+		for _, on := range sortedKeys(st.permanent) {
+			o := st.permanent[on]
+			switch {
+			case o.Path == p.Path:
+				bad("endpoint %s and %s: the same permanent.path %s on storage %s", on, en, p.Path, e.Storage)
+			case strings.HasPrefix(pre, o.Path+"/") || strings.HasPrefix(o.Path+"/", pre):
+				bad("endpoint %s and %s: permanent.path %s and %s nest on storage %s", on, en, o.Path, p.Path, e.Storage)
+			}
+		}
+		if st.permanent == nil {
+			st.permanent = map[string]*Permanent{}
+		}
+		st.permanent[en] = p
+	}
+}
+
+// CatalogName is the top-level name a storage with catalog serves its
+// catalog under (store.CatalogName).
+const CatalogName = "catalog.json"
+
+// checkPermanentKey checks a key of permanent.names: an exact name is a
+// clean relative name (wire.CheckPermanentName); a pattern is valid for
+// path.Match and each of its elements is non-empty, not . or .. and free
+// of control characters.
+func checkPermanentKey(k string) error {
+	if !IsPattern(k) {
+		return wire.CheckPermanentName(k)
+	}
+	if _, err := path.Match(k, ""); err != nil {
+		return fmt.Errorf("bad pattern: %v", err)
+	}
+	if len(k) > wire.MaxPermanentName || wire.HasControl(k) || strings.HasPrefix(k, "/") {
+		return errors.New("bad pattern: too long, absolute or with a control character")
+	}
+	for _, el := range strings.Split(k, "/") {
+		if el == "" || el == "." || el == ".." {
+			return fmt.Errorf("bad pattern: element %q is not a name", el)
+		}
+	}
+	return nil
+}
+
+// PermanentOverlap reports whether two keys of permanent.names may cover
+// the same name: two equal keys, an exact name a pattern matches, or two
+// patterns of as many elements whose elements pair up as equal, as a
+// literal element the other matches, with a bare * on either side, or as
+// two patterns of which one matches the shortest name of the other (see
+// elementsMeet). It is a guess for a warning: two patterns can meet
+// otherwise (a*b and *ab*), and a class makes it assume they do.
+func PermanentOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	pa, pb := IsPattern(a), IsPattern(b)
+	switch {
+	case !pa && !pb:
+		return false
+	case pa && !pb:
+		m, _ := path.Match(a, b)
+		return m
+	case !pa && pb:
+		m, _ := path.Match(b, a)
+		return m
+	}
+	ea, eb := strings.Split(a, "/"), strings.Split(b, "/")
+	if len(ea) != len(eb) {
+		return false
+	}
+	for i := range ea {
+		x, y := ea[i], eb[i]
+		if x == y || x == "*" || y == "*" {
+			continue
+		}
+		if !IsPattern(x) {
+			if m, _ := path.Match(y, x); m {
+				continue
+			}
+		}
+		if !IsPattern(y) {
+			if m, _ := path.Match(x, y); m {
+				continue
+			}
+		}
+		if IsPattern(x) && IsPattern(y) && elementsMeet(x, y) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// elementsMeet guesses whether two pattern elements match a common name:
+// a pattern with a class or an escape may; otherwise each is tried on the
+// shortest name of the other (its * dropped, its ? an a).
+func elementsMeet(x, y string) bool {
+	if strings.ContainsAny(x, `[\`) || strings.ContainsAny(y, `[\`) {
+		return true
+	}
+	shortest := func(p string) string { return strings.ReplaceAll(strings.ReplaceAll(p, "*", ""), "?", "a") }
+	mx, _ := path.Match(x, shortest(y))
+	my, _ := path.Match(y, shortest(x))
+	return mx || my
 }
 
 // checkQueuePaths keeps every queue directory (endpoint path,
@@ -2138,6 +2441,20 @@ func (c *Config) Warnings() []string {
 		}
 		if x, ok := c.Expose[s.Expose]; ok && s.Catalog && len(x.Auth.Basic) == 0 && x.Auth.SSH == nil && !x.Plain {
 			w = append(w, fmt.Sprintf("storage %s: catalog on expose %s without auth publishes every stored name", n, s.Expose))
+		}
+	}
+	for _, n := range sortedKeys(c.Endpoint) {
+		p := c.Endpoint[n].Permanent
+		if p == nil {
+			continue
+		}
+		keys := sortedKeys(p.Names)
+		for i, a := range keys {
+			for _, b := range keys[i+1:] {
+				if IsPattern(a) && IsPattern(b) && literals(a) == literals(b) && PermanentOverlap(a, b) {
+					w = append(w, fmt.Sprintf("endpoint %s: permanent.names %q and %q may cover the same names with as many literal characters; %q, which sorts first, takes them", n, a, b, a))
+				}
+			}
 		}
 	}
 	for _, n := range sortedKeys(c.Expose) {

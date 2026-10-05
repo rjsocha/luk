@@ -46,8 +46,8 @@ origin and lists the endpoints of that listener your key may upload to:
 NAME, URL, RESPOND (url: the upload answers its URL; accept), TTL (the
 lifetime without --ttl, never without one, then the range --ttl may ask
 for when the storage takes it), FLAGS (secret, pretty-url, private,
-any, mutable, link-rm, link-ttl, link-ls: the options the endpoint takes
-from your key; backup-host:any, backup-host:principal or backup-host:none
+any, mutable, link-rm, link-ttl, link-ls, permanent: the options the
+endpoint takes from your key; backup-host:any, backup-host:principal or backup-host:none
 when the endpoint restricts the --backup hostname: any, one of the
 principals of your certificate, or no --backup at all)
 and, when an endpoint has one, QUOTA (your upload quota: the rate, the
@@ -352,6 +352,7 @@ func printEndpoints(w io.Writer, eps []wire.EndpointInfo) error {
 		}{
 			{e.Secret, "secret"}, {e.Pretty, "pretty-url"}, {e.Private.Owner, "private"}, {e.Private.Any, "any"},
 			{e.Link.Replace, "mutable"}, {e.Link.Remove, "link-rm"}, {e.Link.TTL, "link-ttl"}, {e.Link.List, "link-ls"},
+			{e.Permanent, "permanent"},
 		} {
 			if f.on {
 				flags = append(flags, f.name)

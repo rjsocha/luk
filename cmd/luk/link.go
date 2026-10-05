@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -172,8 +173,11 @@ in lukd). The request goes to --endpoint, else to the default endpoint.
 
 Columns: NAME (the file name sent, - without one), SIZE, SENT and EXPIRES in
 local time (never: no expiry), FLAGS (once, mutable, reveal or download,
-private or any) and URL (luk:// for a private file); newest first. Nothing is printed when
-there is no link. --json prints the server answer instead; a list cut at
+private or any, permanent) and URL (luk:// for a private file); newest first. Nothing is printed when
+there is no link. The versions of permanent names (luk send --permanent) are
+links of their own; a second table lists the permanent names they belong to:
+PERMANENT (the name), VERSIONS, NEWEST (sent time of the newest version) and
+URL (the permanent URL). --json prints the server answer instead; a list cut at
 10000 links has "truncated": true, noted on stderr otherwise.`,
 		Example: `  luk link ls
   luk link ls -e drop --json`,
@@ -238,12 +242,58 @@ func printLinks(w io.Writer, links []wire.LinkEntry, loc *time.Location) error {
 		if l.Access != "" {
 			flags = append(flags, l.Access)
 		}
+		if l.Permanent != "" {
+			flags = append(flags, "permanent")
+		}
 		exp := "never"
 		if l.Expires != "" {
 			exp = localTime(l.Expires, loc)
 		}
 		p := client.Printable
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", p(cmp.Or(l.File, "-")), client.HumanBytes(l.Size), p(localTime(l.Received, loc)), p(exp), p(cmp.Or(strings.Join(flags, ","), "-")), p(l.URL))
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return printPermanentLinks(w, links, loc)
+}
+
+// printPermanentLinks writes, after the links, the permanent names their
+// versions belong to: the name, the number of versions listed, the newest
+// sent time and the permanent URL, by name; nothing without one.
+func printPermanentLinks(w io.Writer, links []wire.LinkEntry, loc *time.Location) error {
+	type perm struct {
+		name, url, newest string
+		versions          int
+	}
+	var perms []*perm
+	byURL := map[string]*perm{}
+	for _, l := range links {
+		if l.Permanent == "" {
+			continue
+		}
+		pm := byURL[l.PermanentURL]
+		if pm == nil {
+			pm = &perm{name: l.Permanent, url: l.PermanentURL}
+			byURL[l.PermanentURL] = pm
+			perms = append(perms, pm)
+		}
+		pm.versions++
+		// The links come newest first.
+		if pm.newest == "" {
+			pm.newest = l.Received
+		}
+	}
+	if len(perms) == 0 {
+		return nil
+	}
+	slices.SortFunc(perms, func(a, b *perm) int { return cmp.Or(strings.Compare(a.name, b.name), strings.Compare(a.url, b.url)) })
+	fmt.Fprintln(w)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "PERMANENT\tVERSIONS\tNEWEST\tURL")
+	p := client.Printable
+	for _, pm := range perms {
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n", p(pm.name), pm.versions, p(localTime(pm.newest, loc)), p(cmp.Or(pm.url, "-")))
 	}
 	return tw.Flush()
 }

@@ -302,10 +302,17 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 				return nil
 			}
 			at, _ := time.Parse(time.RFC3339, sc.Received)
-			items = append(items, item{at, wire.LinkEntry{
+			e := wire.LinkEntry{
 				URL: u, File: sc.Client.File, Size: sc.Size, Received: sc.Received, Expires: sc.Expires,
 				Once: sc.Client.Once, Mutable: sc.Client.Mutable, Portal: sc.Client.Portal, Access: sc.Client.Access, Updated: sc.Updated,
-			}})
+			}
+			if p := ep.Permanent; p != nil && sn == ep.Storage && sc.Client.Permanent != "" && sc.PermanentPath == p.Path {
+				if _, _, ok := p.Entry(sc.Client.Permanent); ok {
+					e.Permanent = sc.Client.Permanent
+					e.PermanentURL, _ = s.fileURL(cfg, sn, p.Path+"/"+sc.Client.Permanent, "")
+				}
+			}
+			items = append(items, item{at, e})
 			return nil
 		})
 		if err != nil {

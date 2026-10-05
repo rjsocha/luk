@@ -134,6 +134,18 @@ endpoint:
     #   path: /run/luk/volatile/queue
     #   storage: volatile
     #   reserve: 16M            # free space kept on the tmpfs (default 16M), in place of limits.queue.reserve
+    # permanent:                # luk send --permanent NAME: a URL that always serves the newest version
+    #   path: permanent         # URL prefix under the expose of the storage (default permanent);
+    #                           # unique among the endpoints of one storage
+    #   names:                  # allocated in the config only; nothing else is ever published
+    #     revocation/hosts.krl: # an exact name
+    #       allow: [robert.socha]   # required: who may publish it (and the endpoint allow)
+    #       keep: 5             # versions kept (default 1); older ones are removed
+    #     builds/*:             # a pattern (path.Match, * within one element); an exact entry wins,
+    #                           # else the pattern with the most literal characters
+    #       allow: ["hosts:*"]
+    #       keep: 3
+    #       max: 50             # distinct names it may hold (default 100)
 
 pipeline:
   archive:
