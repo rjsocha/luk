@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Stage is an entry received in parts: they land at their offsets in
@@ -36,9 +37,13 @@ type Stage struct {
 	early map[int64]int64
 	// allocated marks a file whose space was taken at once; otherwise
 	// the reservation is consumed as bytes land.
-	allocated  bool
+	allocated bool
+	closed    atomic.Bool
+
+	// wmu guards the free space check of the writes, apart from mu so
+	// that writes go on while Advance hashes.
+	wmu        sync.Mutex
 	sinceCheck int64
-	closed     bool
 }
 
 // Stage creates the staging file of the entry <dir>/<id>: a file of size
@@ -104,17 +109,16 @@ func (st *Stage) WriteAt(p []byte, off int64) error {
 	if err := st.inBounds(off, int64(len(p))); err != nil {
 		return err
 	}
-	st.mu.Lock()
+	if st.closed.Load() {
+		return os.ErrClosed
+	}
+	st.wmu.Lock()
 	check := st.size < 0 && (st.sinceCheck == 0 || st.sinceCheck >= checkEvery)
 	if check {
 		st.sinceCheck = 0
 	}
 	st.sinceCheck += int64(len(p))
-	closed := st.closed
-	st.mu.Unlock()
-	if closed {
-		return os.ErrClosed
-	}
+	st.wmu.Unlock()
 	if check {
 		if err := st.q.checkFree(filepath.Dir(st.Entry.Dir)); err != nil {
 			return err
@@ -138,7 +142,7 @@ func (st *Stage) Advance(off, n int64) error {
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.closed {
+	if st.closed.Load() {
 		return os.ErrClosed
 	}
 	if off < st.prefix {
@@ -165,7 +169,7 @@ func (st *Stage) Advance(off, n int64) error {
 func (st *Stage) Finish(size int64, sha string) (int64, string, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if st.closed {
+	if st.closed.Load() {
 		return 0, "", os.ErrClosed
 	}
 	if size < 0 || st.prefix != size || len(st.early) > 0 || (st.size >= 0 && size != st.size) {
@@ -186,7 +190,7 @@ func (st *Stage) Finish(size int64, sha string) (int64, string, error) {
 	if err != nil {
 		return 0, "", mapErr(err)
 	}
-	st.closed = true
+	st.closed.Store(true)
 	err = st.f.Close()
 	if err == nil {
 		err = os.Rename(st.tmp, filepath.Join(st.Entry.Dir, "payload"))
@@ -208,8 +212,7 @@ func (st *Stage) Abort() {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.res.Release()
-	if !st.closed {
-		st.closed = true
+	if !st.closed.Swap(true) {
 		st.f.Close()
 	}
 	os.RemoveAll(st.Entry.Dir)

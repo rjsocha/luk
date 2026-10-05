@@ -82,6 +82,11 @@ type partsUpload struct {
 	// tomb is the answer of the complete that ended the upload, given
 	// again to a repeated complete.
 	tomb *answer
+	// advancing counts the verified parts still being hashed into the
+	// stage; advErr is the first error of that. A part is counted while
+	// the upload is open, so once a complete took it nothing is added.
+	advancing sync.WaitGroup
+	advErr    error
 }
 
 // openUpload admits the upload u of the session cs: everything before the
@@ -250,7 +255,9 @@ func (pu *partsUpload) admitLocked(n uint32) *answer {
 	case pu.state != upOpen:
 		return refused(http.StatusConflict, "upload %s", pu.state)
 	case int64(n) >= int64(pu.prefix)+2*int64(pu.parallel):
-		return refused(http.StatusTooManyRequests, "part %d ahead of the window", n)
+		a := refused(http.StatusTooManyRequests, "part %d ahead of the window", n)
+		a.retry = time.Second
+		return a
 	}
 	return nil
 }
@@ -318,6 +325,28 @@ func (pu *partsUpload) drop(n uint32, w *partWriter) {
 // verify marks part n of length l, received whole by w, as verified and
 // hashes what became contiguous.
 func (pu *partsUpload) verify(n uint32, w *partWriter, l int64, exact bool, max int64, now time.Time) *answer {
+	if a := pu.mark(n, w, l, exact, max, now); a != nil {
+		return a
+	}
+	// The hash runs outside the upload lock, so the writes of the other
+	// parts go on meanwhile; a complete waits for it.
+	err := pu.stage.Advance(int64(n)*pu.partSize, l)
+	pu.mu.Lock()
+	if err != nil && pu.advErr == nil {
+		pu.advErr = err
+	}
+	pu.mu.Unlock()
+	pu.advancing.Done()
+	if err != nil {
+		return refused(http.StatusInternalServerError, "internal error")
+	}
+	return verified
+}
+
+// mark makes part n of length l, received whole by w, verified, or
+// answers why not. A verified part is to be hashed: pu.advancing counts
+// it until it is.
+func (pu *partsUpload) mark(n uint32, w *partWriter, l int64, exact bool, max int64, now time.Time) *answer {
 	pu.mu.Lock()
 	defer pu.mu.Unlock()
 	if pu.state != upOpen {
@@ -352,11 +381,6 @@ func (pu *partsUpload) verify(n uint32, w *partWriter, l int64, exact bool, max 
 			return &a
 		}
 	}
-	if err := pu.stage.Advance(int64(n)*pu.partSize, l); err != nil {
-		delete(pu.writers, n)
-		pu.states[n] = partAbsent
-		return refused(http.StatusInternalServerError, "internal error")
-	}
 	delete(pu.writers, n)
 	pu.states[n] = partVerified
 	if pu.size < 0 && short {
@@ -365,7 +389,8 @@ func (pu *partsUpload) verify(n uint32, w *partWriter, l int64, exact bool, max 
 	for int(pu.prefix) < len(pu.states) && pu.states[pu.prefix] == partVerified {
 		pu.prefix++
 	}
-	return verified
+	pu.advancing.Add(1)
+	return nil
 }
 
 // laterLocked reports whether a part after n of a stream is verified or
@@ -543,7 +568,20 @@ func (s *Server) complete(r *http.Request, pu *partsUpload) answer {
 	pu.mu.Unlock()
 
 	u := pu.u
-	n, sum, err := pu.stage.Finish(size, sha)
+	pu.advancing.Wait()
+	pu.mu.Lock()
+	advErr := pu.advErr
+	pu.mu.Unlock()
+	var (
+		n   int64
+		sum string
+		err error
+	)
+	if advErr != nil {
+		err = advErr
+	} else {
+		n, sum, err = pu.stage.Finish(size, sha)
+	}
 	var a answer
 	switch {
 	case errors.Is(err, queue.ErrMismatch):
@@ -621,6 +659,20 @@ func (pu *partsUpload) expire(now, last time.Time) bool {
 	}
 	pu.endLocked(upExpired, now)
 	return true
+}
+
+// discard ends the upload when it is still open, as its session goes.
+// A complete in progress ends it itself.
+func (pu *partsUpload) discard(now time.Time) {
+	if !pu.finish.TryLock() {
+		return
+	}
+	defer pu.finish.Unlock()
+	pu.mu.Lock()
+	defer pu.mu.Unlock()
+	if pu.state == upOpen {
+		pu.endLocked(upAborted, now)
+	}
 }
 
 // gone reports whether the upload ended long enough ago for its session

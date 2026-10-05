@@ -117,6 +117,17 @@ func (c *testChan) post(t *testing.T, path string, n channel.Nonce, plain []byte
 	return resp
 }
 
+// postRaw posts a sealed transport request body to the session path.
+func (c *testChan) postRaw(t *testing.T, msg []byte) *http.Response {
+	t.Helper()
+	resp, err := http.Post(c.url+c.path, channel.ContentType, bytes.NewReader(msg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
 // opPlain is the plaintext of an OP.
 func opPlain(t *testing.T, req channel.Request, body []byte) []byte {
 	t.Helper()

@@ -174,7 +174,12 @@ func (t *chanTable) drop(cs *chanSession) {
 	t.dropLocked(cs)
 }
 
+// dropLocked removes cs; an upload it still has open ends with it, so
+// nothing of it is left behind.
 func (t *chanTable) dropLocked(cs *chanSession) {
+	if pu := cs.uploadOf(); pu != nil {
+		pu.discard(time.Now())
+	}
 	if id := cs.sess.ID(); t.m[id] == cs {
 		delete(t.m, id)
 	}
@@ -356,9 +361,9 @@ func (s *Server) chanTransport(w http.ResponseWriter, r *http.Request, sn *snaps
 // chanOp runs the OP of a session: the whole message is read and
 // authenticated before anything acts on it, then it runs through the
 // endpoint handlers and its answer goes back sealed. A session takes one
-// OP: another one that authenticates drops it, while one refused before
-// it is read leaves it alone, as anybody can name a session by the id in
-// the clear. The session ends with the answer to its OP, unless the OP
+// OP: another one is refused and leaves it alone, whether it opened or
+// not, as anybody can name a session by the id in the clear and replay
+// its messages. The session ends with the answer to its OP, unless the OP
 // opened an upload in parts.
 func (s *Server) chanOp(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener, cs *chanSession, n channel.Nonce, hdr []byte, body io.Reader) {
 	if cs.hasOp() {
@@ -374,8 +379,9 @@ func (s *Server) chanOp(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 		chanFail(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("operation over %d bytes", maxOp))
 		return
 	}
+	// A copy of the OP that got past the check above is refused alone:
+	// the session may be opening an upload with the first one.
 	if !cs.claimOp(n, s.now()) {
-		s.chans.drop(cs)
 		chanFail(w, http.StatusConflict, "the session has had its operation")
 		return
 	}

@@ -516,3 +516,137 @@ func TestPartStalled(t *testing.T) {
 		})
 	}
 }
+
+// openUploads is the number of open uploads in parts.
+func openUploads(f *fixture) int {
+	f.srv.uploads.mu.Lock()
+	defer f.srv.uploads.mu.Unlock()
+	return f.srv.uploads.total
+}
+
+// Two copies of the same upload OP (a replay on the path) open one
+// upload, and the session keeps working for it. The copy is past the
+// check for an OP already taken while the first one opens the upload.
+func TestUploadOpReplayed(t *testing.T) {
+	f, srvURL, pin := partsFixture(t, "4", nil)
+	data := content(testPart + 10)
+	c := chanOpen(t, srvURL, "/drop", pin)
+	n := channel.Nonce{Kind: channel.KindOp}
+	msg := c.seal(t, n, opPlain(t, c.putReq(t, f.user, fileMeta(data)), nil))
+	pr, pw := io.Pipe()
+	done := make(chan int, 1)
+	go func() {
+		resp, err := http.Post(srvURL+"/drop", channel.ContentType, pr)
+		if err != nil {
+			t.Error(err)
+			done <- 0
+			return
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		done <- resp.StatusCode
+	}()
+	if _, err := pw.Write(msg[:25]); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	head, body := c.inner(t, c.postRaw(t, msg), n)
+	wantInner(t, "first copy", head, body, http.StatusOK)
+	if _, err := pw.Write(msg[25:]); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	if code := <-done; code != http.StatusConflict {
+		t.Fatalf("second copy: %d", code)
+	}
+	if n := openUploads(f); n != 1 {
+		t.Fatalf("%d open uploads", n)
+	}
+	head, body = sendAll(t, c, data)
+	wantInner(t, "complete", head, body, http.StatusCreated)
+	if out := created(t, body); out.SHA256 != sha(data) {
+		t.Fatalf("%+v", out)
+	}
+	if n := openUploads(f); n != 0 {
+		t.Fatalf("%d open uploads after the commit", n)
+	}
+}
+
+// Dropping a session ends its open upload: nothing of it is left.
+func TestUploadDroppedWithSession(t *testing.T) {
+	f, srvURL, pin := partsFixture(t, "4", nil)
+	data := content(2 * testPart)
+	c, _ := create(t, f, srvURL, pin, fileMeta(data))
+	head, body := c.part(t, 0, 0, partOf(data, 0))
+	wantInner(t, "part", head, body, http.StatusOK)
+	pu := uploadOf(t, f, c)
+	dir := pu.stage.Entry.Dir
+	f.srv.chans.drop(f.srv.chans.get(c.sess.ID()))
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("staging left: %v", err)
+	}
+	if pu.stateOf() != upAborted {
+		t.Fatalf("state %s", pu.stateOf())
+	}
+	if n := openUploads(f); n != 0 {
+		t.Fatalf("%d open uploads", n)
+	}
+}
+
+// Parts sent at once, the later ones first, make the whole content.
+func TestPartsParallel(t *testing.T) {
+	f, srvURL, pin := partsFixture(t, "4", nil)
+	data := content(8*testPart - 77)
+	c, _ := create(t, f, srvURL, pin, fileMeta(data))
+	var codes [8]int
+	var wg sync.WaitGroup
+	for i := 7; i >= 0; i-- {
+		wg.Go(func() {
+			n := channel.Nonce{Kind: channel.KindPart, Number: uint32(i)}
+			var buf bytes.Buffer
+			if err := c.sess.SealRequest(&buf, n, bytes.NewReader(partOf(data, i))); err != nil {
+				t.Error(err)
+				return
+			}
+			resp, err := http.Post(srvURL+"/drop", channel.ContentType, &buf)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer resp.Body.Close()
+			rc, err := c.sess.OpenResponse(resp.Body, n)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			var head channel.Response
+			if err := channel.ReadHead(rc, &head); err != nil {
+				t.Error(err)
+				return
+			}
+			codes[i] = head.Status
+		})
+	}
+	wg.Wait()
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("part %d: %d", i, code)
+		}
+	}
+	head, body := c.control(t, channel.KindComplete, 0, 0)
+	wantInner(t, "complete", head, body, http.StatusCreated)
+	if out := created(t, body); out.SHA256 != sha(data) || out.Size != int64(len(data)) {
+		t.Fatalf("%+v", out)
+	}
+}
+
+func TestPartWindowRetryAfter(t *testing.T) {
+	f, srvURL, pin := partsFixture(t, "1", nil)
+	data := content(3 * testPart)
+	c, _ := create(t, f, srvURL, pin, fileMeta(data))
+	head, body := c.part(t, 2, 0, partOf(data, 2))
+	wantInner(t, "ahead of the window", head, body, http.StatusTooManyRequests)
+	if ra := head.Header.Get("Retry-After"); ra != "1" {
+		t.Fatalf("Retry-After %q", ra)
+	}
+}
