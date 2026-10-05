@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 
+	"luk/internal/channel"
 	"luk/internal/client"
 	"luk/internal/wire"
 )
@@ -31,7 +33,7 @@ func newSendCmd(out io.Writer) *cobra.Command {
 		backup, once, portal, secret, quiet, stdin     bool
 		dryRun, progress, asJSON, prettyURL, noOwner   bool
 		mutable, private, anyID                        bool
-		links                                          int
+		links, parallel                                int
 	)
 	cmd := &cobra.Command{
 		Use:     "send",
@@ -68,6 +70,9 @@ so the server can answer them without the content, and resend a --file when
 it asks for it; a stream (--stdin, a pipe, a prompted --secret) cannot be sent
 twice, which ends the run with the links made so far. --progress reports on stderr when it is a terminal; --bwlimit
 caps the upload rate in bytes per second (K, M, G, T suffixes; 0 = unlimited).
+The content goes in parts through the channel, authenticated by the lukd pin
+of the endpoint; --parallel N sends up to N parts at once (at most what the
+endpoint offers).
 --permanent NAME publishes the file as a new version of the permanent name NAME
 of the endpoint (permanent.names in lukd); the URL printed is the permanent URL,
 which serves the version published last (404 once it is gone), and --json adds
@@ -114,6 +119,8 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 				return usageError{fmt.Errorf("--links is at most %d", maxLinks)}
 			case dryRun && cmd.Flags().Changed("links"):
 				return usageError{errors.New("--links takes no --dry-run")}
+			case parallel < 1 || parallel > maxParallel:
+				return usageError{fmt.Errorf("--parallel must be 1 to %d", maxParallel)}
 			}
 			if cmd.Flags().Changed("permanent") {
 				if err := permanentFlags(permanent, links, once, secret, portal, private, mutable, prettyURL); err != nil {
@@ -132,7 +139,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 			if err != nil {
 				return usageError{err}
 			}
-			url, _, err := resolve(cfg, endpoint)
+			url, pins, err := resolve(cfg, endpoint)
 			if err != nil {
 				return err
 			}
@@ -160,7 +167,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 			if err := meta.Normalize(); err != nil {
 				return usageError{err}
 			}
-			body, size, closer, err := input(file, name, stdin, prompt, backup, &meta)
+			src, closer, err := input(file, name, stdin, prompt, backup, &meta)
 			if err != nil {
 				return err
 			}
@@ -169,7 +176,8 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 			}
 			ctx, stop := interruptContext()
 			defer stop()
-			opts := client.Options{URL: url, Signer: signer, Meta: meta, Body: body, Size: size, BWLimit: limit}
+			opts := client.Options{URL: url, Pins: pins, Signer: signer, Meta: meta, BWLimit: limit, Parallel: parallel}
+			src.apply(&opts)
 			if progress && term.IsTerminal(int(os.Stderr.Fd())) {
 				opts.Progress = os.Stderr
 			}
@@ -254,10 +262,11 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 	f.BoolVar(&asJSON, "json", false, "print the server answer as JSON")
 	f.BoolVarP(&quiet, "quiet", "q", false, "print only the URL, nothing when the endpoint answers without one (the upload id is in --json)")
 	f.IntVar(&links, "links", 1, "upload N times (1 to 25) with the same options, one link each")
+	f.IntVar(&parallel, "parallel", 1, "parts in flight at once (1 to 64), at most what the endpoint offers")
 	f.StringVar(&permanent, "permanent", "", "publish as a new version of this permanent name of the endpoint")
 	completeFlags(cmd, map[string]cobra.CompletionFunc{
 		"file": completeFiles, "endpoint": completeEndpoint, "key": completeKey, "tag": completeNone,
-		"ttl": completeTTL, "name": completeNone, "permanent": completeNone, "type": completeNone, "bwlimit": completeNone, "links": completeNone,
+		"ttl": completeTTL, "name": completeNone, "permanent": completeNone, "type": completeNone, "bwlimit": completeNone, "links": completeNone, "parallel": completeNone,
 	})
 	return cmd
 }
@@ -287,9 +296,9 @@ func permanentFlags(name string, links int, once, secret, portal, private, mutab
 }
 
 // again prepares opts for one more upload of the same content: the meta
-// carries the size and sha256 of the first answer (a stream had none), a
-// regular file is read again from its start, and any other source, already
-// read, is sent only when the server needs no body.
+// carries the size and sha256 of the first answer (a stream had none). A
+// file is read again at its offsets; a stream, already read, is sent only
+// when the server needs no content.
 func again(opts *client.Options, first any) error {
 	r, ok := first.(*wire.Receipt)
 	if !ok {
@@ -299,16 +308,18 @@ func again(opts *client.Options, first any) error {
 		n := r.Size
 		opts.Meta.Size, opts.Meta.SHA256 = &n, r.SHA256
 	}
-	if sk, ok := opts.Body.(io.Seeker); ok && opts.Meta.Source == wire.SourceFile {
-		_, err := sk.Seek(0, io.SeekStart)
-		return err
+	if opts.Source == nil {
+		opts.NoBody, opts.Body, opts.Size = true, nil, *opts.Meta.Size
 	}
-	opts.NoBody, opts.Size = true, *opts.Meta.Size
 	return nil
 }
 
 // maxLinks is the most uploads one luk send --links makes.
 const maxLinks = 25
+
+// maxParallel is the largest --parallel, the most parts an endpoint
+// offers at once.
+const maxParallel = 64
 
 var askSecret = client.AskSecret
 
@@ -355,13 +366,26 @@ func parseBWLimit(s string) (int64, error) {
 	return limit, nil
 }
 
-// resolve turns an endpoint argument into its URL and channel pins.
-func resolve(cfg *client.Config, endpoint string) (string, []string, error) {
-	url, pins, err := cfg.Resolve(endpoint)
+// resolve turns an endpoint argument into its URL and channel pins: those
+// of the endpoint, else those of a config endpoint of the same origin.
+// None is a usage error: luk never trusts an endpoint it has no key for.
+func resolve(cfg *client.Config, endpoint string) (string, []channel.Pin, error) {
+	raw, given, err := cfg.Resolve(endpoint)
 	if err != nil {
 		return "", nil, usageError{err}
 	}
-	return url, pins, nil
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return "", nil, usageError{err}
+	}
+	pins, err := client.PinsFor(cfg, u, strings.Join(given, ","))
+	if err != nil {
+		return "", nil, usageError{err}
+	}
+	if len(pins) == 0 {
+		return "", nil, usageError{client.ErrNoPin}
+	}
+	return raw, pins, nil
 }
 
 // signerFor loads the signing key for an endpoint argument: --key, the key
@@ -393,76 +417,92 @@ func unknownKeyHint(err error, agentKeys int) error {
 	return fmt.Errorf("%w; agent holds %d keys; pick one with --key SHA256:... or set key on the endpoint (luk config endpoint add -e NAME --url URL --key SHA256:...)", err, agentKeys)
 }
 
-func secretBody(secret []byte, meta *wire.Meta) (io.Reader, int64) {
+// content is what an upload sends: a file read at offsets (source, size
+// bytes, mtime as its hash pass saw it) or a stream (body).
+type content struct {
+	source io.ReaderAt
+	body   io.Reader
+	size   int64
+	mtime  time.Time
+}
+
+// apply makes c the content of o.
+func (c content) apply(o *client.Options) {
+	o.Source, o.Body, o.Size, o.Mtime = c.source, c.body, c.size, c.mtime
+}
+
+func secretBody(secret []byte, meta *wire.Meta) content {
 	sum := sha256.Sum256(secret)
 	n := int64(len(secret))
 	meta.Source = wire.SourceTerminal
 	meta.Size = &n
 	meta.SHA256 = hex.EncodeToString(sum[:])
-	return bytes.NewReader(secret), n
+	return content{source: bytes.NewReader(secret), size: n}
 }
 
-func input(file, name string, stdin, prompt, backup bool, meta *wire.Meta) (io.Reader, int64, io.Closer, error) {
+func input(file, name string, stdin, prompt, backup bool, meta *wire.Meta) (content, io.Closer, error) {
 	if prompt {
 		if backup {
-			return nil, 0, nil, usageError{errors.New("--backup needs a regular file")}
+			return content{}, nil, usageError{errors.New("--backup needs a regular file")}
 		}
 		secret, err := askSecret("secret: ")
 		if err != nil {
-			return nil, 0, nil, usageError{err}
+			return content{}, nil, usageError{err}
 		}
 		again, err := askSecret("retype: ")
 		if err != nil {
-			return nil, 0, nil, usageError{err}
+			return content{}, nil, usageError{err}
 		}
 		if !bytes.Equal(secret, again) {
-			return nil, 0, nil, usageError{errors.New("the secrets do not match")}
+			return content{}, nil, usageError{errors.New("the secrets do not match")}
 		}
 		if !utf8.Valid(secret) {
-			return nil, 0, nil, usageError{errors.New("the secret is not valid UTF-8")}
+			return content{}, nil, usageError{errors.New("the secret is not valid UTF-8")}
 		}
-		r, n := secretBody(secret, meta)
-		return r, n, nil, nil
+		return secretBody(secret, meta), nil, nil
 	}
 	if stdin {
 		if backup {
-			return nil, 0, nil, usageError{errors.New("--backup needs a regular file")}
+			return content{}, nil, usageError{errors.New("--backup needs a regular file")}
 		}
 		meta.Source = wire.SourceStdin
-		return os.Stdin, -1, nil, nil
+		return content{body: os.Stdin, size: -1}, nil, nil
 	}
 	path := file
 	st, err := os.Stat(path)
 	if err != nil {
-		return nil, 0, nil, usageError{err}
+		return content{}, nil, usageError{err}
 	}
 	if st.IsDir() {
-		return nil, 0, nil, usageError{fmt.Errorf("%s is a directory", path)}
+		return content{}, nil, usageError{fmt.Errorf("%s is a directory", path)}
 	}
 	if !st.Mode().IsRegular() {
 		if backup {
-			return nil, 0, nil, usageError{errors.New("--backup needs a regular file")}
+			return content{}, nil, usageError{errors.New("--backup needs a regular file")}
 		}
 		fh, err := os.Open(path)
 		if err != nil {
-			return nil, 0, nil, usageError{err}
+			return content{}, nil, usageError{err}
 		}
 		meta.Source = wire.SourcePipe
-		return fh, -1, fh, nil
+		return content{body: fh, size: -1}, fh, nil
 	}
 	fh, err := os.Open(path)
 	if err != nil {
-		return nil, 0, nil, usageError{err}
+		return content{}, nil, usageError{err}
 	}
 	h := sha256.New()
 	n, err := io.Copy(h, fh)
 	if err != nil {
 		fh.Close()
-		return nil, 0, nil, err
+		return content{}, nil, err
 	}
-	if _, err := fh.Seek(0, io.SeekStart); err != nil {
+	// The size and mtime the hash pass saw: the upload checks the file
+	// against them before it completes.
+	st, err = fh.Stat()
+	if err != nil {
 		fh.Close()
-		return nil, 0, nil, err
+		return content{}, nil, err
 	}
 	if name == "" {
 		meta.File = filepath.Base(path)
@@ -475,9 +515,9 @@ func input(file, name string, stdin, prompt, backup bool, meta *wire.Meta) (io.R
 		abs, err := filepath.Abs(path)
 		if err != nil {
 			fh.Close()
-			return nil, 0, nil, err
+			return content{}, nil, err
 		}
 		meta.Backup = &wire.Backup{Hostname: host, Path: abs, Mtime: st.ModTime().UTC().Format(time.RFC3339)}
 	}
-	return fh, n, fh, nil
+	return content{source: fh, size: n, mtime: st.ModTime()}, fh, nil
 }

@@ -12,48 +12,51 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"luk/internal/channel"
 	"luk/internal/sshsig"
 	"luk/internal/wire"
 )
 
+// Options is an upload to the endpoint URL through the channel, with the
+// lukd keys Pins accepted. The content is a file (Source, Size bytes,
+// Mtime as its hash pass saw it, checked before the upload completes) or
+// a stream (Body, Size -1).
 type Options struct {
 	URL    string
-	Pin    string
+	Pins   []channel.Pin
 	Signer ssh.Signer
 	Meta   wire.Meta
+	Source io.ReaderAt
+	Mtime  time.Time
 	Body   io.Reader
-	Size   int64 // -1: unknown, sent chunked
-	// DecisionTimeout bounds the wait for 100 Continue or a final answer
-	// before any body byte goes out; 0 means 60s.
+	Size   int64
+	// Parallel is the number of parts in flight at once, at most what
+	// lukd offers; 0 is 1.
+	Parallel int
+	// DecisionTimeout bounds the wait for the answer headers of a link
+	// request outside the channel; 0 means 60s.
 	DecisionTimeout time.Duration
-	// IdleTimeout bounds each wait for the server once decided: for it to
-	// take the next body bytes, for the answer after the body and between
-	// the bytes of the answer; 0 means 2m.
+	// IdleTimeout bounds each wait for the bytes of the answer of a link
+	// request outside the channel; 0 means 2m.
 	IdleTimeout time.Duration
 	// Progress receives the transfer progress; nil turns it off.
 	Progress io.Writer
 	// BWLimit caps the body rate in bytes per second; 0 is unlimited.
 	BWLimit int64
-	// NoBody marks a body that cannot be sent (a stream already read): the
-	// request goes with Size, and a 100 Continue ends it with
-	// ErrBodyWanted.
+	// NoBody marks a content that cannot be sent (a stream already
+	// read): an upload lukd wants the content of ends with ErrBodyWanted.
 	NoBody bool
 
 	// maxAnswer caps the answer body read; 0 means 1 MiB.
 	maxAnswer int64
 }
-
-var expectContinueTimeout = 10 * time.Second
 
 type RejectedError struct {
 	Status  int
@@ -92,8 +95,8 @@ func waitText(d time.Duration) string {
 	return wire.FormatDuration((d + u - 1) / u * u)
 }
 
-// ErrBodyWanted ends an upload with Options.NoBody whose body the server
-// asked for (100 Continue).
+// ErrBodyWanted ends an upload with Options.NoBody whose content the
+// server asked for.
 var ErrBodyWanted = errors.New("the server asked for the content")
 
 type HashMismatchError struct{ Local, Remote string }
@@ -128,34 +131,9 @@ func (a *Answer) Body() any {
 	return a.Receipt
 }
 
-type countWriter struct{ n atomic.Int64 }
-
-func (c *countWriter) Write(p []byte) (int, error) {
-	c.n.Add(int64(len(p)))
-	return len(p), nil
-}
-
-// errReader fails every read with err.
-type errReader struct{ err error }
-
-func (e errReader) Read([]byte) (int, error) { return 0, e.err }
-
-// gateReader yields no bytes until the server has answered 100 Continue.
-type gateReader struct {
-	r    io.Reader
-	open <-chan struct{}
-	done <-chan struct{}
-}
-
-func (g *gateReader) Read(p []byte) (int, error) {
-	select {
-	case <-g.open:
-	case <-g.done:
-		return 0, errors.New("request ended before 100 Continue")
-	}
-	return g.r.Read(p)
-}
-
+// Upload sends o through the channel and returns the answer of lukd: a
+// dry run, a deduplicated upload or a refusal answer the OP; otherwise the
+// content goes in parts and the COMPLETE answers.
 func Upload(ctx context.Context, o Options) (*Answer, error) {
 	if err := o.Meta.Normalize(); err != nil {
 		return nil, err
@@ -164,51 +142,106 @@ func Upload(ctx context.Context, o Options) (*Answer, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := send(ctx, o, http.MethodPut, metaS, nil, func(host, path, ts, nonce string) (string, []byte) {
-		return wire.Namespace, wire.CanonicalText(host, path, ts, nonce, metaS)
+	res, err := uploadParts(ctx, o, func(c *Channel) (channel.Request, error) {
+		return signedOp(o, c, http.MethodPut, metaS, nil, func(host, path, ts, nonce string) (string, []byte) {
+			return wire.NamespaceV2, wire.CanonicalTextV2(host, path, ts, nonce, metaS, c.H())
+		})
 	})
 	if err != nil {
 		return nil, err
 	}
-	if res.status >= 400 {
-		if res.status == http.StatusUnprocessableEntity && o.Meta.SHA256 != "" && o.Meta.Size != nil && res.sent == *o.Meta.Size {
-			if res.sum != o.Meta.SHA256 {
-				return nil, &HashMismatchError{Local: res.sum, Remote: o.Meta.SHA256}
-			}
+	resp := res.resp
+	if resp.Status >= 400 {
+		if he := changedSource(o, res, resp.Status); he != nil {
+			return nil, he
 		}
-		return nil, res.rejected()
+		return nil, rejection(resp)
 	}
-	a, err := decodeAnswer(res.status, res.data, o.Meta.DryRun)
+	a, err := decodeAnswer(resp.Status, resp.Body, o.Meta.DryRun)
 	if err != nil {
 		return nil, err
 	}
 	if a.Debug != nil {
 		return a, nil
 	}
-	if a.Receipt.Deduplicated || (!res.continued && o.Size != 0 && (o.Body != nil || o.NoBody)) {
-		// Answered without the body: the server took the content it holds
-		// for the signer, by the signed size and sha256.
+	if a.Receipt.Deduplicated || (!res.parts && o.Size != 0) {
+		// Answered without the content: the server took the content it
+		// holds for the signer, by the signed size and sha256.
 		a.Receipt.Deduplicated = true
 		if o.Meta.Size == nil || a.Receipt.Size != *o.Meta.Size || a.Receipt.SHA256 != o.Meta.SHA256 {
 			return a, &HashMismatchError{Local: o.Meta.SHA256, Remote: a.Receipt.SHA256}
 		}
 		return a, nil
 	}
-	if a.Receipt.SHA256 != res.sum {
-		return a, &HashMismatchError{Local: res.sum, Remote: a.Receipt.SHA256}
+	if local := sentSum(o, res); a.Receipt.SHA256 != local {
+		return a, &HashMismatchError{Local: local, Remote: a.Receipt.SHA256}
 	}
 	return a, nil
 }
 
-// result is the answer to a signed request: the status, the body (at most
-// 1 MiB), the bytes of the request body sent with their sha256, and
-// whether the server asked for the body (100 Continue).
+// sentSum is the sha256 of the content sent: the signed one of a file,
+// whose parts lukd checks against it, else that of the stream as read.
+func sentSum(o Options, res *partsResult) string {
+	if o.Source != nil && o.Meta.SHA256 != "" {
+		return o.Meta.SHA256
+	}
+	return res.sum
+}
+
+// changedSource tells a file whose content no longer has its signed
+// sha256 when lukd refused the content sent (422): the file changed
+// after its hash pass.
+func changedSource(o Options, res *partsResult, status int) *HashMismatchError {
+	if status != http.StatusUnprocessableEntity || !res.parts || o.Source == nil || o.Meta.SHA256 == "" || o.Size < 0 {
+		return nil
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, io.NewSectionReader(o.Source, 0, o.Size)); err != nil {
+		return nil
+	}
+	if sum := hex.EncodeToString(h.Sum(nil)); sum != o.Meta.SHA256 {
+		return &HashMismatchError{Local: sum, Remote: o.Meta.SHA256}
+	}
+	return nil
+}
+
+// signedOp is the OP of a signed request inside the channel c: the Luk-*
+// signature headers over what sign returns (the namespace and the
+// canonical text) for the Host, the path, the timestamp and the nonce,
+// plus header.
+func signedOp(o Options, c *Channel, method, metaS string, header map[string]string, sign func(host, path, ts, nonce string) (string, []byte)) (channel.Request, error) {
+	u, err := url.Parse(o.URL)
+	if err != nil {
+		return channel.Request{}, err
+	}
+	path := u.Path
+	if path == "" {
+		path = "/"
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	nonce := wire.NewNonce()
+	ns, text := sign(strings.ToLower(u.Host), path, ts, nonce)
+	sig, err := sshsig.Sign(o.Signer, ns, text)
+	if err != nil {
+		return channel.Request{}, err
+	}
+	h := http.Header{}
+	for k, v := range header {
+		h.Set(k, v)
+	}
+	h.Set(wire.HeaderMeta, metaS)
+	h.Set(wire.HeaderTimestamp, ts)
+	h.Set(wire.HeaderNonce, nonce)
+	h.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
+	target := (&url.URL{Path: path, RawPath: u.RawPath}).RequestURI()
+	return channel.Request{Method: method, Target: target, Header: h}, nil
+}
+
+// result is the answer to a signed request outside the channel: the
+// status and the body (at most 1 MiB).
 type result struct {
-	status    int
-	data      []byte
-	sent      int64
-	sum       string
-	continued bool
+	status int
+	data   []byte
 	// date is the Date header of the answer, at the local time it came.
 	date string
 	at   time.Time
@@ -218,29 +251,30 @@ type result struct {
 
 // rejected is the error of an answer of 400 or above.
 func (r *result) rejected() error {
-	var e wire.ErrorResponse
-	msg := strings.TrimSpace(string(r.data))
-	if json.Unmarshal(r.data, &e) == nil && e.Error != "" {
-		msg = e.Error
-	}
-	re := &RejectedError{Status: r.status, Message: message(msg)}
-	if r.status == http.StatusUnauthorized && msg == wire.ErrTimestampWindow {
-		if d, err := http.ParseTime(r.date); err == nil {
-			off := r.at.Sub(d).Round(time.Second)
+	return rejected(r.status, r.data, r.date, r.at, r.retry)
+}
+
+// rejected is the RejectedError of an answer of status with body data:
+// a timestamp refused as out of the window carries the offset of the
+// local clock from date (got at at), and retry is its Retry-After.
+func rejected(status int, data []byte, date string, at time.Time, retry string) *RejectedError {
+	msg := errorText(data)
+	re := &RejectedError{Status: status, Message: message(msg)}
+	if status == http.StatusUnauthorized && msg == wire.ErrTimestampWindow {
+		if d, err := http.ParseTime(date); err == nil {
+			off := at.Sub(d).Round(time.Second)
 			re.ClockOffset = &off
 		}
 	}
-	if n, err := strconv.ParseInt(r.retry, 10, 64); err == nil && n > 0 {
+	if n, err := strconv.ParseInt(retry, 10, 64); err == nil && n > 0 {
 		re.RetryAfter = time.Duration(n) * time.Second
 	}
 	return re
 }
 
-// send makes one signed request to o.URL: the Luk-* signature headers over
-// what sign returns (the namespace and the canonical text) for the Host,
-// the path, the timestamp and the nonce, plus header. A PUT goes with
-// Expect: 100-continue and its body (o.Body, o.Size) only after 100
-// Continue.
+// send makes one signed request without a body to o.URL outside the
+// channel: the Luk-* signature headers over what sign returns for the
+// Host, the path, the timestamp and the nonce, plus header.
 func send(ctx context.Context, o Options, method, metaS string, header map[string]string, sign func(host, path, ts, nonce string) (string, []byte)) (*result, error) {
 	u, err := url.Parse(o.URL)
 	if err != nil {
@@ -269,53 +303,16 @@ func send(ctx context.Context, o Options, method, metaS string, header map[strin
 	caller := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	// The decision is 100 Continue or the complete headers of a final
-	// answer, whichever comes first; another 1xx is none. The decision
-	// timer never covers the body upload; the idle watchdogs do, the
-	// wait for the answer after it, and the reading of the answer.
+	// The decision is the complete headers of a final answer; a 1xx is
+	// none. The idle watchdog covers the reading of the answer.
 	dec := newDecider(wait, cancel)
 	defer dec.stop()
-	sendWD, answerWD := newWatchdog(idle, cancel), newWatchdog(idle, cancel)
-	defer sendWD.stop()
+	answerWD := newWatchdog(idle, cancel)
 	defer answerWD.stop()
-	proceed := make(chan struct{})
-	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		Got100Continue: sync.OnceFunc(func() {
-			if dec.decide() {
-				close(proceed)
-			}
-		}),
-	})
 
-	h := sha256.New()
-	counter := &countWriter{}
-	var body io.Reader
-	if o.Size != 0 && o.NoBody {
-		body = &sendIdle{&gateReader{r: errReader{ErrBodyWanted}, open: proceed, done: ctx.Done()}, sendWD}
-	} else if o.Size != 0 && o.Body != nil {
-		src := o.Body
-		if o.BWLimit > 0 {
-			src = newLimitReader(ctx, src, o.BWLimit)
-		}
-		// A dry run sends no body: nothing to report.
-		if o.Progress != nil && !o.Meta.DryRun {
-			pr := newProgress(src, o.Progress, o.Size, time.Now)
-			defer pr.Finish()
-			src = pr
-		}
-		body = &sendIdle{&gateReader{r: io.TeeReader(src, io.MultiWriter(h, counter)), open: proceed, done: ctx.Done()}, sendWD}
-	}
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), nil)
 	if err != nil {
 		return nil, err
-	}
-	if body != nil && o.Size > 0 {
-		req.ContentLength = o.Size
-	} else if body != nil && o.Size < 0 {
-		req.ContentLength = -1
-	}
-	if method == http.MethodPut {
-		req.Header.Set("Expect", "100-continue")
 	}
 	for k, v := range header {
 		req.Header.Set(k, v)
@@ -325,14 +322,13 @@ func send(ctx context.Context, o Options, method, metaS string, header map[strin
 	req.Header.Set(wire.HeaderNonce, nonce)
 	req.Header.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
 
-	tr, err := transport(u, o.Pin)
+	tr, err := transport(u, "")
 	if err != nil {
 		return nil, err
 	}
 	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	at := time.Now()
-	stalled := sendWD.stop()
 	if !dec.decide() {
 		if resp != nil {
 			resp.Body.Close()
@@ -340,40 +336,18 @@ func send(ctx context.Context, o Options, method, metaS string, header map[strin
 		if err == nil {
 			err = context.Canceled
 		}
-		return nil, &TransferError{Reason: NoDecision, Host: u.Host, Total: o.Size, Wait: wait, Err: err}
-	}
-	if o.NoBody && body != nil {
-		select {
-		case <-proceed:
-			if resp != nil {
-				resp.Body.Close()
-			}
-			return nil, ErrBodyWanted
-		default:
-		}
+		return nil, &TransferError{Reason: NoDecision, Host: u.Host, Wait: wait, Err: err}
 	}
 	if err != nil {
-		if stalled {
-			err = &stalledError{idle}
-		}
-		return nil, transferError(caller, err, u.Host, counter.n.Load(), o.Size, stalled)
+		return nil, transferError(caller, err, u.Host, 0, 0, false)
 	}
 	defer resp.Body.Close()
-	// Cancel first: an HTTP/2 body Close waits for the gated body writer.
-	defer cancel()
-	answer := &readIdle{r: resp.Body, w: answerWD}
+	answer := &readIdle{r: resp.Body, w: answerWD, done: cancel}
 	data, err := io.ReadAll(io.LimitReader(answer, cmp.Or(o.maxAnswer, 1<<20)))
 	if err != nil {
-		return nil, transferError(caller, err, u.Host, counter.n.Load(), o.Size, true)
+		return nil, transferError(caller, err, u.Host, 0, 0, true)
 	}
-	continued := false
-	select {
-	case <-proceed:
-		continued = true
-	default:
-	}
-	return &result{status: resp.StatusCode, data: data, sent: counter.n.Load(), sum: hex.EncodeToString(h.Sum(nil)), continued: continued,
-		date: resp.Header.Get("Date"), at: at, retry: resp.Header.Get("Retry-After")}, nil
+	return &result{status: resp.StatusCode, data: data, date: resp.Header.Get("Date"), at: at, retry: resp.Header.Get("Retry-After")}, nil
 }
 
 func decodeAnswer(status int, data []byte, dryRun bool) (*Answer, error) {
@@ -404,7 +378,6 @@ func decodeAnswer(status int, data []byte, dryRun bool) (*Answer, error) {
 
 func transport(u *url.URL, pin string) (*http.Transport, error) {
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.ExpectContinueTimeout = expectContinueTimeout
 	if pin == "" {
 		if testRoots != nil {
 			t.TLSClientConfig = &tls.Config{RootCAs: testRoots}

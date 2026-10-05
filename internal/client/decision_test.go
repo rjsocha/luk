@@ -3,9 +3,7 @@ package client
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -15,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"luk/internal/channel"
+	"luk/internal/channel/chantest"
 	"luk/internal/tlsself"
 	"luk/internal/wire"
 )
@@ -37,17 +37,14 @@ func earlyHints(hold time.Duration, status int) http.Handler {
 	})
 }
 
-// A 1xx answer other than 100 is no decision: the timer still ends the wait.
+// A 1xx answer other than 100 is no decision: the timer still ends the
+// wait of a link request.
 func TestEarlyHintsAreNoDecision(t *testing.T) {
-	shortContinue(t)
 	for _, proto := range protocols {
 		t.Run(proto.name, func(t *testing.T) {
-			ts, pin := newTestServer(t, proto.h2, earlyHints(3*time.Second, 403))
-			o := fileOpts(t, ts.URL+"/backup", newSigner(t), []byte("hello"))
-			o.Pin = pin
-			o.DecisionTimeout = 200 * time.Millisecond
+			ts := newTestServer(t, proto.h2, earlyHints(3*time.Second, 403))
 			start := time.Now()
-			_, err := uploadWithin(t, o, 5*time.Second)
+			_, err := LinkList(context.Background(), Options{URL: ts.URL + "/backup", Signer: newSigner(t), DecisionTimeout: 200 * time.Millisecond})
 			var te *TransferError
 			if !errors.As(err, &te) || te.Reason != NoDecision {
 				t.Fatalf("%v", err)
@@ -61,14 +58,10 @@ func TestEarlyHintsAreNoDecision(t *testing.T) {
 
 // A final answer after 103 within the timeout is the decision.
 func TestRejectionAfterEarlyHints(t *testing.T) {
-	shortContinue(t)
 	for _, proto := range protocols {
 		t.Run(proto.name, func(t *testing.T) {
-			ts, pin := newTestServer(t, proto.h2, earlyHints(300*time.Millisecond, 401))
-			o := fileOpts(t, ts.URL+"/backup", newSigner(t), []byte("hello"))
-			o.Pin = pin
-			o.DecisionTimeout = 2 * time.Second
-			_, err := uploadWithin(t, o, 5*time.Second)
+			ts := newTestServer(t, proto.h2, earlyHints(300*time.Millisecond, 401))
+			_, err := LinkList(context.Background(), Options{URL: ts.URL + "/backup", Signer: newSigner(t), DecisionTimeout: 2 * time.Second})
 			var re *RejectedError
 			if !errors.As(err, &re) || re.Status != 401 {
 				t.Fatalf("%v", err)
@@ -80,7 +73,6 @@ func TestRejectionAfterEarlyHints(t *testing.T) {
 // The first bytes of a status line are not a decision either: only the
 // complete headers of a final answer are.
 func TestPartialHeadersAreNoDecision(t *testing.T) {
-	shortContinue(t)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -107,11 +99,9 @@ func TestPartialHeadersAreNoDecision(t *testing.T) {
 			}()
 		}
 	}()
-	o := fileOpts(t, "http://"+ln.Addr().String()+"/backup", newSigner(t), []byte("hello"))
-	o.DecisionTimeout = 200 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, err = Upload(ctx, o)
+	_, err = LinkList(ctx, Options{URL: "http://" + ln.Addr().String() + "/backup", Signer: newSigner(t), DecisionTimeout: 200 * time.Millisecond})
 	var te *TransferError
 	if !errors.As(err, &te) || te.Reason != NoDecision {
 		t.Fatalf("%v", err)
@@ -147,14 +137,21 @@ func TestClockOffset(t *testing.T) {
 			t.Fatalf("%s: offset %v", what, re.ClockOffset)
 		}
 	}
-	_, err := Upload(context.Background(), fileOpts(t, ts.URL+"/up", newSigner(t), []byte("hello")))
-	check("upload", err, true)
+	lukd := chantest.New(t)
+	lukd.Header = http.Header{"Date": {time.Now().Add(-2 * time.Minute).UTC().Format(http.TimeFormat)}}
+	lukd.Op = func(channel.Request, []byte) *chantest.Answer {
+		return &chantest.Answer{Status: http.StatusUnauthorized, Body: wire.ErrorResponse{Error: reason}}
+	}
+	upload := func() error {
+		_, err := Upload(context.Background(), fileOpts(t, lukd.URL+"/up", mustPins(t, lukd.Pin()), newSigner(t), []byte("hello")))
+		return err
+	}
+	check("upload", upload(), true)
 	u, _ := url.Parse(ts.URL + "/d/x")
-	_, err = Get(context.Background(), GetOptions{URL: u, Signer: newSigner(t)})
+	_, err := Get(context.Background(), GetOptions{URL: u, Signer: newSigner(t)})
 	check("get", err, true)
 	reason = "timestamp before server start"
-	_, err = Upload(context.Background(), fileOpts(t, ts.URL+"/up", newSigner(t), []byte("hello")))
-	check("other", err, false)
+	check("other", upload(), false)
 }
 
 // hold keeps a request open until it ends.
@@ -247,80 +244,6 @@ func TestGetStalled(t *testing.T) {
 					t.Fatalf("slow reader: %v", err)
 				}
 				time.Sleep(300 * time.Millisecond)
-			}
-		})
-	}
-}
-
-// An upload whose body the server stops taking, or whose answer does not
-// come after the body, ends after the idle timeout.
-func TestUploadStalled(t *testing.T) {
-	shortContinue(t)
-	for _, proto := range protocols {
-		t.Run(proto.name, func(t *testing.T) {
-			ts, pin := newTestServer(t, proto.h2, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/after" {
-					io.Copy(io.Discard, r.Body)
-					<-r.Context().Done()
-					return
-				}
-				// Stop taking the body; the rest is read once the client
-				// has given up, which ends the handler.
-				io.ReadFull(r.Body, make([]byte, 1<<20))
-				select {
-				case <-r.Context().Done():
-				case <-time.After(time.Second):
-				}
-				io.Copy(io.Discard, r.Body)
-			}))
-			o := fileOpts(t, ts.URL+"/after", newSigner(t), []byte("hello"))
-			o.Pin = pin
-			o.IdleTimeout = 200 * time.Millisecond
-			start := time.Now()
-			_, err := uploadWithin(t, o, 5*time.Second)
-			te := wantReason(t, err, Stalled, start)
-			if te.Error() != "no progress for 200ms after 5 B of 5 B" {
-				t.Fatalf("%q", te.Error())
-			}
-
-			o = fileOpts(t, ts.URL+"/body", newSigner(t), make([]byte, 64<<20))
-			o.Pin = pin
-			o.IdleTimeout = 200 * time.Millisecond
-			start = time.Now()
-			_, err = uploadWithin(t, o, 5*time.Second)
-			if te = wantReason(t, err, Stalled, start); te.Done < 1<<20 || te.Done == te.Total {
-				t.Fatalf("%v", te)
-			}
-		})
-	}
-}
-
-// A slow source is luk waiting for itself, not for the server: it never
-// trips the idle timeout.
-func TestUploadSlowSourceNotStalled(t *testing.T) {
-	for _, proto := range protocols {
-		t.Run(proto.name, func(t *testing.T) {
-			ts, pin := newTestServer(t, proto.h2, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				h := sha256.New()
-				n, _ := io.Copy(h, r.Body)
-				w.WriteHeader(http.StatusAccepted)
-				fmt.Fprintf(w, `{"id":"x","sha256":"%x","size":%d}`, h.Sum(nil), n)
-			}))
-			o := fileOpts(t, ts.URL+"/backup", newSigner(t), []byte("zzz"))
-			left := 3
-			o.Body = readFunc(func(p []byte) (int, error) {
-				if left == 0 {
-					return 0, io.EOF
-				}
-				time.Sleep(300 * time.Millisecond)
-				p[0] = 'z'
-				left--
-				return 1, nil
-			})
-			o.Pin = pin
-			o.IdleTimeout = 100 * time.Millisecond
-			if _, err := uploadWithin(t, o, 5*time.Second); err != nil {
-				t.Fatal(err)
 			}
 		})
 	}

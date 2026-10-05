@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"luk/internal/channel"
+	"luk/internal/channel/chantest"
 	"luk/internal/client"
 	"luk/internal/tlsself"
 	"luk/internal/wire"
@@ -230,29 +231,26 @@ func newSendEnv(t *testing.T) *sendEnv {
 	t.Helper()
 	tempConfig(t)
 	e := &sendEnv{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		e.meta, _ = wire.DecodeMeta(r.Header.Get(wire.HeaderMeta))
+	srv := chantest.New(t)
+	srv.Op = func(req channel.Request, _ []byte) *chantest.Answer {
+		e.meta, _ = wire.DecodeMeta(req.Header.Get(wire.HeaderMeta))
 		e.body = nil
-		if !e.meta.DryRun {
-			e.body, _ = io.ReadAll(r.Body)
+		if e.meta.DryRun {
+			return &chantest.Answer{Status: http.StatusOK, Body: json.RawMessage(`{"id":"abc","server":{"received":"2026-09-30T12:00:00Z"},"respond":{"mode":"accept"}}`)}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		return nil
+	}
+	srv.Complete = func(_ channel.Request, content []byte) chantest.Answer {
+		e.body = content
 		sum := sha256.Sum256(e.body)
 		if e.bad {
 			sum[0] ^= 0xff
 		}
-		switch {
-		case e.meta.DryRun:
-			fmt.Fprint(w, `{"id":"abc","server":{"received":"2026-09-30T12:00:00Z"},"respond":{"mode":"accept"}}`)
-		case e.url:
-			w.WriteHeader(http.StatusCreated)
-			fmt.Fprintf(w, `{"id":"abc","url":"https://lukd.test/d/xyz","expires":"2026-10-07T00:00:00Z"%s,"size":%d,"sha256":"%x"}`, e.ttl, len(e.body), sum)
-		default:
-			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprintf(w, `{"id":"abc"%s,"size":%d,"sha256":"%x"}`, e.ttl, len(e.body), sum)
+		if e.url {
+			return chantest.Answer{Status: http.StatusCreated, Body: json.RawMessage(fmt.Sprintf(`{"id":"abc","url":"https://lukd.test/d/xyz","expires":"2026-10-07T00:00:00Z"%s,"size":%d,"sha256":"%x"}`, e.ttl, len(e.body), sum))}
 		}
-	}))
-	t.Cleanup(srv.Close)
+		return chantest.Answer{Status: http.StatusAccepted, Body: json.RawMessage(fmt.Sprintf(`{"id":"abc"%s,"size":%d,"sha256":"%x"}`, e.ttl, len(e.body), sum))}
+	}
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	blk, err := ssh.MarshalPrivateKey(priv, "")
 	if err != nil {
@@ -262,7 +260,7 @@ func newSendEnv(t *testing.T) *sendEnv {
 	if err := os.WriteFile(e.key, pem.EncodeToMemory(blk), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, _, errs := runLuk(t, "config", "endpoint", "add", "-e", "t", "--url", srv.URL); code != 0 {
+	if code, _, errs := runLuk(t, "config", "endpoint", "add", "-e", "t", "--url", srv.URL+"#"+srv.Pin()); code != 0 {
 		t.Fatalf("%s", errs)
 	}
 	return e
@@ -625,7 +623,7 @@ func TestSendResolvesThroughMergedConfig(t *testing.T) {
 		http.Error(w, "no", http.StatusForbidden)
 	}))
 	defer ts.Close()
-	mustRun(t, "config", "--global", "endpoint", "add", "-e", "srv", "--url", ts.URL)
+	mustRun(t, "config", "--global", "endpoint", "add", "-e", "srv", "--url", ts.URL+"#"+goodPin)
 	mustRun(t, "config", "--global", "default", "-e", "srv")
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	blk, err := ssh.MarshalPrivateKey(priv, "")
@@ -815,14 +813,14 @@ func TestSendProgressSilentWithoutTerminal(t *testing.T) {
 
 func TestTerminalSecretMeta(t *testing.T) {
 	m := wire.Meta{Portal: wire.PortalDirect}
-	body, size := secretBody([]byte("s3cret"), &m)
-	if m.Source != wire.SourceTerminal || m.Size == nil || *m.Size != 6 || size != 6 || m.SHA256 == "" {
+	c := secretBody([]byte("s3cret"), &m)
+	if m.Source != wire.SourceTerminal || m.Size == nil || *m.Size != 6 || c.size != 6 || m.SHA256 == "" {
 		t.Fatalf("%+v", m)
 	}
 	if err := m.Normalize(); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := io.ReadAll(body)
+	b, _ := io.ReadAll(io.NewSectionReader(c.source, 0, c.size))
 	if sum := sha256.Sum256(b); m.SHA256 != fmt.Sprintf("%x", sum) {
 		t.Errorf("sha256 %s", m.SHA256)
 	}
@@ -1107,5 +1105,22 @@ func TestSendSecretPromptTwice(t *testing.T) {
 	e.body = nil
 	if code, _, errs := e.send(t, "--secret"); code != 1 || !strings.Contains(errs, "the secrets do not match") || e.body != nil {
 		t.Errorf("mismatch: exit %d: %s body %q", code, errs, e.body)
+	}
+}
+
+func TestSendParallelAndPins(t *testing.T) {
+	e := newSendEnv(t)
+	f := namedFile(t, "a", strings.Repeat("p", 300<<10))
+	for _, n := range []string{"0", "65"} {
+		if code, _, errs := e.send(t, "--file", f, "--parallel", n); code != 1 || !strings.Contains(errs, "--parallel must be 1 to 64") {
+			t.Errorf("--parallel %s: exit %d: %s", n, code, errs)
+		}
+	}
+	if code, _, errs := e.send(t, "--file", f, "--parallel", "3"); code != 0 || len(e.body) != 300<<10 {
+		t.Fatalf("exit %d, %d bytes: %s", code, len(e.body), errs)
+	}
+	mustRun(t, "config", "endpoint", "add", "-e", "bare", "--url", "http://127.0.0.1:1/x")
+	if code, _, errs := runLuk(t, "send", "-e", "bare", "-k", e.key, "--file", f); code != 1 || !strings.Contains(errs, client.ErrNoPin.Error()) {
+		t.Fatalf("no pin: exit %d: %s", code, errs)
 	}
 }

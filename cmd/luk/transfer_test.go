@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"luk/internal/channel"
+	"luk/internal/channel/chantest"
 	"luk/internal/tlsself"
 )
 
@@ -27,18 +28,13 @@ func fakeInterrupt(t *testing.T) context.CancelFunc {
 	return cancel
 }
 
-// partServer reads 1 MiB of an upload, or writes 1 MiB of an 8 MiB
-// download, then calls then.
+// partServer writes 1 MiB of an 8 MiB download, then calls then.
 func partServer(t *testing.T, tls bool, then func(r *http.Request)) *httptest.Server {
 	t.Helper()
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut {
-			io.ReadFull(r.Body, make([]byte, 1<<20))
-		} else {
-			w.Header().Set("Content-Length", "8388608")
-			w.Write(make([]byte, 1<<20))
-			w.(http.Flusher).Flush()
-		}
+		w.Header().Set("Content-Length", "8388608")
+		w.Write(make([]byte, 1<<20))
+		w.(http.Flusher).Flush()
 		then(r)
 	})
 	var ts *httptest.Server
@@ -51,15 +47,8 @@ func partServer(t *testing.T, tls bool, then func(r *http.Request)) *httptest.Se
 	return ts
 }
 
-// waitDone blocks the handler until the client gives up: an upload ends
-// its body, a download its request.
-func waitDone(r *http.Request) {
-	if r.Method == http.MethodPut {
-		io.Copy(io.Discard, r.Body)
-		return
-	}
-	<-r.Context().Done()
-}
+// waitDone blocks the handler until the client gives up the download.
+func waitDone(r *http.Request) { <-r.Context().Done() }
 
 // abort breaks the connection (HTTP/1) or the stream (HTTP/2).
 func abort(*http.Request) { panic(http.ErrAbortHandler) }
@@ -88,25 +77,31 @@ func checkMessage(t *testing.T, code int, errs string, wantCode int, want string
 
 const someBytes = `[0-9.]+ (B|KiB|MiB)`
 
+// Ctrl-C while a part goes ends the upload with the bytes lukd verified.
 func TestSendInterrupted(t *testing.T) {
 	tempConfig(t)
 	cancel := fakeInterrupt(t)
-	ts := partServer(t, false, func(r *http.Request) { cancel(); waitDone(r) })
-	code, errs := sendBig(t, ts.URL)
+	srv := chantest.New(t)
+	srv.Op = func(channel.Request, []byte) *chantest.Answer { return nil }
+	srv.Part = func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool {
+		if n.Number == 0 {
+			return true
+		}
+		cancel()
+		<-r.Context().Done()
+		return false
+	}
+	code, errs := sendBig(t, srv.URL+"#"+srv.Pin())
 	checkMessage(t, code, errs, 130, `luk: interrupted after `+someBytes+` of 8\.0 MiB`)
-}
-
-func TestSendConnectionClosed(t *testing.T) {
-	tempConfig(t)
-	ts := partServer(t, false, abort)
-	code, errs := sendBig(t, ts.URL)
-	checkMessage(t, code, errs, 3, `luk: connection closed after `+someBytes+` of 8\.0 MiB: .+`)
+	if srv.Count(channel.KindAbort) != 1 {
+		t.Fatalf("%d aborts", srv.Count(channel.KindAbort))
+	}
 }
 
 func TestSendUnreachable(t *testing.T) {
 	tempConfig(t)
 	addr := freeAddr(t)
-	code, errs := sendBig(t, "http://"+addr)
+	code, errs := sendBig(t, "http://"+addr+"#"+goodPin)
 	checkMessage(t, code, errs, 3, `luk: cannot reach `+regexp.QuoteMeta(addr)+`: connection refused`)
 }
 

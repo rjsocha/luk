@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"luk/internal/channel"
+	"luk/internal/channel/chantest"
 	"luk/internal/tlsself"
 )
 
@@ -75,8 +77,9 @@ expose:
   drop: {listen: main, path: /d/}
   secure: {listen: secure, path: /, auth: {ssh: {allow: ["*"]}}}
 `, e.root, addr, addr, saddr, saddr, pub, otherPub)
-	startLukd(t, filepath.Join(t.TempDir(), "config.yaml"), text, saddr)
-	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", e.base+"/drop")
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	startLukd(t, cfgPath, text, saddr)
+	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", e.base+"/drop#"+lukdPin(t, cfgPath))
 	mustRun(t, "config", "link", "add", "--url", "luk://"+saddr+"/", "--endpoint", "drop")
 	return e
 }
@@ -605,12 +608,11 @@ func TestGetHeadControlCharacters(t *testing.T) {
 func TestRejectedMessageEscaped(t *testing.T) {
 	tempConfig(t)
 	key, _ := newKeyFile(t)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(403)
-		w.Write([]byte(`{"error":"no\u001b[2J\u001b]0;owned\u0007\nluk: uploaded ok` + strings.Repeat("x", 1000) + `"}`))
-	}))
-	defer ts.Close()
-	code, _, errs := runLuk(t, "send", "-e", ts.URL+"/drop", "-k", key, "--file", namedFile(t, "a", "x"))
+	srv := chantest.New(t)
+	srv.Op = func(channel.Request, []byte) *chantest.Answer {
+		return &chantest.Answer{Status: 403, Body: json.RawMessage(`{"error":"no\u001b[2J\u001b]0;owned\u0007\nluk: uploaded ok` + strings.Repeat("x", 1000) + `"}`)}
+	}
+	code, _, errs := runLuk(t, "send", "-e", srv.URL+"/drop#"+srv.Pin(), "-k", key, "--file", namedFile(t, "a", "x"))
 	want := `luk: rejected (403 Forbidden): no\x1b[2J\x1b]0;owned\a\nluk: uploaded ok` + strings.Repeat("x", 256-3-41) + "...\n"
 	if code != 2 || errs != want {
 		t.Fatalf("exit %d %q\nwant %q", code, errs, want)

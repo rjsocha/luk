@@ -4,10 +4,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,6 +19,8 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
+	"luk/internal/channel"
+	"luk/internal/channel/chantest"
 	"luk/internal/client"
 	"luk/internal/sshsig"
 	"luk/internal/wire"
@@ -61,8 +63,9 @@ func agentWithKeys(t *testing.T, n int) []string {
 }
 
 // keyServer accepts only the allowed fingerprints and records the signer of
-// the last request. reason replaces the unknown key answer when set; date,
-// when set, is the Date header of the answers.
+// the last request, inside the channel (send, at the URL send) and outside
+// it (scan, at the URL url). reason replaces the unknown key answer when
+// set; date, when set, is the Date header of the answers.
 type keyServer struct {
 	mu      sync.Mutex
 	allowed map[string]bool
@@ -70,6 +73,38 @@ type keyServer struct {
 	date    string
 	seen    string
 	url     string
+	send    string
+	srv     *chantest.Server
+}
+
+// answer is the status and the JSON answer to a request signed by the
+// signature blob sig (base64).
+func (ks *keyServer) answer(sig string) (int, string) {
+	blob, _ := base64.StdEncoding.DecodeString(sig)
+	s, err := sshsig.ParseBlob(blob)
+	if err != nil {
+		return http.StatusUnauthorized, `{"error":"bad signature encoding"}`
+	}
+	fp := ssh.FingerprintSHA256(s.Key)
+	ks.mu.Lock()
+	ks.seen = fp
+	ok, reason := ks.allowed[fp], ks.reason
+	ks.mu.Unlock()
+	switch {
+	case reason != "":
+		return http.StatusUnauthorized, `{"error":"` + reason + `"}`
+	case !ok:
+		return http.StatusUnauthorized, `{"error":"unknown key ` + fp + `"}`
+	}
+	return http.StatusOK, `{"id":"abc","server":{"received":"2026-09-30T12:00:00Z"},"respond":{"mode":"accept"}}`
+}
+
+// setDate sets the Date of the answers from now on.
+func (ks *keyServer) setDate(d string) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.date = d
+	ks.srv.Header = http.Header{"Date": {d}}
 }
 
 func newKeyServer(t *testing.T, allowed ...string) *keyServer {
@@ -78,35 +113,24 @@ func newKeyServer(t *testing.T, allowed ...string) *keyServer {
 	for _, fp := range allowed {
 		ks.allowed[fp] = true
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		blob, _ := base64.StdEncoding.DecodeString(r.Header.Get(wire.HeaderSignature))
-		sig, err := sshsig.ParseBlob(blob)
-		if err != nil {
-			http.Error(w, `{"error":"bad signature encoding"}`, http.StatusUnauthorized)
-			return
-		}
-		fp := ssh.FingerprintSHA256(sig.Key)
+	ks.srv = chantest.New(t)
+	ks.srv.Op = func(req channel.Request, _ []byte) *chantest.Answer {
+		code, body := ks.answer(req.Header.Get(wire.HeaderSignature))
+		return &chantest.Answer{Status: code, Body: json.RawMessage(body)}
+	}
+	ks.srv.Fallback = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		code, body := ks.answer(r.Header.Get(wire.HeaderSignature))
 		ks.mu.Lock()
-		ks.seen = fp
-		ok, reason := ks.allowed[fp], ks.reason
 		if ks.date != "" {
 			w.Header().Set("Date", ks.date)
 		}
 		ks.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case reason != "":
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"` + reason + `"}`))
-		case !ok:
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"unknown key ` + fp + `"}`))
-		default:
-			w.Write([]byte(`{"id":"abc","server":{"received":"2026-09-30T12:00:00Z"},"respond":{"mode":"accept"}}`))
-		}
-	}))
-	t.Cleanup(srv.Close)
-	ks.url = srv.URL
+		w.WriteHeader(code)
+		w.Write([]byte(body))
+	})
+	ks.url = ks.srv.URL
+	ks.send = ks.srv.URL + "#" + ks.srv.Pin()
 	return ks
 }
 
@@ -128,8 +152,8 @@ func TestSendKeyPrecedence(t *testing.T) {
 	fps := agentWithKeys(t, 3)
 	ks := newKeyServer(t, fps...)
 	mustRun(t, "config", "--global", "key", "-k", fps[1])
-	mustRun(t, "config", "endpoint", "add", "-e", "withkey", "--url", ks.url, "--key", fps[2])
-	mustRun(t, "config", "endpoint", "add", "-e", "nokey", "--url", ks.url)
+	mustRun(t, "config", "endpoint", "add", "-e", "withkey", "--url", ks.send, "--key", fps[2])
+	mustRun(t, "config", "endpoint", "add", "-e", "nokey", "--url", ks.send)
 	cases := []struct {
 		args []string
 		want string
@@ -137,8 +161,8 @@ func TestSendKeyPrecedence(t *testing.T) {
 		{[]string{"-e", "withkey", "--key", fps[0]}, fps[0]},
 		{[]string{"-e", "withkey"}, fps[2]},
 		{[]string{"-e", "nokey"}, fps[1]},
-		{[]string{"-e", ks.url}, fps[1]},
-		{[]string{"-e", ks.url, "-k", fps[0]}, fps[0]},
+		{[]string{"-e", ks.send}, fps[1]},
+		{[]string{"-e", ks.send, "-k", fps[0]}, fps[0]},
 	}
 	for _, c := range cases {
 		if code, errs := dryRun(t, c.args...); code != 0 {
@@ -159,7 +183,7 @@ func TestSendKeyFingerprintNotInAgent(t *testing.T) {
 	agentWithKeys(t, 1)
 	ks := newKeyServer(t)
 	absent := "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	code, errs := dryRun(t, "-e", ks.url, "-k", absent)
+	code, errs := dryRun(t, "-e", ks.send, "-k", absent)
 	if code != 1 || !strings.Contains(errs, absent) || !strings.Contains(errs, "not in the SSH agent") {
 		t.Errorf("exit %d: %s", code, errs)
 	}
@@ -170,21 +194,21 @@ func TestSendUnknownKeyHint(t *testing.T) {
 	fps := agentWithKeys(t, 2)
 	ks := newKeyServer(t, fps[1])
 	const hint = "agent holds 2 keys; pick one with --key SHA256:... or set key on the endpoint (luk config endpoint add -e NAME --url URL --key SHA256:...)"
-	code, errs := dryRun(t, "-e", ks.url)
+	code, errs := dryRun(t, "-e", ks.send)
 	if code != 2 || !strings.Contains(errs, "rejected (401 Unauthorized): unknown key "+fps[0]) || !strings.Contains(errs, hint) {
 		t.Errorf("implicit first key: exit %d: %s", code, errs)
 	}
-	if code, errs := dryRun(t, "-e", ks.url, "-k", fps[0]); code != 2 || strings.Contains(errs, "agent holds") {
+	if code, errs := dryRun(t, "-e", ks.send, "-k", fps[0]); code != 2 || strings.Contains(errs, "agent holds") {
 		t.Errorf("explicit key: exit %d: %s", code, errs)
 	}
-	mustRun(t, "config", "endpoint", "add", "-e", "srv", "--url", ks.url, "--key", fps[0])
+	mustRun(t, "config", "endpoint", "add", "-e", "srv", "--url", ks.send, "--key", fps[0])
 	if code, errs := dryRun(t, "-e", "srv"); code != 2 || strings.Contains(errs, "agent holds") {
 		t.Errorf("endpoint key: exit %d: %s", code, errs)
 	}
 	ks.mu.Lock()
 	ks.reason = wire.ErrTimestampWindow
 	ks.mu.Unlock()
-	if code, errs := dryRun(t, "-e", ks.url); code != 2 || strings.Contains(errs, "agent holds") {
+	if code, errs := dryRun(t, "-e", ks.send); code != 2 || strings.Contains(errs, "agent holds") {
 		t.Errorf("other 401: exit %d: %s", code, errs)
 	}
 }
@@ -193,7 +217,7 @@ func TestSendUnknownKeyNoHintWithOneAgentKey(t *testing.T) {
 	tempConfig(t)
 	agentWithKeys(t, 1)
 	ks := newKeyServer(t)
-	if code, errs := dryRun(t, "-e", ks.url); code != 2 || !strings.Contains(errs, "unknown key") || strings.Contains(errs, "agent holds") {
+	if code, errs := dryRun(t, "-e", ks.send); code != 2 || !strings.Contains(errs, "unknown key") || strings.Contains(errs, "agent holds") {
 		t.Errorf("exit %d: %s", code, errs)
 	}
 }
@@ -238,16 +262,16 @@ func TestSendClockHint(t *testing.T) {
 	ks := newKeyServer(t)
 	ks.mu.Lock()
 	ks.reason = wire.ErrTimestampWindow
-	ks.date = time.Now().Add(3 * time.Minute).UTC().Format(http.TimeFormat)
 	ks.mu.Unlock()
-	code, errs := dryRun(t, "-e", ks.url)
+	ks.setDate(time.Now().Add(3 * time.Minute).UTC().Format(http.TimeFormat))
+	code, errs := dryRun(t, "-e", ks.send)
 	if code != 2 || !regexp.MustCompile(`luk: your clock differs from the server by (2m59s|3m0s); check NTP\n`).MatchString(errs) {
 		t.Fatalf("exit %d: %s", code, errs)
 	}
 	ks.mu.Lock()
 	ks.reason = "timestamp before server start"
 	ks.mu.Unlock()
-	if code, errs := dryRun(t, "-e", ks.url); code != 2 || strings.Contains(errs, "your clock") {
+	if code, errs := dryRun(t, "-e", ks.send); code != 2 || strings.Contains(errs, "your clock") {
 		t.Fatalf("other 401: exit %d: %s", code, errs)
 	}
 }

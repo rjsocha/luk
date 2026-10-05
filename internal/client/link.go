@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"luk/internal/channel"
 	"luk/internal/wire"
 )
 
@@ -27,27 +28,21 @@ type LinkOptions struct {
 
 // Link sends a link request and returns the server answer: 200 for remove
 // and ttl, 202 for a replace, whose sha256 is compared with the content
-// sent.
+// sent. A replace goes through the channel and sends its content in parts
+// as an upload does.
 func Link(ctx context.Context, o LinkOptions) (*wire.LinkAnswer, error) {
 	method, ok := wire.LinkMethod(o.Action)
 	if !ok || o.Action == wire.LinkList {
 		return nil, fmt.Errorf("unknown link action %q", o.Action)
 	}
-	var metaS string
-	var err error
-	want := http.StatusOK
 	if o.Action == wire.LinkReplace {
-		want = http.StatusAccepted
-		if err = o.Meta.Normalize(); err == nil {
-			metaS, err = wire.EncodeMeta(o.Meta)
-		}
-	} else {
-		o.Body, o.Size = nil, 0
-		metaS, err = wire.EncodeLinkMeta(wire.LinkMeta{TTL: o.TTL})
+		return linkReplace(ctx, o, method)
 	}
+	metaS, err := wire.EncodeLinkMeta(wire.LinkMeta{TTL: o.TTL})
 	if err != nil {
 		return nil, err
 	}
+	o.Body, o.Source, o.Size = nil, nil, 0
 	header := map[string]string{wire.HeaderLink: o.Link, wire.HeaderLinkAction: o.Action}
 	res, err := send(ctx, o.Options, method, metaS, header, func(host, path, ts, nonce string) (string, []byte) {
 		return wire.LinkNamespace, wire.LinkCanonicalText(method, host, path, o.Link, o.Action, ts, nonce, metaS)
@@ -58,15 +53,50 @@ func Link(ctx context.Context, o LinkOptions) (*wire.LinkAnswer, error) {
 	if res.status >= 400 {
 		return nil, res.rejected()
 	}
-	if res.status != want {
+	if res.status != http.StatusOK {
 		return nil, fmt.Errorf("unexpected answer %d %s to a link %s", res.status, http.StatusText(res.status), o.Action)
 	}
 	a := &wire.LinkAnswer{}
 	if err := json.Unmarshal(res.data, a); err != nil {
 		return nil, fmt.Errorf("bad answer (%d): %w", res.status, err)
 	}
-	if o.Action == wire.LinkReplace && a.SHA256 != "" && a.SHA256 != res.sum {
-		return a, &HashMismatchError{Local: res.sum, Remote: a.SHA256}
+	return a, nil
+}
+
+// linkReplace replaces the content of o.Link through the channel.
+func linkReplace(ctx context.Context, o LinkOptions, method string) (*wire.LinkAnswer, error) {
+	if err := o.Meta.Normalize(); err != nil {
+		return nil, err
+	}
+	metaS, err := wire.EncodeMeta(o.Meta)
+	if err != nil {
+		return nil, err
+	}
+	header := map[string]string{wire.HeaderLink: o.Link, wire.HeaderLinkAction: o.Action}
+	res, err := uploadParts(ctx, o.Options, func(c *Channel) (channel.Request, error) {
+		return signedOp(o.Options, c, method, metaS, header, func(host, path, ts, nonce string) (string, []byte) {
+			return wire.LinkNamespaceV2, wire.LinkCanonicalTextV2(method, host, path, o.Link, o.Action, ts, nonce, metaS, c.H())
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	resp := res.resp
+	if resp.Status >= 400 {
+		if he := changedSource(o.Options, res, resp.Status); he != nil {
+			return nil, he
+		}
+		return nil, rejection(resp)
+	}
+	if resp.Status != http.StatusAccepted || !res.parts {
+		return nil, fmt.Errorf("unexpected answer %d %s to a link %s", resp.Status, http.StatusText(resp.Status), o.Action)
+	}
+	a := &wire.LinkAnswer{}
+	if err := json.Unmarshal(resp.Body, a); err != nil {
+		return nil, fmt.Errorf("bad answer (%d): %w", resp.Status, err)
+	}
+	if local := sentSum(o.Options, res); a.SHA256 != "" && a.SHA256 != local {
+		return a, &HashMismatchError{Local: local, Remote: a.SHA256}
 	}
 	return a, nil
 }
@@ -76,9 +106,9 @@ func Link(ctx context.Context, o LinkOptions) (*wire.LinkAnswer, error) {
 const maxListAnswer = 64 << 20
 
 // LinkList asks the endpoint o.URL for the links of the signer there; only
-// URL, Pin and Signer of o count.
+// URL and Signer of o count.
 func LinkList(ctx context.Context, o Options) (*wire.LinkListAnswer, error) {
-	o = Options{URL: o.URL, Pin: o.Pin, Signer: o.Signer, DecisionTimeout: o.DecisionTimeout, IdleTimeout: o.IdleTimeout, maxAnswer: maxListAnswer}
+	o = Options{URL: o.URL, Signer: o.Signer, DecisionTimeout: o.DecisionTimeout, IdleTimeout: o.IdleTimeout, maxAnswer: maxListAnswer}
 	metaS, err := wire.EncodeLinkMeta(wire.LinkMeta{})
 	if err != nil {
 		return nil, err

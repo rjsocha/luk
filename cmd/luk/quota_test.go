@@ -26,8 +26,9 @@ pipeline:
 storage:
   s: {type: local, base: s, path: "{{ .Id }}"}
 `, root, addr, pub)
-	startLukd(t, filepath.Join(t.TempDir(), "config.yaml"), text, addr)
-	mustRun(t, "config", "endpoint", "add", "-e", "backup", "--url", "http://"+addr+"/backup", "-k", key)
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	startLukd(t, cfgPath, text, addr)
+	mustRun(t, "config", "endpoint", "add", "-e", "backup", "--url", "http://"+addr+"/backup#"+lukdPin(t, cfgPath), "-k", key)
 	file := func(n int) string {
 		b := make([]byte, n)
 		_, _ = rand.Read(b)

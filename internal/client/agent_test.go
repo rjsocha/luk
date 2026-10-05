@@ -54,13 +54,13 @@ func TestUploadWithAgent(t *testing.T) {
 	if err := os.WriteFile(pubFile, ssh.MarshalAuthorizedKey(pub), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ts, _ := testServer(t, pub, false)
+	base, pins := lukdChannel(t, pub, false)
 	for _, arg := range []string{"", pubFile} {
 		s, err := LoadSigner(arg)
 		if err != nil {
 			t.Fatalf("%q: %v", arg, err)
 		}
-		o := fileOpts(t, ts.URL+"/backup", s, []byte("from the agent"))
+		o := fileOpts(t, base+"/backup", pins, s, []byte("from the agent"))
 		o.Meta.DryRun = true
 		resp, err := Upload(context.Background(), o)
 		if err != nil {

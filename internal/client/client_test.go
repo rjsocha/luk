@@ -13,7 +13,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,9 +24,9 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"luk/internal/channel"
+	"luk/internal/channel/chantest"
 	"luk/internal/config"
 	"luk/internal/server"
-	"luk/internal/tlsself"
 	"luk/internal/wire"
 )
 
@@ -49,8 +48,16 @@ func testHandler(t *testing.T, user ssh.PublicKey) http.Handler {
 // newLukd is the lukd of the client tests, without an identity key.
 func newLukd(t *testing.T, user ssh.PublicKey) *server.Server {
 	t.Helper()
+	srv, _ := newLukdWith(t, user, nil)
+	return srv
+}
+
+// newLukdWith is newLukd with its config text rewritten by mod; it also
+// returns the root of lukd.
+func newLukdWith(t *testing.T, user ssh.PublicKey, mod func(string) string) (*server.Server, string) {
+	t.Helper()
 	root := t.TempDir()
-	cfg, err := config.Parse([]byte(`
+	text := `
 root: ` + root + `
 listen: {main: {addr: "127.0.0.1:0", public: "https://lukd.test"}}
 auth:
@@ -66,7 +73,11 @@ storage:
   drop: {type: local, base: s/drop, path: "{{ .Random }}", expose: drop, ttl: {max: 1d}}
 expose:
   drop: {listen: main, path: /d/}
-`))
+`
+	if mod != nil {
+		text = mod(text)
+	}
+	cfg, err := config.Parse([]byte(text))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,33 +86,28 @@ expose:
 			t.Fatal(err)
 		}
 	}
-	return server.New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return server.New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil))), root
 }
 
-func testServer(t *testing.T, user ssh.PublicKey, tlsOn bool) (*httptest.Server, string) {
+// lukdChannel is the lukd of the client tests with an identity key, over
+// TLS or plain HTTP: its base URL and its pins.
+func lukdChannel(t *testing.T, user ssh.PublicKey, tlsOn bool) (string, []channel.Pin) {
 	t.Helper()
-	h := testHandler(t, user)
-	if !tlsOn {
-		ts := httptest.NewServer(h)
-		t.Cleanup(ts.Close)
-		return ts, ""
-	}
-	ts := httptest.NewTLSServer(h)
-	t.Cleanup(ts.Close)
-	return ts, tlsself.Pin(ts.Certificate())
+	ts, k, _ := chanTestServer(t, user, tlsOn)
+	return ts.URL, mustPins(t, channel.Words(k.Public))
 }
 
-func fileOpts(t *testing.T, url string, s ssh.Signer, body []byte) Options {
+func fileOpts(t *testing.T, url string, pins []channel.Pin, s ssh.Signer, body []byte) Options {
 	n := int64(len(body))
 	sum := sha256.Sum256(body)
-	return Options{URL: url, Signer: s, Body: bytes.NewReader(body), Size: n,
+	return Options{URL: url, Pins: pins, Signer: s, Source: bytes.NewReader(body), Size: n,
 		Meta: wire.Meta{Portal: wire.PortalDirect, File: "f", Source: wire.SourceFile, Size: &n, SHA256: hex.EncodeToString(sum[:])}}
 }
 
 func TestUploadFile(t *testing.T) {
 	s := newSigner(t)
-	ts, _ := testServer(t, s.PublicKey(), false)
-	o := fileOpts(t, ts.URL+"/backup", s, []byte("hello"))
+	base, pins := lukdChannel(t, s.PublicKey(), false)
+	o := fileOpts(t, base+"/backup", pins, s, []byte("hello"))
 	a, err := Upload(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
@@ -113,8 +119,8 @@ func TestUploadFile(t *testing.T) {
 
 func TestUploadDrop(t *testing.T) {
 	s := newSigner(t)
-	ts, _ := testServer(t, s.PublicKey(), false)
-	a, err := Upload(context.Background(), fileOpts(t, ts.URL+"/drop", s, []byte("hello")))
+	base, pins := lukdChannel(t, s.PublicKey(), false)
+	a, err := Upload(context.Background(), fileOpts(t, base+"/drop", pins, s, []byte("hello")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,8 +131,8 @@ func TestUploadDrop(t *testing.T) {
 
 func TestUploadEmptyFile(t *testing.T) {
 	s := newSigner(t)
-	ts, _ := testServer(t, s.PublicKey(), false)
-	a, err := Upload(context.Background(), fileOpts(t, ts.URL+"/backup", s, nil))
+	base, pins := lukdChannel(t, s.PublicKey(), false)
+	a, err := Upload(context.Background(), fileOpts(t, base+"/backup", pins, s, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,8 +143,8 @@ func TestUploadEmptyFile(t *testing.T) {
 
 func TestUploadStream(t *testing.T) {
 	s := newSigner(t)
-	ts, _ := testServer(t, s.PublicKey(), false)
-	a, err := Upload(context.Background(), Options{URL: ts.URL + "/backup", Signer: s, Body: strings.NewReader("streamed"), Size: -1, Meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourcePipe}})
+	base, pins := lukdChannel(t, s.PublicKey(), false)
+	a, err := Upload(context.Background(), Options{URL: base + "/backup", Pins: pins, Signer: s, Body: strings.NewReader("streamed"), Size: -1, Meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourcePipe}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,51 +154,32 @@ func TestUploadStream(t *testing.T) {
 }
 
 func TestUploadRejected(t *testing.T) {
-	ts, _ := testServer(t, newSigner(t).PublicKey(), false)
-	_, err := Upload(context.Background(), fileOpts(t, ts.URL+"/backup", newSigner(t), []byte("x")))
+	base, pins := lukdChannel(t, newSigner(t).PublicKey(), false)
+	_, err := Upload(context.Background(), fileOpts(t, base+"/backup", pins, newSigner(t), []byte("x")))
 	var re *RejectedError
 	if !errors.As(err, &re) || re.Status != 401 || re.Message == "" {
 		t.Fatalf("%v", err)
 	}
 }
 
-func TestPinnedTLS(t *testing.T) {
+// An upload trusts lukd by its key over TLS as over HTTP, and nothing
+// without a pin.
+func TestUploadPins(t *testing.T) {
 	s := newSigner(t)
-	ts, pin := testServer(t, s.PublicKey(), true)
-	o := fileOpts(t, ts.URL+"/backup", s, []byte("x"))
-	o.Pin = pin
-	if _, err := Upload(context.Background(), o); err != nil {
+	base, pins := lukdChannel(t, s.PublicKey(), true)
+	if _, err := Upload(context.Background(), fileOpts(t, base+"/backup", pins, s, bytes.Repeat([]byte("y"), 1<<20))); err != nil {
 		t.Fatal(err)
 	}
-	o = fileOpts(t, ts.URL+"/backup", s, []byte("x"))
-	o.Pin = "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-	if _, err := Upload(context.Background(), o); err == nil || !strings.Contains(err.Error(), "pin") {
+	other, err := channel.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pe *PinMismatchError
+	if _, err := Upload(context.Background(), fileOpts(t, base+"/backup", mustPins(t, channel.Words(other.Public)), s, []byte("x"))); !errors.As(err, &pe) {
 		t.Fatalf("wrong pin: %v", err)
 	}
-	o = fileOpts(t, "http://127.0.0.1:1/backup", s, []byte("x"))
-	o.Pin = pin
-	if _, err := Upload(context.Background(), o); err == nil {
-		t.Fatal("pin over http accepted")
-	}
-}
-
-func TestPinnedHTTP2(t *testing.T) {
-	s := newSigner(t)
-	ts := httptest.NewUnstartedServer(testHandler(t, s.PublicKey()))
-	ts.EnableHTTP2 = true
-	ts.StartTLS()
-	t.Cleanup(ts.Close)
-	pin := tlsself.Pin(ts.Certificate())
-	o := fileOpts(t, ts.URL+"/backup", s, bytes.Repeat([]byte("y"), 1<<20))
-	o.Pin = pin
-	if _, err := Upload(context.Background(), o); err != nil {
-		t.Fatal(err)
-	}
-	o = fileOpts(t, ts.URL+"/backup", newSigner(t), []byte("x"))
-	o.Pin = pin
-	var re *RejectedError
-	if _, err := Upload(context.Background(), o); !errors.As(err, &re) || re.Status != 401 {
-		t.Fatalf("%v", err)
+	if _, err := Upload(context.Background(), fileOpts(t, base+"/backup", nil, s, []byte("x"))); !errors.Is(err, ErrNoPin) {
+		t.Fatalf("no pin: %v", err)
 	}
 }
 
@@ -297,9 +284,9 @@ func TestReadMasked(t *testing.T) {
 
 func TestUploadHashMismatchWhenFileChanges(t *testing.T) {
 	s := newSigner(t)
-	ts, _ := testServer(t, s.PublicKey(), false)
-	o := fileOpts(t, ts.URL+"/backup", s, []byte("hello"))
-	o.Body = strings.NewReader("HELLO")
+	base, pins := lukdChannel(t, s.PublicKey(), false)
+	o := fileOpts(t, base+"/backup", pins, s, []byte("hello"))
+	o.Source = strings.NewReader("HELLO")
 	_, err := Upload(context.Background(), o)
 	var he *HashMismatchError
 	if !errors.As(err, &he) {
@@ -317,8 +304,8 @@ func sha256Sum(s string) []byte {
 
 func TestUploadProgressAndLimit(t *testing.T) {
 	s := newSigner(t)
-	ts, _ := testServer(t, s.PublicKey(), false)
-	o := fileOpts(t, ts.URL+"/backup", s, make([]byte, 200<<10))
+	base, pins := lukdChannel(t, s.PublicKey(), false)
+	o := fileOpts(t, base+"/backup", pins, s, make([]byte, 200<<10))
 	var w bytes.Buffer
 	o.Progress = &w
 	o.BWLimit = 1 << 20
@@ -336,8 +323,8 @@ func TestUploadProgressAndLimit(t *testing.T) {
 
 func TestUploadDryRunEcho(t *testing.T) {
 	s := newSigner(t)
-	ts, _ := testServer(t, s.PublicKey(), false)
-	o := fileOpts(t, ts.URL+"/backup", s, []byte("hello"))
+	base, pins := lukdChannel(t, s.PublicKey(), false)
+	o := fileOpts(t, base+"/backup", pins, s, []byte("hello"))
 	o.Meta.DryRun = true
 	a, err := Upload(context.Background(), o)
 	if err != nil {
@@ -348,41 +335,40 @@ func TestUploadDryRunEcho(t *testing.T) {
 	}
 }
 
+// countingReaderAt counts the bytes read from it.
+type countingReaderAt struct {
+	n *atomic.Int64
+	r io.ReaderAt
+}
+
+func (c countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n, err := c.r.ReadAt(p, off)
+	c.n.Add(int64(n))
+	return n, err
+}
+
 func TestUploadDryRunSendsNoBody(t *testing.T) {
 	s := newSigner(t)
-	h := testHandler(t, s.PublicKey())
-	var read atomic.Int64
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b := r.Body
-		r.Body = readCloser{Reader: readFunc(func(p []byte) (int, error) {
-			n, err := b.Read(p)
-			read.Add(int64(n))
-			return n, err
-		}), Closer: b}
-		h.ServeHTTP(w, r)
-	}))
-	t.Cleanup(ts.Close)
-	o := fileOpts(t, ts.URL+"/backup", s, bytes.Repeat([]byte("d"), 1<<20))
+	ts, k, counts := chanTestServer(t, s.PublicKey(), false)
+	body := bytes.Repeat([]byte("d"), 1<<20)
+	o := fileOpts(t, ts.URL+"/backup", mustPins(t, channel.Words(k.Public)), s, body)
 	o.Meta.DryRun = true
+	var read atomic.Int64
+	o.Source = countingReaderAt{n: &read, r: bytes.NewReader(body)}
 	var progress bytes.Buffer
 	o.Progress = &progress
 	a, err := Upload(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Status != 200 || a.Debug == nil || read.Load() != 0 || progress.Len() != 0 {
-		t.Fatalf("status %d, server read %d body bytes, progress %q", a.Status, read.Load(), progress.String())
+	if a.Status != 200 || a.Debug == nil || read.Load() != 0 || counts.transports.Load() != 1 || progress.Len() != 0 {
+		t.Fatalf("status %d, read %d, %d messages, progress %q", a.Status, read.Load(), counts.transports.Load(), progress.String())
 	}
 }
 
 type readFunc func([]byte) (int, error)
 
 func (f readFunc) Read(p []byte) (int, error) { return f(p) }
-
-type readCloser struct {
-	io.Reader
-	io.Closer
-}
 
 func TestUploadStatusMustFitDryRun(t *testing.T) {
 	sum := hex.EncodeToString(sha256Sum("hello"))
@@ -404,15 +390,7 @@ func TestUploadStatusMustFitDryRun(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				io.Copy(io.Discard, r.Body)
-				w.WriteHeader(c.status)
-				io.WriteString(w, c.body)
-			}))
-			t.Cleanup(ts.Close)
-			o := fileOpts(t, ts.URL+"/backup", newSigner(t), []byte("hello"))
-			o.Meta.DryRun = c.dryRun
-			a, err := Upload(context.Background(), o)
+			a, err := decodeAnswer(c.status, []byte(c.body), c.dryRun)
 			if c.ok != (err == nil) {
 				t.Fatalf("%+v %v", a, err)
 			}
@@ -424,13 +402,12 @@ func TestUploadStatusMustFitDryRun(t *testing.T) {
 }
 
 func TestUploadReceiptHashMismatch(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.Copy(io.Discard, r.Body)
-		w.WriteHeader(202)
-		io.WriteString(w, `{"id":"a","size":5,"sha256":"`+strings.Repeat("0", 64)+`"}`)
-	}))
-	t.Cleanup(ts.Close)
-	_, err := Upload(context.Background(), fileOpts(t, ts.URL+"/backup", newSigner(t), []byte("hello")))
+	srv := chantest.New(t)
+	srv.Op = func(channel.Request, []byte) *chantest.Answer { return nil }
+	srv.Complete = func(channel.Request, []byte) chantest.Answer {
+		return chantest.Answer{Status: 202, Body: wire.Receipt{ID: "a", Size: 5, SHA256: strings.Repeat("0", 64)}}
+	}
+	_, err := Upload(context.Background(), fileOpts(t, srv.URL+"/backup", mustPins(t, srv.Pin()), newSigner(t), []byte("hello")))
 	var he *HashMismatchError
 	if !errors.As(err, &he) || he.Remote != strings.Repeat("0", 64) {
 		t.Fatalf("%v", err)

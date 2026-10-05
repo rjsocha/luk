@@ -73,11 +73,36 @@ func (e *TransportError) Error() string {
 }
 
 // InnerResponse is an answer inside the channel, read whole and
-// authenticated.
+// authenticated. Date is the Date of the outer response and At the local
+// time it came: nothing authenticates Date, so it serves a clock offset
+// hint only.
 type InnerResponse struct {
 	Status int
 	Header http.Header
 	Body   []byte
+	Date   string
+	At     time.Time
+}
+
+// sourceError is a read error of the content a message carries: it is
+// the caller's own failure, never one of the network or the server.
+type sourceError struct{ err error }
+
+func (e *sourceError) Error() string { return e.err.Error() }
+func (e *sourceError) Unwrap() error { return e.err }
+
+// sourceReader keeps the first read error of r other than EOF.
+type sourceReader struct {
+	r   io.Reader
+	err error
+}
+
+func (s *sourceReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if err != nil && err != io.EOF && s.err == nil {
+		s.err = err
+	}
+	return n, err
 }
 
 // DialOptions are the options of Dial.
@@ -223,6 +248,14 @@ func (c *Channel) PeerKey() []byte { return c.peer }
 // H is the handshake hash that signed texts inside the channel carry.
 func (c *Channel) H() []byte { return c.sess.H() }
 
+// Close closes the idle connections of the channel; a request still
+// running goes on.
+func (c *Channel) Close() {
+	if tr, ok := c.client.Transport.(*http.Transport); ok {
+		tr.CloseIdleConnections()
+	}
+}
+
 // Do sends the OP of the session (kind OP, attempt 0) and returns the
 // inner response; body may be nil. A session takes one OP.
 func (c *Channel) Do(ctx context.Context, req channel.Request, body io.Reader) (*InnerResponse, error) {
@@ -271,11 +304,27 @@ func (c *Channel) Send(ctx context.Context, n channel.Nonce, body io.Reader) (*I
 // message seals plain under n, posts it and reads the inner response
 // whole: its body is trusted only once the stream ended where the sender
 // ended it.
+//
+// A read error of plain is returned as such. plain is no longer read once
+// message returns, so the caller may reuse what it reads from.
 func (c *Channel) message(ctx context.Context, n channel.Nonce, plain io.Reader) (*InnerResponse, error) {
+	src := &sourceReader{r: plain}
 	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(c.sess.SealRequest(pw, n, plain)) }()
+	sealed := make(chan struct{})
+	go func() {
+		defer close(sealed)
+		pw.CloseWithError(c.sess.SealRequest(pw, n, src))
+	}()
 	resp, err := c.post(ctx, pr)
+	at := time.Now()
 	pr.Close()
+	<-sealed
+	if src.err != nil {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return nil, &sourceError{src.err}
+	}
 	if err != nil {
 		return nil, transferError(ctx, err, c.host, 0, -1, false)
 	}
@@ -299,7 +348,7 @@ func (c *Channel) message(ctx context.Context, n channel.Nonce, plain io.Reader)
 	if err := channel.ReadHead(r, &head); err != nil {
 		return nil, err
 	}
-	return &InnerResponse{Status: head.Status, Header: head.Header, Body: plainResp[len(plainResp)-r.Len():]}, nil
+	return &InnerResponse{Status: head.Status, Header: head.Header, Body: plainResp[len(plainResp)-r.Len():], Date: resp.Header.Get("Date"), At: at}, nil
 }
 
 // post sends a channel request body to the target of c.

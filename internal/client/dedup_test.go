@@ -10,20 +10,19 @@ import (
 )
 
 func TestUploadDeduplicated(t *testing.T) {
-	for _, h2 := range []bool{false, true} {
-		t.Run(fmt.Sprint("h2=", h2), func(t *testing.T) {
+	for _, tlsOn := range []bool{false, true} {
+		t.Run(fmt.Sprint("tls=", tlsOn), func(t *testing.T) {
 			s := newSigner(t)
-			ts, pin := newTestServer(t, h2, testHandler(t, s.PublicKey()))
+			base, pins := lukdChannel(t, s.PublicKey(), tlsOn)
 			body := strings.Repeat("x", 1<<20)
-			o := fileOpts(t, ts.URL+"/drop", s, []byte(body))
-			o.Pin = pin
+			o := fileOpts(t, base+"/drop", pins, s, []byte(body))
 			first, err := Upload(context.Background(), o)
 			if err != nil || first.Receipt.Deduplicated {
 				t.Fatalf("first %+v %v", first, err)
 			}
 			var read atomic.Int64
 			var progress bytes.Buffer
-			o.Body = countingReader{n: &read, r: strings.NewReader(body)}
+			o.Source = countingReaderAt{n: &read, r: strings.NewReader(body)}
 			o.Progress = &progress
 			second, err := Upload(context.Background(), o)
 			if err != nil {

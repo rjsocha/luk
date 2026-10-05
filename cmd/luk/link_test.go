@@ -89,7 +89,7 @@ expose:
   drop: {listen: main, path: /d/}
 `, t.TempDir(), addr, addr, pub, otherPub, ttl)
 	e.logs = startLukd(t, filepath.Join(dir, "config.yaml"), text, addr)
-	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", e.base+"/drop")
+	mustRun(t, "config", "endpoint", "add", "-e", "drop", "--url", e.base+"/drop#"+lukdPin(t, filepath.Join(dir, "config.yaml")))
 	mustRun(t, "config", "link", "add", "--url", e.base+"/d/", "--endpoint", "drop")
 	return e
 }
@@ -159,6 +159,17 @@ func startLukd(t *testing.T, p, text, addr string) *logBuf {
 		return err == nil
 	})
 	return logs
+}
+
+// lukdPin is the words pin of the identity key of the lukd whose config
+// file is p.
+func lukdPin(t *testing.T, p string) string {
+	t.Helper()
+	k, err := channel.LoadKey(config.IdentityPath(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return channel.Words(k.Public)
 }
 
 func waitUntil(t *testing.T, what string, ok func() bool) {

@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -41,21 +42,82 @@ func (p *progressReader) Read(b []byte) (int, error) {
 }
 
 func (p *progressReader) line(t time.Time) string {
-	el := t.Sub(p.start)
-	rate := rateOf(p.n, el)
-	if p.total < 0 {
-		return fmt.Sprintf("%s  %s/s", HumanBytes(p.n), HumanBytes(rate))
+	return progressLine(p.n, p.total, t.Sub(p.start))
+}
+
+// progressLine is the live line of n of total bytes moved in el; total <
+// 0 means the size is unknown.
+func progressLine(n, total int64, el time.Duration) string {
+	rate := rateOf(n, el)
+	if total < 0 {
+		return fmt.Sprintf("%s  %s/s", HumanBytes(n), HumanBytes(rate))
 	}
 	pct := 100.0
-	if p.total > 0 {
-		pct = float64(p.n) * 100 / float64(p.total)
+	if total > 0 {
+		pct = float64(n) * 100 / float64(total)
 	}
-	s := fmt.Sprintf("%s / %s  %.0f%%  %s/s", HumanBytes(p.n), HumanBytes(p.total), pct, HumanBytes(rate))
-	if rate > 0 && p.n < p.total {
-		eta := time.Duration(float64(p.total-p.n) / float64(rate) * float64(time.Second))
+	s := fmt.Sprintf("%s / %s  %.0f%%  %s/s", HumanBytes(n), HumanBytes(total), pct, HumanBytes(rate))
+	if rate > 0 && n < total {
+		eta := time.Duration(float64(total-n) / float64(rate) * float64(time.Second))
 		s += fmt.Sprintf("  ETA %d:%02d", int(eta.Minutes()), int(eta.Seconds())%60)
 	}
 	return s
+}
+
+// partsMeter reports the progress of an upload in parts on w: the bytes
+// of the verified parts plus those of the parts in flight. A failed
+// attempt takes its bytes back, but the line never goes back: it holds
+// until the count passes what it showed. A nil meter reports nothing.
+type partsMeter struct {
+	mu    sync.Mutex
+	w     io.Writer
+	total int64
+	now   func() time.Time
+	start time.Time
+	last  time.Time
+	n     int64
+	shown int64
+}
+
+func newPartsMeter(w io.Writer, total int64, now func() time.Time) *partsMeter {
+	if w == nil {
+		return nil
+	}
+	return &partsMeter{w: w, total: total, now: now}
+}
+
+// add counts d more bytes (fewer when negative).
+func (m *partsMeter) add(d int64) {
+	if m == nil || d == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t := m.now()
+	if m.start.IsZero() {
+		m.start, m.last = t, t
+	}
+	m.n += d
+	m.shown = max(m.shown, m.n)
+	if d > 0 && t.Sub(m.last) >= progressInterval {
+		m.last = t
+		fmt.Fprintf(m.w, "\r\x1b[K%s", progressLine(m.shown, m.total, t.Sub(m.start)))
+	}
+}
+
+// finish replaces the live line with a summary of the bytes that arrived;
+// it prints nothing when no part went out.
+func (m *partsMeter) finish() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.start.IsZero() {
+		return
+	}
+	el := m.now().Sub(m.start)
+	fmt.Fprintf(m.w, "\r\x1b[K%s in %s, %s/s\n", HumanBytes(m.n), el.Round(100*time.Millisecond), HumanBytes(rateOf(m.n, el)))
 }
 
 // Finish replaces the live line with a summary; it prints nothing when no

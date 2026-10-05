@@ -1,30 +1,30 @@
 package client
 
 import (
+	"context"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"luk/internal/channel"
 )
 
 func TestNoDecisionMessage(t *testing.T) {
-	shortContinue(t)
 	for _, proto := range protocols {
 		t.Run(proto.name, func(t *testing.T) {
 			release := make(chan struct{})
-			ts, pin := newTestServer(t, proto.h2, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ts := newTestServer(t, proto.h2, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				select {
 				case <-release:
 				case <-r.Context().Done():
 				}
 			}))
 			t.Cleanup(func() { close(release) })
-			o := fileOpts(t, ts.URL+"/backup", newSigner(t), []byte("hello"))
-			o.Pin = pin
-			o.DecisionTimeout = time.Second
-			_, err := uploadWithin(t, o, 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := LinkList(ctx, Options{URL: ts.URL + "/backup", Signer: newSigner(t), DecisionTimeout: time.Second})
 			var te *TransferError
 			if !errors.As(err, &te) || te.Reason != NoDecision || err.Error() != "the server gave no decision within 1s" {
 				t.Fatalf("%v", err)
@@ -33,22 +33,24 @@ func TestNoDecisionMessage(t *testing.T) {
 	}
 }
 
+// A part whose connection breaks every time ends the upload with the
+// bytes lukd verified.
 func TestConnectionClosedMidBody(t *testing.T) {
-	for _, proto := range protocols {
-		t.Run(proto.name, func(t *testing.T) {
-			ts, pin := newTestServer(t, proto.h2, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				io.ReadFull(r.Body, make([]byte, 1<<20))
-				panic(http.ErrAbortHandler)
-			}))
-			o := fileOpts(t, ts.URL+"/backup", newSigner(t), make([]byte, 8<<20))
-			o.Pin = pin
-			_, err := uploadWithin(t, o, 5*time.Second)
-			var te *TransferError
-			if !errors.As(err, &te) || te.Reason != Closed || te.Done == 0 ||
-				!strings.HasPrefix(err.Error(), "connection closed after ") || !strings.Contains(err.Error(), " of 8.0 MiB: ") || strings.Contains(err.Error(), `Put "`) {
-				t.Fatalf("%v", err)
-			}
-		})
+	e := newPartsEnv(t)
+	e.setHook(func(w http.ResponseWriter, r *http.Request, _ [16]byte, n channel.Nonce) bool {
+		if n.Kind == channel.KindPart && n.Number == 1 {
+			panic(http.ErrAbortHandler)
+		}
+		return true
+	})
+	_, err := Upload(context.Background(), e.file("/backup", make([]byte, 8<<20)))
+	var te *TransferError
+	if !errors.As(err, &te) || te.Reason != Closed || te.Done != testPartSize ||
+		!strings.HasPrefix(err.Error(), "connection closed after 128.0 KiB of 8.0 MiB: ") || strings.Contains(err.Error(), `Post "`) {
+		t.Fatalf("%v", err)
+	}
+	if left := e.staged(t); len(left) != 0 {
+		t.Fatalf("staging left: %v", left)
 	}
 }
 

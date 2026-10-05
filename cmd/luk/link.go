@@ -91,9 +91,9 @@ replace prints the URL; --json prints the server answer instead. Exit codes as f
 			if err != nil {
 				return usageError{err}
 			}
-			url, _, err := resolve(cfg, ep)
+			url, _, err := cfg.Resolve(ep)
 			if err != nil {
-				return err
+				return usageError{err}
 			}
 			signer, agentKeys, err := signerFor(cfg, ep, key)
 			if err != nil {
@@ -107,15 +107,18 @@ replace prints the URL; --json prints the server answer instead. Exit codes as f
 				o.Action, o.TTL = wire.LinkTTL, ttl
 			default:
 				o.Action = wire.LinkReplace
+				if o.URL, o.Pins, err = resolve(cfg, ep); err != nil {
+					return err
+				}
 				o.Meta = wire.Meta{Portal: wire.PortalDirect}
-				body, size, closer, err := input(file, "", stdin, false, false, &o.Meta)
+				src, closer, err := input(file, "", stdin, false, false, &o.Meta)
 				if err != nil {
 					return err
 				}
 				if closer != nil {
 					defer closer.Close()
 				}
-				o.Body, o.Size = body, size
+				src.apply(&o.Options)
 				if progress && term.IsTerminal(int(os.Stderr.Fd())) {
 					o.Progress = os.Stderr
 				}
@@ -194,9 +197,9 @@ otherwise.`,
 			if err != nil {
 				return usageError{err}
 			}
-			url, _, err := resolve(cfg, endpoint)
+			url, _, err := cfg.Resolve(endpoint)
 			if err != nil {
-				return err
+				return usageError{err}
 			}
 			signer, agentKeys, err := signerFor(cfg, endpoint, key)
 			if err != nil {
