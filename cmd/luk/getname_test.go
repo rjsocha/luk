@@ -136,9 +136,9 @@ func TestGetRemoteNameUsage(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(dir, "my file.txt")); string(b) != "x" {
 		t.Fatalf("my file.txt %q", b)
 	}
-	// -O with --inplace into an existing file.
-	if code, _, errs := runLuk(t, "get", "-k", key, atPath(srv, "/d/my%20file.txt"), "-O", "--inplace", "--force"); code != 0 {
-		t.Fatalf("-O --inplace: exit %d %q", code, errs)
+	// -O with --force over an existing file.
+	if code, _, errs := runLuk(t, "get", "-k", key, atPath(srv, "/d/my%20file.txt"), "-O", "--force"); code != 0 {
+		t.Fatalf("-O --force: exit %d %q", code, errs)
 	}
 }
 
@@ -170,5 +170,71 @@ func TestGetRemoteHeaderNameHostile(t *testing.T) {
 	srv, _ := nameServer(t, "x\ny")
 	if _, _, errs := runLuk(t, "get", "-k", key, atPath(srv, "/safe"), "-OJ"); strings.Count(errs, "\n") != 1 {
 		t.Fatalf("not one line: %q", errs)
+	}
+}
+
+// A symlink at the name -O or -J picks is never written through: --inplace
+// takes no -O, and the default path replaces the link itself (--force) or
+// refuses it.
+func TestGetRemoteNameSymlink(t *testing.T) {
+	tempConfig(t)
+	key, _ := newKeyFile(t)
+	srv, _ := nameServer(t, "a.txt")
+	plain, _ := nameServer(t, "")
+	dir, outside := t.TempDir(), t.TempDir()
+	t.Chdir(dir)
+	target := filepath.Join(outside, "target")
+	for _, c := range []struct {
+		url  string
+		args []string
+		code int
+	}{
+		{atPath(plain, "/a.txt"), []string{"-O"}, 1},
+		{atPath(plain, "/a.txt"), []string{"-O", "-J"}, 1},
+		{atPath(srv, "/other"), []string{"-O", "-J"}, 1},
+		{atPath(plain, "/a.txt"), []string{"-O", "--force"}, 0},
+		{atPath(srv, "/other"), []string{"-O", "-J", "--force"}, 0},
+		{atPath(plain, "/a.txt"), []string{"-O", "--inplace"}, 1},
+		{atPath(plain, "/a.txt"), []string{"-O", "--inplace", "--force"}, 1},
+		{atPath(srv, "/other"), []string{"-O", "-J", "--inplace"}, 1},
+		{atPath(srv, "/other"), []string{"-O", "-J", "--inplace", "--force"}, 1},
+	} {
+		os.Remove("a.txt")
+		if err := os.Symlink(target, "a.txt"); err != nil {
+			t.Fatal(err)
+		}
+		code, _, errs := runLuk(t, append([]string{"get", "-k", key, c.url}, c.args...)...)
+		if code != c.code {
+			t.Errorf("%v: exit %d %q, want %d", c.args, code, errs, c.code)
+		}
+		if strings.Contains(strings.Join(c.args, " "), "--inplace") && !strings.Contains(errs, "--inplace takes no -O") {
+			t.Errorf("%v: %q", c.args, errs)
+		}
+		if left, _ := os.ReadDir(outside); len(left) != 0 {
+			t.Fatalf("%v: written through the symlink: %v", c.args, left)
+		}
+	}
+}
+
+// A name whose temporary file would not fit in a directory entry is
+// refused before the download.
+func TestGetRemoteNameLength(t *testing.T) {
+	tempConfig(t)
+	key, _ := newKeyFile(t)
+	t.Chdir(t.TempDir())
+	plain, gets := nameServer(t, "")
+	long := strings.Repeat("n", 237)
+	if code, _, errs := runLuk(t, "get", "-k", key, atPath(plain, "/"+long), "-O"); code != 1 || !strings.Contains(errs, "longer than 236 bytes") {
+		t.Fatalf("237: exit %d %q", code, errs)
+	}
+	if code, _, errs := runLuk(t, "get", "-k", key, atPath(plain, "/"+long[1:]), "-O"); code != 0 {
+		t.Fatalf("236: exit %d %q", code, errs)
+	}
+	srv, sgets := nameServer(t, strings.Repeat("ż", 119))
+	if code, _, errs := runLuk(t, "get", "-k", key, atPath(srv, "/x"), "-OJ"); code != 3 || !strings.Contains(errs, "longer than 236 bytes") || sgets.Load() != 0 {
+		t.Fatalf("announced: exit %d %q, %d GETs", code, errs, sgets.Load())
+	}
+	if gets.Load() != 1 {
+		t.Fatalf("%d GETs", gets.Load())
 	}
 }

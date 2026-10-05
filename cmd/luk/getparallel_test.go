@@ -169,3 +169,31 @@ func TestGetDirParallelInterrupted(t *testing.T) {
 		t.Fatalf("left behind: %v", left)
 	}
 }
+
+// With several failures the exit code is that of the first in the order
+// of the listing, as without --parallel, whichever ends first.
+func TestGetDirParallelFirstFailure(t *testing.T) {
+	tempConfig(t)
+	key, _ := newKeyFile(t)
+	listing := `[{"name":"slow404"},{"name":"bad"}]`
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v/":
+			w.Write([]byte(listing))
+		case "/v/slow404":
+			time.Sleep(300 * time.Millisecond)
+			http.NotFound(w, r)
+		default:
+			w.Header().Set("ETag", `"`+sumOf("other")+`"`)
+			w.Write([]byte("bad"))
+		}
+	}))
+	t.Cleanup(ts.Close)
+	u := ts.URL + "/v/#" + tlsself.Pin(ts.Certificate())
+	for _, args := range [][]string{nil, {"--parallel", "2"}} {
+		code, _, errs := runLuk(t, append([]string{"get", u, "-k", key, "-o", t.TempDir()}, args...)...)
+		if code != 2 || !strings.HasSuffix(errs, "luk: 2 of 2 files failed\n") {
+			t.Errorf("%v: exit %d %q", args, code, errs)
+		}
+	}
+}

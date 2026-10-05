@@ -226,15 +226,23 @@ func ValidListName(name string) error {
 	return nil
 }
 
+// MaxFileName is the longest name ValidFileName takes, in bytes: its
+// temporary file .<name>.luk-<13 characters> still fits the 255 bytes of
+// a directory entry.
+const MaxFileName = 255 - len(".") - len(".luk-") - 13
+
 // ValidFileName reports whether name is a bare file name, safe to create
-// in the current directory: not empty, "." or "..", valid UTF-8, without
-// a slash or backslash and without characters Printable escapes (control
-// characters and NUL among them). The error says why, without the name.
+// in the current directory: not empty, "." or "..", at most MaxFileName
+// bytes of valid UTF-8, without a slash or backslash and without
+// characters Printable escapes (control characters and NUL among them).
+// The error says why, without the name.
 func ValidFileName(name string) error {
 	bad := errors.New
 	switch {
 	case name == "":
 		return bad("empty")
+	case len(name) > MaxFileName:
+		return fmt.Errorf("longer than %d bytes", MaxFileName)
 	case name == "." || name == "..":
 		return bad("not a file")
 	case !utf8.ValidString(name):

@@ -176,6 +176,8 @@ type dirGet struct {
 	got, skipped, failed int
 	bytes                int64
 	first                error
+	// firstAt is the place in the listing of the file of first.
+	firstAt int
 	// interrupted is the first download ended by Ctrl-C.
 	interrupted error
 }
@@ -284,9 +286,11 @@ func (d *dirGet) one(index int, e wire.ListEntry, size int64) {
 			d.interrupted = err
 		}
 	case err != nil:
+		// The first failure in the order of the listing, as when the
+		// files are fetched one at a time.
 		d.failed++
-		if d.first == nil {
-			d.first = err
+		if d.first == nil || index < d.firstAt {
+			d.first, d.firstAt = err, index
 		}
 		fmt.Fprintf(d.errOut, "luk: %s: %v\n", client.Printable(e.Name), err)
 	case skipped:

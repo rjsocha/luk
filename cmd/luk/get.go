@@ -58,12 +58,12 @@ rate in bytes per second (K, M, G, T suffixes; 0 = unlimited).
 
 -O (--remote-name) writes FILE into the current directory, named after
 the last segment of the URL path (percent-decoded), as -o FILE would;
-it takes no -o, -c or directory URL. -J (--remote-header-name, only with
+it takes no -o, -c, --inplace or directory URL. -J (--remote-header-name, only with
 -O) names it after the file name the server announces (the name --head
 prints), asked with a signed HEAD first, else after the URL. Either name
-must be a bare file name: not empty, . or .., without a slash, a
-backslash or control characters; anything else is an error and nothing
-is downloaded.
+must be a bare file name of at most 236 bytes: not empty, . or ..,
+without a slash, a backslash or control characters; anything else is an
+error and nothing is downloaded.
 
 --head sends a signed HEAD instead (it never claims a once file) and
 prints what the server announces, one "key: value" per line: name, size,
@@ -99,7 +99,7 @@ with the number of the others ([7/20 +3]). --bwlimit applies to each
 file, so the run stays under N times it. A failed file is reported and
 the others still downloaded; the exit code is then that of the first
 failure. -c, -O, --inplace and --head take no directory URL; --parallel
-takes nothing but one with -o DIR/.`,
+needs a directory URL and -o DIR/.`,
 		Example: `  luk get 'luk://secure.example.com/x7Kq...#sha256//Xk9...' -o notes.txt
   luk get luk://secure.example.com/x7Kq... -c | tar x
   luk get https://secure.example.com/x7Kq... -o notes.txt --force --progress
@@ -124,6 +124,10 @@ takes nothing but one with -o DIR/.`,
 				return usageError{errors.New("-O excludes -o and -c")}
 			case remoteName && head:
 				return usageError{errors.New("--head takes no -O")}
+			case remoteName && inplace:
+				// FILE would be opened as it is, a symlink followed, at
+				// a name the URL or the server chooses.
+				return usageError{errors.New("--inplace takes no -O")}
 			case remoteName && client.IsDirURL(u):
 				return usageError{errors.New("-O takes no directory URL; use -o DIR/")}
 			}

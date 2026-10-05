@@ -4890,12 +4890,17 @@ is a 404 (exit 2), an unknown key or a bad signature a 401 (exit 2).
 `-O`/`--remote-name` (as in curl) stands for `-o FILE` with FILE in the
 current directory, named after the last segment of the path of the URL,
 percent-decoded (`luk://h/d/my%20file.txt` writes `my file.txt`);
-`--force`, `--inplace`, `--progress`, `--bwlimit` and `-q` work as with
-`-o FILE`, and the existing-file check still comes before the request.
+`--force`, `--progress`, `--bwlimit` and `-q` work as with `-o FILE`
+(with `--force` an existing FILE, a symlink too, is replaced, never
+written through), and the existing-file check still comes before the request.
 `-O` with `-o` or `-c` is a usage error (`-O excludes -o and -c`), as
 is `-O` with `--head` (`--head takes no -O`) and with a directory URL
-(`-O takes no directory URL; use -o DIR/`). The name must be a bare
-file name: not empty, not `.` or `..`, valid UTF-8, without `/` or `\`
+(`-O takes no directory URL; use -o DIR/`) and with `--inplace`
+(`--inplace takes no -O`: FILE would be opened as it is, a symlink
+followed, at a name the URL or the server chooses). The name must be a
+bare file name: not empty, not `.` or `..`, at most 236 bytes (so its
+temporary file `.<name>.luk-*` fits the 255 bytes of a directory entry;
+`longer than 236 bytes`), valid UTF-8, without `/` or `\`
 and without the characters the text output escapes (control characters
 and NUL among them); anything else is a usage error before any request
 (`unsafe file name "a/b" in the URL: a path separator; pass -o FILE`,
@@ -4969,7 +4974,8 @@ must be 1 to 32`) downloads up to N files at once, each exactly as
 above, with its own signed `GET`; the run stays under N times
 `--bwlimit`. The `get` and `skip` lines and the errors then come in the
 order the files end, not in the order of the listing; the summary and
-the exit code are as without it. Ctrl-C ends every download in flight
+the exit code are as without it (that of the failure first in the order
+of the listing). Ctrl-C ends every download in flight
 and starts no other (exit 130). `--parallel` with a file URL is a usage
 error (`--parallel needs a directory URL (ending with a slash) and -o
 DIR/`), as is `--parallel` on a directory URL without `-o`.
