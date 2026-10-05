@@ -203,6 +203,13 @@ pipeline:
   #         wkd: [robert@example.net]     # keys from the Web Key Directory
   #         key: [matt@example.com]       # keys from gpg.keys
   #         strict: false                 # true: any unusable recipient fails
+  #         # Weaker than the keys: the passwords sit in /etc/site/lukd/password.d/<name>
+  #         # (root:luk 0640) on this server.
+  #         insecure:
+  #           symmetric: [receiver-a]       # password receiver-a also decrypts the .gpg files
+  #           openssl:                      # matching files only as <name>.enc, no integrity check:
+  #             key: receiver-a             # openssl enc -d -aes-256-cbc -pbkdf2 -in X.enc -out X -pass file:pw
+  #             files: ['*-latest.sql.zst'] # globs on the file name as it enters the step
   #     - store: archive
   drop:
     endpoint: [drop]

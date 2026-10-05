@@ -2070,6 +2070,7 @@ directory of the main file holds:
   run.yaml             lukd run global settings (see Jobs with other users)
   run.d/<job>.yaml     lukd run jobs
   gpg.d/               *.asc, *.gpg, *.pgp, *.key keys of encrypt recipients (gpg.keys)
+  password.d/<name>    password <name> of the insecure encrypt options (see Encryption)
 ```
 
 `config.d/` and `ssh.d/` sit next to the file given to `-c`. A snippet
@@ -2360,7 +2361,11 @@ and `ssh.d/ca/`):
   with a dot or contain a slash; the pipeline key `concurrency` is an
   error (`concurrency moved to queue.concurrency`);
 - a step is exactly one of `run`, `store`, `encrypt`, `relay`; encrypt recipients
-  are valid, unique addresses and `key` recipients need `gpg.keys`.
+  are valid, unique addresses and `key` recipients need `gpg.keys`;
+  `encrypt.insecure` sets `symmetric` or `openssl` (or both), password
+  names follow the rule of a job name (`[a-z0-9][a-z0-9._-]*`, at most
+  64 bytes) and appear once in `symmetric`, `openssl` needs `key` and a
+  non-empty `files` of valid `path.Match` globs without a slash.
 
 ## Reload
 
@@ -2386,6 +2391,9 @@ is kept and reloads once the role runs, never ends the process.
   role refuses the same changes, as both roles share the configuration.
 - New queue and local storage directories are created as at start; one
   that cannot be prepared fails the reload like an invalid configuration.
+- The passwords of the encrypt steps are read on every run of the step
+  (see Encryption), so a changed password file needs no reload; a reload
+  applies a changed `encrypt.insecure`.
 - The identity key is re-read on every `SIGHUP` by the receive role; a
   key that does not load is logged and the current one stays (see
   Identity key).
@@ -2484,6 +2492,11 @@ listen.main.addr changed, restart required (reload would be refused)
   not writable): a `note:`, its settings are not compared.
 - `lukd check --no-running` skips the comparison, for a configuration
   meant for a restart.
+- Every password an encrypt step names (`password.d/<name>`, see
+  Encryption) must be readable by the user running the check and not
+  empty (`password <name>: ...`); `--no-passwords` skips that (the reload
+  of the receive unit runs `lukd check --no-passwords`, as that role
+  never reads them and its unit hides `password.d`).
 
 Run as root (as `lukd.service` runs it on `systemctl reload lukd`), `lukd
 check` also checks that the service user (`--user`, default `luk`) can
@@ -2491,7 +2504,8 @@ read every configuration input: `config.yaml`, `config.d/` and its
 `*.yaml`, `ssh.d/` with `ssh.d/ca/{,host/,user/}` and their files,
 `identity.key` (unless `--no-identity`), the
 `cert` and `key` of `self` and `files` listeners, the `eab.key_file` of
-acme listeners, and `gpg.keys` with its key files. Each file needs read
+acme listeners, `gpg.keys` with its key files, and the password files of
+the encrypt steps (unless `--no-passwords`). Each file needs read
 permission, each listed directory read and search, and every directory
 above them search, computed from the owner, group and mode bits for the
 uid and groups of that user (ACLs are not read). Each problem is an error
@@ -2995,6 +3009,64 @@ pipeline:
   like a run step.
 - Decrypt with the secret key of any recipient:
   `gpg --output f.txt --decrypt f.txt.gpg`.
+
+#### Insecure options
+
+`encrypt.insecure` adds password based encryption for receivers without
+an OpenPGP key. Both options are weaker than public-key encryption: the
+passwords sit on the server (anyone who reads `password.d` decrypts the
+files), and a password is only as strong as it is long and random. The
+key reads as a warning in the configuration on purpose.
+
+```yaml
+      - encrypt:
+          key: [backup@example.com]
+          insecure:
+            symmetric: [receiver-a]          # passwords that also decrypt the .gpg files
+            openssl:
+              key: receiver-a                # one password
+              files: ['*-latest.sql.zst']    # globs on the file name as it enters the step
+```
+
+- Passwords: `password.d/<name>` next to the main file
+  (`/etc/site/lukd/password.d/receiver-a`), owned `root:luk`, mode 0640
+  (the directory 0750). The content is the password; one trailing newline
+  is stripped, everything else (spaces, a `\r`, further newlines) is part
+  of it. An empty file, or one over 4096 bytes, is an error. lukd reads
+  the passwords when the step runs, so a changed file takes effect with
+  the next run, without a reload; a missing or empty one fails the step.
+  Only the process role reads them: `lukd-receive.service` and
+  `lukd-run@.service` hide `password.d` (`InaccessiblePaths=`). The run
+  programs of the process role share its user and can read them.
+- Recipients stay required: `insecure` adds to the keys, never replaces
+  them. The recipients are looked up only when the set has a file for the
+  `.gpg` path.
+- `symmetric`: every password adds one symmetric-key encrypted session
+  key packet to the same `.gpg` file, next to the recipients' keys: any
+  recipient key or any of the passwords decrypts it. The password is
+  turned into a key with the Argon2 S2K of RFC 9580 (3 passes,
+  parallelism 4, 64 MiB). Decrypting with a password needs an OpenPGP
+  implementation that reads Argon2 S2K; GnuPG 2.4 does not (`unknown S2K
+  mode 4`), and while it still decrypts such a file with a recipient key,
+  it reports the packets it cannot read and exits with status 2. The meta
+  of the file gets `"passwords"`: the names (never the passwords), next
+  to `"recipients"`.
+- `openssl`: a file whose name (as it enters the step) matches one of
+  the `files` globs (`path.Match`: `*`, `?`, `[...]`, never across a
+  slash) is written only as `out/<name>.enc`, never as `.gpg`, in the
+  format of `openssl enc -aes-256-cbc -pbkdf2 -salt` (OpenSSL 1.1.1 and
+  3.x): `Salted__`, an 8-byte random salt, then AES-256-CBC with PKCS#7
+  padding; key (32 bytes) and IV (16 bytes) are PBKDF2-HMAC-SHA256 of the
+  password and the salt, 10000 iterations. The file is streamed, never
+  held in memory. The format has no integrity check: a changed or
+  truncated file decrypts to garbage, or fails only on the padding of the
+  last block; check the plain `sha256` of the meta after decrypting.
+  Files that do not match take the `.gpg` path. The meta of an `.enc`
+  file is `"encryption": "openssl"`, `"passwords": [<key>]` and `"plain"`
+  as for `.gpg` (no `"recipients"`).
+- Decrypt an `.enc` file with the password in a file (only its first
+  line is read):
+  `openssl enc -d -aes-256-cbc -pbkdf2 -in db-latest.sql.zst.enc -out db-latest.sql.zst -pass file:password.txt`.
 
 ## Storage and catalog
 
@@ -4116,7 +4188,8 @@ at 0 and every catalog is rebuilt). A base must be on a local filesystem
   `root:luk`, mode 0640; `ssh.d/` and `ssh.d/ca/{,host/,user/}` owned
   `root:luk`, mode 0750, their `*.pub` files 0640 (never writable by group
   or others); `identity.key` owned `root:luk`, mode 0640, created by the
-  package (see Identity key).
+  package (see Identity key); `password.d/` owned `root:luk`, mode 0750,
+  its files 0640 (see Encryption).
 - State: `/var/lib/luk` (`quota.json` of the quotas and `accepted.json`
   of the acceptance order among it), shared by
   both role units and created by tmpfiles.d (`deploy/luk.tmpfiles.conf`, installed as
@@ -4254,6 +4327,8 @@ work directory. No polkit and no sudo are involved.
   leaves `/run` read-only, and connecting to a socket is not a write to
   the file system. `lukd-receive` never runs jobs and has
   `InaccessiblePaths=-/run/luk/run.sock`.
+- `lukd-receive` and `lukd-run@` hide the passwords of the encrypt steps
+  (`InaccessiblePaths=-/etc/site/lukd/password.d`, see Encryption).
 - Global settings, optional: `/etc/site/lukd/run.yaml`
   (`deploy/run.yaml.example`), owned `root:root`, mode 0600:
   - `root`: work directories must live under `<root>/work`; default
