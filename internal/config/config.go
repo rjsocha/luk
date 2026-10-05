@@ -1161,8 +1161,9 @@ type Expose struct {
 	// purpose: no auth, and no warning for a catalog or an index on it.
 	Plain bool `yaml:"plain"`
 	// Index answers the directory URLs of the expose with an HTML listing
-	// of the files it serves; never with auth.ssh (the expose of a storage
-	// with auth.ssh answers the signed listing instead).
+	// of the files it serves; never with auth.ssh alone (the expose of a
+	// storage with auth.ssh answers the signed listing instead). With
+	// auth.basic and auth.ssh the unsigned requests get the HTML listing.
 	Index bool `yaml:"index"`
 	// MovedTTL and MovedCleanup catch the keys moved to the storage, so
 	// the error names the new place.
@@ -1171,7 +1172,9 @@ type Expose struct {
 }
 
 // ExposeAuth is the optional authentication of an expose: Basic (htpasswd
-// bcrypt entries) or SSH (signed luk-get@v1 requests), never both.
+// bcrypt entries), SSH (signed luk-get@v1 requests) or both, where either
+// suffices: a signed request is judged by SSH alone, an unsigned one by
+// Basic.
 type ExposeAuth struct {
 	Basic []string `yaml:"basic"`
 	SSH   *SSHAuth `yaml:"ssh"`
@@ -1736,6 +1739,8 @@ func (c *Config) validate() []error {
 				bad("storage %s: unknown protect expose %q", name, s.Protect)
 			case x.Auth.SSH == nil:
 				bad("storage %s: protect expose %s needs auth.ssh", name, s.Protect)
+			case len(x.Auth.Basic) > 0:
+				bad("expose %s: auth.basic on a protect expose (storage %s): a password names no owner of private files", s.Protect, name)
 			case s.Protect == s.Expose:
 				bad("storage %s: expose and protect must differ", name)
 			}
@@ -1953,13 +1958,10 @@ func (c *Config) validate() []error {
 		if x.Plain && (x.Auth.SSH != nil || len(x.Auth.Basic) > 0) {
 			bad("expose %s: plain excludes auth", name)
 		}
-		if x.Index && x.Auth.SSH != nil {
-			bad("expose %s: index excludes auth.ssh: an auth.ssh expose serves only signed GETs (and the signed listing)", name)
+		if x.Index && x.Auth.SSH != nil && len(x.Auth.Basic) == 0 {
+			bad("expose %s: index excludes auth.ssh alone: an auth.ssh expose serves only signed GETs (and the signed listing)", name)
 		}
 		if ssh := x.Auth.SSH; ssh != nil {
-			if len(x.Auth.Basic) > 0 {
-				bad("expose %s: auth.ssh and auth.basic are mutually exclusive", name)
-			}
 			checkAllow(bad, "expose "+name+": auth.ssh", ssh.Allow, names, cas)
 			if _, _, ok := c.StorageServedBy(name); ok && len(x.Listen) > 0 {
 				if l := c.Listen[x.Listen[0]]; l != nil && !strings.HasPrefix(l.Public, "https://") {

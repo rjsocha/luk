@@ -54,10 +54,12 @@ type route struct {
 	// dummy is compared for unknown users, so they cost as much as a wrong
 	// password.
 	dummy []byte
-	// ssh marks an expose with auth.ssh: signed requests only; allow is
-	// its allow list. As a protect it serves private files only; as the
-	// expose of its storage (signed) it serves the public files to the
-	// identities of allow and answers the signed listing.
+	// ssh marks an expose with auth.ssh: signed requests, judged by their
+	// signature alone; allow is its allow list. As a protect it serves
+	// private files only; as the expose of its storage (signed) it serves
+	// the public files to the identities of allow and answers the signed
+	// listing. With users too, an unsigned request is judged by auth.basic
+	// and served as on an expose without auth.ssh.
 	ssh    bool
 	signed bool
 	allow  []string
@@ -108,7 +110,7 @@ func New(cfg *config.Config, log *slog.Logger, now func() time.Time, listen stri
 			rt.ssh, rt.allow = true, x.Auth.SSH.Allow
 			rt.signed = st.Expose == name
 		}
-		rt.index = x.Index && !rt.ssh
+		rt.index = x.Index && (!rt.ssh || len(x.Auth.Basic) > 0)
 		for _, b := range x.Auth.Basic {
 			user, hash, _ := strings.Cut(b, ":")
 			hash = config.BcryptHash(hash)
@@ -137,6 +139,10 @@ func (h *handler) match(p string) (*route, string) {
 	}
 	return nil, ""
 }
+
+// basic reports whether an unsigned request is judged by auth.basic (or
+// served without auth) and served as on an expose without auth.ssh.
+func (rt *route) basic() bool { return !rt.ssh || rt.users != nil }
 
 func (rt *route) authorized(r *http.Request) bool {
 	if rt.users == nil {
@@ -204,9 +210,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rt == nil {
 		p = r.URL.Path
 	}
-	// An expose with auth.ssh has no portal pages, so no actions.
+	// An expose with auth.ssh alone has no portal pages, so no actions.
 	_, _, isAction := cutAction(p)
-	isAction = isAction && (rt == nil || !rt.ssh)
+	isAction = isAction && (rt == nil || rt.basic())
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && (r.Method != http.MethodPost || !isAction) {
 		h.log.Debug("method not allowed", "remote", r.RemoteAddr, "host", r.Host, "method", r.Method, "path", r.URL.Path)
 		if isAction {
@@ -229,21 +235,23 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The signature comes before anything about the file, so the answers
-	// tell nothing about what exists.
+	// tell nothing about what exists. A signed request (id) is judged by
+	// its signature alone, never by auth.basic.
 	var id *wire.Identity
 	if rt.ssh {
 		var ok bool
 		if id, ok = h.signed(w, r, rt); !ok {
 			return
 		}
-	} else if !rt.authorized(r) {
+	}
+	if id == nil && !rt.authorized(r) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="luk"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	// A directory URL lists the directory; the expose path without its
 	// slash goes to the slash form.
-	if rt.index && (rel == "" || strings.HasSuffix(rel, "/")) {
+	if rt.index && id == nil && (rel == "" || strings.HasSuffix(rel, "/")) {
 		if rel == "" && !strings.HasSuffix(r.URL.Path, "/") {
 			toDir(w, r)
 			return
@@ -252,7 +260,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A directory URL of a signed expose answers the signed listing.
-	if rt.signed && strings.HasSuffix(r.URL.Path, "/") && (rel == "" || strings.HasSuffix(rel, "/")) {
+	if rt.signed && id != nil && strings.HasSuffix(r.URL.Path, "/") && (rel == "" || strings.HasSuffix(rel, "/")) {
 		h.signedList(w, r, rt, rel, id)
 		return
 	}
@@ -270,7 +278,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f, sc, err := rt.st.Open(rel)
 	if err != nil {
 		name, act, ok := cutAction(rel)
-		if !ok || rt.ssh {
+		if !ok || id != nil {
 			h.missing(w, r, rt, rel, err)
 			return
 		}
@@ -310,16 +318,22 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Cache-Control", "no-store")
 	}
-	if rt.ssh {
+	if id != nil {
 		msg := "private download"
 		if rt.signed {
 			msg = "signed download"
 		}
-		h.log.Info(msg, "remote", r.RemoteAddr, "method", r.Method, "sender", id.Name, "expose", rt.name, "id", sc.ID, "file", rel)
+		h.log.Info(msg, "remote", r.RemoteAddr, "method", r.Method, "auth", "ssh", "sender", id.Name, "expose", rt.name, "id", sc.ID, "file", rel)
 		privateHeaders(w.Header(), sc)
 		// No portal page: the content itself, as a direct download.
 		h.serveFile(w, r, rt, rel, f, sc)
 		return
+	}
+	// The unsigned requests to an expose with auth.ssh are logged as its
+	// signed ones are.
+	if rt.ssh {
+		user, _, _ := r.BasicAuth()
+		h.log.Info("basic download", "remote", r.RemoteAddr, "method", r.Method, "auth", "basic", "user", user, "expose", rt.name, "id", sc.ID, "file", rel, "action", action)
 	}
 	switch {
 	case action == wire.PortalReveal:
@@ -344,15 +358,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // signed verifies the signature of a request to an expose with auth.ssh;
-// on failure it has answered (404 unsigned, 401 otherwise) and returns
-// false.
+// an unsigned one is left to auth.basic (nil, true) when the expose has
+// it. On failure it has answered (404 unsigned, 401 otherwise) and
+// returns false.
 func (h *handler) signed(w http.ResponseWriter, r *http.Request, rt *route) (*wire.Identity, bool) {
-	if h.verify == nil {
-		h.notFound(w, r)
-		return nil, false
+	var err error = ErrUnsigned
+	var id *wire.Identity
+	if h.verify != nil {
+		id, err = h.verify(r)
 	}
-	id, err := h.verify(r)
 	switch {
+	case errors.Is(err, ErrUnsigned) && rt.users != nil:
+		return nil, true
 	case errors.Is(err, ErrUnsigned):
 		h.notFound(w, r)
 		return nil, false
@@ -366,17 +383,15 @@ func (h *handler) signed(w http.ResponseWriter, r *http.Request, rt *route) (*wi
 }
 
 // permits reports whether the expose serves the file of sc to id: an
-// expose without auth.ssh only public files; one with auth.ssh that is
-// the expose of its storage only public files, to every identity of its
-// allow list; one with auth.ssh that is a protect only private files:
-// those of wire.AccessPrivate to their owner, those of wire.AccessAny to
-// every identity of its allow list.
+// unsigned request (id nil) only public files, and only on an expose
+// without auth.ssh or the expose of its storage with auth.basic too; one
+// with auth.ssh that is the expose of its storage only public files, to
+// every identity of its allow list; one with auth.ssh that is a protect
+// only private files: those of wire.AccessPrivate to their owner, those of
+// wire.AccessAny to every identity of its allow list.
 func (rt *route) permits(id *wire.Identity, sc store.Sidecar) bool {
-	if !rt.ssh {
-		return sc.Client.Access == ""
-	}
 	if id == nil {
-		return false
+		return (!rt.ssh || rt.signed && rt.users != nil) && sc.Client.Access == ""
 	}
 	if rt.signed {
 		return sc.Client.Access == "" && auth.Allowed(id, rt.allow)

@@ -30,6 +30,12 @@ type vaultEnv struct {
 
 func newVaultEnv(t *testing.T) *vaultEnv {
 	t.Helper()
+	return newVaultEnvAuth(t, "{ssh: {allow: [robert.socha]}}")
+}
+
+// newVaultEnvAuth is the vault env with auth as the auth of the expose.
+func newVaultEnvAuth(t *testing.T, auth string) *vaultEnv {
+	t.Helper()
 	tempConfig(t)
 	addr, saddr := freeAddr(t), freeAddr(t)
 	e := &privateEnv{lukdEnv: &lukdEnv{base: "http://" + addr}, root: t.TempDir(), secure: "https://" + saddr}
@@ -55,8 +61,8 @@ pipeline:
 storage:
   vault: {type: local, base: s/vault, path: "{{ .File }}", expose: vault}
 expose:
-  vault: {listen: secure, path: /v/, auth: {ssh: {allow: [robert.socha]}}}
-`, e.root, addr, addr, saddr, saddr, pub, otherPub)
+  vault: {listen: secure, path: /v/, index: %t, auth: %s}
+`, e.root, addr, addr, saddr, saddr, pub, otherPub, strings.Contains(auth, "basic"), auth)
 	startLukd(t, filepath.Join(t.TempDir(), "config.yaml"), text, saddr)
 	return &vaultEnv{privateEnv: e, st: store.Local{Base: filepath.Join(e.root, "s/vault"), Conflict: "replace"},
 		url: "luk://" + saddr + "/v/#" + e.pin}

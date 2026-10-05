@@ -1798,7 +1798,7 @@ func TestPrivateConfig(t *testing.T) {
 		"protect without auth.ssh":    {"    auth: {ssh: {allow: [\"*\", robert.socha, \"hosts:*.vm\"]}}\n", "", "protect expose secure needs auth.ssh"},
 		"protect is expose":           {"expose: drop, protect: secure}", "expose: secure, protect: secure}", "expose and protect must differ"},
 		"protect on s3":               {"storage:\n", "storage:\n  off: {type: s3, bucket: b, protect: secure}\n", "protect needs a local storage"},
-		"ssh and basic":               {"auth: {ssh: {", "auth: {basic: ['dev:$2y$05$TpFzQdt1oY6UgSKCZGgt8eCbBXDAuiQxNl13XDuDnYKUSuIC9O79W'], ssh: {", "mutually exclusive"},
+		"protect with basic":          {"auth: {ssh: {", "auth: {basic: ['dev:$2y$05$TpFzQdt1oY6UgSKCZGgt8eCbBXDAuiQxNl13XDuDnYKUSuIC9O79W'], ssh: {", "expose secure: auth.basic on a protect expose"},
 		"ssh allow unknown key":       {`allow: ["*", robert.socha`, `allow: [nobody`, `allow "nobody" is not a known key`},
 		"ssh allow unknown ca":        {`"hosts:*.vm"`, `"nope:*"`, "names an unknown CA"},
 		"protect on plain listener":   {"    listen: main\n    path: /s/", "    listen: plain\n    path: /s/", "needs an https public URL"},
@@ -1869,6 +1869,25 @@ func TestSignedExposeConfig(t *testing.T) {
 	).Replace(signedGood)
 	if _, err := Parse([]byte(both)); err != nil {
 		t.Fatalf("auth.ssh expose and protect: %v", err)
+	}
+}
+
+// An expose with auth.basic and auth.ssh serves its public files to
+// either; with index too.
+func TestDualAuthExposeConfig(t *testing.T) {
+	src := strings.Replace(signedGood, "auth: {ssh: {allow: [robert.socha]}}", "auth: {basic: ['dev:$2y$05$TpFzQdt1oY6UgSKCZGgt8eCbBXDAuiQxNl13XDuDnYKUSuIC9O79W'], ssh: {allow: [robert.socha]}}\n    index: true", 1)
+	c, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if x := c.Expose["vault"]; x.Auth.SSH == nil || len(x.Auth.Basic) != 1 || !x.Index {
+		t.Fatalf("vault %+v", x)
+	}
+	if base, _, ok := c.PublicURL("archive"); !ok || base != "luk://lukd.vm:8443/v/" {
+		t.Fatalf("public url %q %v", base, ok)
+	}
+	if w := strings.Join(c.Warnings(), "\n"); strings.Contains(w, "vault") {
+		t.Fatalf("warnings %s", w)
 	}
 }
 

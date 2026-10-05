@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
 
 	"luk/internal/config"
@@ -76,6 +77,8 @@ type getReq struct {
 	host string
 	// target is the request target signed (default that of link).
 	target string
+	// user and pass send a basic Authorization header when user is set.
+	user, pass string
 }
 
 func (f *privateFixture) get(t *testing.T, r getReq) *httptest.ResponseRecorder {
@@ -108,6 +111,9 @@ func (f *privateFixture) get(t *testing.T, r getReq) *httptest.ResponseRecorder 
 	}
 	hr := httptest.NewRequest(r.method, "https://"+r.host+u.RequestURI(), nil)
 	hr.Host = r.host
+	if r.user != "" {
+		hr.SetBasicAuth(r.user, r.pass)
+	}
 	if !r.unsigned {
 		ts := time.Now().UTC().Format(time.RFC3339)
 		text := wire.GetCanonicalText(r.signAs, r.host, r.target, ts, r.nonce)
@@ -441,4 +447,57 @@ func TestSignedListingServer(t *testing.T) {
 	wantStatus(t, "not allowed", f.get(t, getReq{signer: f.other, link: "luk://secure.vm/v/"}), http.StatusNotFound)
 	// The query is signed: a signature of the path alone does not verify.
 	wantStatus(t, "query not signed", f.get(t, getReq{signer: f.user, link: "luk://secure.vm/v/?recursive=1", target: "/v/"}), http.StatusUnauthorized)
+}
+
+// newDualFixture is the signed fixture whose vault also has auth.basic
+// (dev:pw) and index.
+func newDualFixture(t *testing.T) *privateFixture {
+	hash, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newPrivateFixture(t, func(s string) string {
+		s = strings.Replace(s, `expose: drop, protect: secure}`, `expose: vault, protect: secure}`, 1)
+		return strings.Replace(s, `  secure: {listen: secure, path: /,`, `  vault: {listen: secure, path: /v/, index: true, auth: {basic: ['dev:`+string(hash)+`'], ssh: {allow: [robert.socha]}}}
+  secure: {listen: secure, path: /,`, 1)
+	})
+}
+
+func TestDualAuthExposeGet(t *testing.T) {
+	f := newDualFixture(t)
+	link := f.drop(t, f.user, wire.Meta{File: "a.txt"}, "open")
+	if !strings.HasPrefix(link, "luk://secure.vm/v/") {
+		t.Fatalf("url %s", link)
+	}
+	for name, r := range map[string]getReq{
+		"basic":  {link: link, unsigned: true, user: "dev", pass: "pw"},
+		"signed": {signer: f.user, link: link},
+	} {
+		if rec := f.get(t, r); rec.Code != http.StatusOK || rec.Body.String() != "open" {
+			t.Errorf("%s: %d %q", name, rec.Code, rec.Body)
+		}
+	}
+	// A signed request never falls back to basic.
+	wantStatus(t, "unknown key with basic", f.get(t, getReq{signer: newSigner(t), link: link, user: "dev", pass: "pw"}), http.StatusUnauthorized)
+	wantStatus(t, "not allowed with basic", f.get(t, getReq{signer: f.other, link: link, user: "dev", pass: "pw"}), http.StatusNotFound)
+	rec := f.get(t, getReq{link: link, unsigned: true})
+	if rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") != `Basic realm="luk"` {
+		t.Errorf("no auth: %d %v", rec.Code, rec.Header())
+	}
+	wantStatus(t, "wrong password", f.get(t, getReq{link: link, unsigned: true, user: "dev", pass: "bad"}), http.StatusUnauthorized)
+	// Private files: never through basic, on the expose or the protect.
+	priv := f.drop(t, f.user, wire.Meta{Access: wire.AccessAny}, "secret")
+	name := path.Base(mustURL(t, priv).Path)
+	wantStatus(t, "private via basic", f.get(t, getReq{link: "luk://secure.vm/v/" + name, unsigned: true, user: "dev", pass: "pw"}), http.StatusNotFound)
+	wantStatus(t, "private via basic on the protect", f.get(t, getReq{link: priv, unsigned: true, user: "dev", pass: "pw"}), http.StatusNotFound)
+	// The directory: HTML for basic, the signed listing for luk.
+	rec = f.get(t, getReq{link: "luk://secure.vm/v/", unsigned: true, user: "dev", pass: "pw"})
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") || !strings.Contains(rec.Body.String(), path.Base(mustURL(t, link).Path)) || strings.Contains(rec.Body.String(), name) {
+		t.Errorf("html index: %d %v", rec.Code, rec.Header())
+	}
+	rec = f.get(t, getReq{signer: f.user, link: "luk://secure.vm/v/"})
+	var ents []wire.ListEntry
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &ents) != nil || len(ents) != 1 || ents[0].Name != path.Base(mustURL(t, link).Path) {
+		t.Errorf("signed listing: %d %s", rec.Code, rec.Body)
+	}
 }

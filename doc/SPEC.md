@@ -1629,7 +1629,9 @@ expose:
   <n> does not accept private uploads of access <mode>
   (private.owner|any)`), also when the list names others.
 - `storage.<n>.protect` (local storages only): the expose that serves the
-  private files of the storage. That expose must have `auth.ssh`, must
+  private files of the storage. That expose must have `auth.ssh` and no
+  `auth.basic` (`expose <n>: auth.basic on a protect expose`: a password
+  names no owner of private files), must
   differ from the storage `expose` (which may have `auth.ssh` too, see
   Signed expose), and serves no other storage (an
   expose belongs to one storage, as `expose` or as `protect`). The
@@ -1640,10 +1642,11 @@ expose:
   `lukd check` warnings for a storage `catalog` and for an `index` on an
   expose without auth.
 - `expose.<n>.index: true`: the directory URLs of the expose answer an
-  HTML listing (see Expose). It excludes `auth.ssh` (that expose serves
-  only signed GETs; as a storage `expose` it answers the signed listing
-  instead, see Signed expose); with `auth.basic` the listing is behind the
-  password. Its storage has no `shard` (`storage <s>: shard on expose
+  HTML listing (see Expose). It excludes `auth.ssh` alone (that expose
+  serves only signed GETs; as a storage `expose` it answers the signed
+  listing instead, see Signed expose); with `auth.basic` the listing is
+  behind the password, also with `auth.ssh` beside it (a signed directory
+  request then gets the signed listing). Its storage has no `shard` (`storage <s>: shard on expose
   <n> with index` is a config error): the URLs of a sharded storage are
   flat while its files lie in hash directories, so a listing would read
   every hash directory, and a sharded drop of random names would list
@@ -1654,8 +1657,15 @@ expose:
   `expose` of a storage, only its public files (see Signed expose).
   `allow` takes the entries of
   an endpoint `allow` (key names, `<ca>:<glob>`, `*`, see Identities) and
-  may be empty. `auth.ssh` and `auth.basic` exclude each other on one
-  expose.
+  may be empty.
+- `expose.<n>.auth` with more than one method (`basic` and `ssh`): any one
+  of them suffices, there is no mode key. A request with any of the
+  signature headers (`Luk-Timestamp`, `Luk-Nonce`, `Luk-Signature`) is
+  judged by its signature and `auth.ssh.allow` alone, never by
+  `auth.basic`: a bad signature or an unknown key is 401 even with a
+  valid `Authorization` header. A request without them is judged by
+  `auth.basic` as on an expose without `auth.ssh` (401 with the basic
+  challenge). Only the storage `expose` takes both (see Signed expose).
 - Who gets a file: a file of access `private` its owner only (the
   identity whose `owner_key` the sidecar holds: any key of a plain-key
   identity, or a certificate of the same CA and Key ID, as for Links);
@@ -1666,6 +1676,7 @@ expose:
 - A public expose (without `auth.ssh`) never serves a private file: 404,
   even with the exact name, and also through an alias (an alias has the
   sidecar of its target). A protect expose never serves a public file
+  (404), no request authenticated by `auth.basic` gets a private file
   (404), and no expose with `auth.ssh` serves the catalog. Private files are never listed in the
   catalog, never the target of an alias and never deduplicated by
   `dedup` (their space is shared through `hardlink` like any file's).
@@ -1730,7 +1741,8 @@ verifies as a get, and a get signature never as either (401).
 Answers on an expose with `auth.ssh`:
 
 - no `Luk-Timestamp`, `Luk-Nonce` and `Luk-Signature` at all: 404, the
-  answer of a missing file;
+  answer of a missing file (with `auth.basic` too: judged by
+  `auth.basic`, see Signed expose);
 - a signature that is incomplete, malformed, out of the clock skew,
   replayed or does not verify, or a key that resolves to no identity:
   401 (plain text with the reason, logged as `get rejected`);
@@ -1744,7 +1756,7 @@ Answers on an expose with `auth.ssh`:
   `HEAD` also carry `Luk-Expires` (the expiry, RFC 3339 in UTC; absent
   without one) and `Luk-Once: true` (absent when the file is not `once`);
   only an expose with `auth.ssh` sends them, a public expose never. Logged as `private download`
-  with the sender.
+  with `auth=ssh` and the sender.
 
 `GET` and `HEAD` are the only methods (`405` with `Allow: GET, HEAD`
 otherwise, decided by the path as on every listener without endpoints).
@@ -1777,10 +1789,11 @@ expose:
 ```
 
 - Configuration: the first listener of the expose needs an `https`
-  public URL, as for `protect` (`luk://` URLs mean https); `index` stays
-  refused (`expose <n>: index excludes auth.ssh`): the signed listing
-  below is the listing of such an expose. A `catalog` on its storage is
-  not served (no `lukd check` warning either).
+  public URL, as for `protect` (`luk://` URLs mean https); `index`
+  without `auth.basic` stays refused (`expose <n>: index excludes
+  auth.ssh alone`): the signed listing below is the listing of such an
+  expose. A `catalog` on its storage is not served, also with
+  `auth.basic` (no `lukd check` warning either).
 - Files: the expose serves exactly what a public expose of the storage
   would serve (not expired, not claimed, not private, not a reserved
   name, not under a nested expose), to an identity its `allow` admits.
@@ -1789,7 +1802,8 @@ expose:
   signature or an unknown key 401; an identity not in `allow`, or a
   missing, expired, claimed or private file 404, the same answer in
   every case. Downloads carry the headers of a direct download plus
-  `Luk-Expires` and `Luk-Once`, and are logged as `signed download`.
+  `Luk-Expires` and `Luk-Once`, and are logged as `signed download`
+  with `auth=ssh`.
 - Portal uploads (`reveal`, `download`) have no landing page there: the
   file URL answers the stored content as a direct download (download
   headers, `Range`), and the action URLs (`<name>/reveal`,
@@ -1800,6 +1814,30 @@ expose:
 - URLs: the upload answer, `luk link ls` and `lukd storage ls` give a
   public file of such a storage the `luk://` URL of the expose (with the
   pin of a `self` or `files` certificate), as for a private file.
+- Both methods: with `auth.basic` beside `auth.ssh` the expose serves
+  the same public files to either (`auth` with more than one method,
+  Server configuration). A signed request is answered as above, judged
+  by its signature alone (a bad signature 401, never a fallback to
+  `auth.basic`). An unsigned request is answered as on an expose with
+  `auth.basic` only: 401 with the basic challenge without the right
+  password, then the files, the portal pages and actions of portal
+  uploads, and with `index` the HTML listing of the directory URLs
+  (Expose); the `catalog` is not served. Its downloads are logged as
+  `basic download` with `auth=basic` and the user. Private files are
+  never served to it (404), on this expose or on `protect`.
+
+```yaml
+expose:
+  vault:
+    listen: secure
+    path: /v/
+    index: true                        # the HTML listing, for basic
+    auth:                              # either method suffices
+      ssh:
+        allow: [robert.socha]          # luk get, luk get <dir>/
+      basic:
+        - 'dev:$2y$05$TpFzQdt1oY6UgSKCZGgt8eCbBXDAuiQxNl13XDuDnYKUSuIC9O79W'   # a browser
+```
 
 Signed listing: a signed `GET` (or `HEAD`) of a directory URL (the
 expose path, or `<path><dir>/`, ending with a slash) answers the
@@ -2331,8 +2369,9 @@ and `ssh.d/ca/`):
   `expose`, on a local storage; every expose with `auth.ssh` that serves
   a storage (as `protect` or as `expose`) has a first listener with an
   `https` public URL;
-  `auth.ssh` and `auth.basic` exclude each other; `auth.ssh.allow`
-  entries are those of an endpoint `allow`;
+  a `protect` expose has no `auth.basic`; `index` needs `auth.basic`
+  beside `auth.ssh`; `auth.ssh.allow` entries are those of an endpoint
+  `allow`;
 - `permanent` requires `respond: url` and a local respond storage with
   an `expose` without `auth.ssh`; `permanent.path` (default `permanent`)
   is a permanent name without wildcards, does not overlap a nested
@@ -3579,7 +3618,8 @@ symlink is refused (`lukd storage: <base> is a symlink`).
 
 - `GET <url><name>`; `auth` optional (none = anonymous, `basic` = htpasswd
   bcrypt, `ssh` = signed `luk-get@v1` requests for private files, see
-  Private files). The bcrypt checks of `basic` run at most one per CPU
+  Private files; `basic` and `ssh` together = either, see Signed
+  expose). The bcrypt checks of `basic` run at most one per CPU
   at once; a request waits for its turn, so wrong passwords cost the
   server no more than its CPUs.
 - `--once`: on the first download lukd renames the file to "claimed"

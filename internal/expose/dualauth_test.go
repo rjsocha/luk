@@ -1,0 +1,130 @@
+package expose
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"log/slog"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"luk/internal/store"
+	"luk/internal/wire"
+)
+
+// newDualEnv is the signed env whose expose pub also has auth.basic
+// (alice:pw) and index, logging at info.
+func newDualEnv(t *testing.T) *env {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newSignedEnv(t)
+	x := e.cfg.Expose["pub"]
+	x.Auth.Basic, x.Index = []string{"alice:" + string(hash)}, true
+	e.cfg.Storage["drop"].Catalog, e.st.Catalog = true, true
+	log := slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	e.h = New(e.cfg, log, func() time.Time { return e.now }, "l", fakeVerify)
+	return e
+}
+
+// basic adds the Authorization header of user:pass to h.
+func basic(h map[string]string, user, pass string) map[string]string {
+	out := map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))}
+	for k, v := range h {
+		out[k] = v
+	}
+	return out
+}
+
+func TestDualAuthDownload(t *testing.T) {
+	e := newDualEnv(t)
+	e.put(t, "pub.txt", "hello", store.Sidecar{})
+	for name, h := range map[string]map[string]string{
+		"basic":  basic(nil, "alice", "pw"),
+		"signed": as("alice"),
+		"both":   basic(as("alice"), "alice", "pw"),
+	} {
+		if w := e.do(t, "GET", "/d/pub.txt", h); w.Code != 200 || w.Body.String() != "hello" {
+			t.Errorf("%s: %d %q", name, w.Code, w.Body)
+		}
+	}
+	// A signed request is judged by its signature alone.
+	if w := e.do(t, "GET", "/d/pub.txt", basic(as("bad"), "alice", "pw")); w.Code != 401 || w.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("bad signature with basic: %d %v", w.Code, w.Header())
+	}
+	if w := e.do(t, "GET", "/d/pub.txt", basic(as("bob"), "alice", "pw")); w.Code != 404 {
+		t.Errorf("signer not allowed with basic: %d", w.Code)
+	}
+	for name, h := range map[string]map[string]string{"none": nil, "wrong password": basic(nil, "alice", "bad")} {
+		if w := e.do(t, "GET", "/d/pub.txt", h); w.Code != 401 || w.Header().Get("WWW-Authenticate") != `Basic realm="luk"` {
+			t.Errorf("%s: %d %v", name, w.Code, w.Header())
+		}
+	}
+	logs := e.logs.String()
+	if !strings.Contains(logs, "auth=ssh") || !strings.Contains(logs, "auth=basic") || !strings.Contains(logs, "user=alice") {
+		t.Errorf("logs:\n%s", logs)
+	}
+}
+
+func TestDualAuthPrivateAndPortal(t *testing.T) {
+	e := newDualEnv(t)
+	e.put(t, "reveal", "secret", store.Sidecar{Client: wire.Meta{Portal: wire.PortalReveal}})
+	e.put(t, "own", "mine", store.Sidecar{Client: wire.Meta{Access: wire.AccessPrivate}, OwnerKey: "key:alice"})
+	e.put(t, "any", "shared", store.Sidecar{Client: wire.Meta{Access: wire.AccessAny}})
+	for _, n := range []string{"own", "any"} {
+		if w := e.do(t, "GET", "/d/"+n, basic(nil, "alice", "pw")); w.Code != 404 {
+			t.Errorf("%s via basic: %d", n, w.Code)
+		}
+		if w := e.do(t, "GET", "/s/"+n, basic(nil, "alice", "pw")); w.Code != 404 {
+			t.Errorf("%s via basic on the protect: %d", n, w.Code)
+		}
+	}
+	// basic gets the portal, a signed request the content.
+	if w := e.do(t, "GET", "/d/reveal", basic(nil, "alice", "pw")); w.Code != 200 || !strings.HasPrefix(w.Body.String(), "<!doctype html>") {
+		t.Errorf("landing via basic: %d %q", w.Code, w.Body)
+	}
+	if w := e.do(t, "GET", "/d/reveal/get", basic(nil, "alice", "pw")); w.Code != 200 || w.Body.String() != "secret" {
+		t.Errorf("get via basic: %d %q", w.Code, w.Body)
+	}
+	if w := e.do(t, "GET", "/d/reveal/get", as("alice")); w.Code != 404 {
+		t.Errorf("signed action: %d", w.Code)
+	}
+	if w := e.do(t, "GET", "/d/reveal", as("alice")); w.Code != 200 || w.Body.String() != "secret" {
+		t.Errorf("signed: %d %q", w.Code, w.Body)
+	}
+	// No expose with auth.ssh serves the catalog.
+	if err := e.st.RebuildCatalog(); err != nil {
+		t.Fatal(err)
+	}
+	if w := e.do(t, "GET", "/d/"+store.CatalogName, basic(nil, "alice", "pw")); w.Code != 404 {
+		t.Errorf("catalog via basic: %d", w.Code)
+	}
+}
+
+func TestDualAuthListing(t *testing.T) {
+	e := newDualEnv(t)
+	e.put(t, "pub.txt", "hello", store.Sidecar{})
+	e.put(t, "b/f", "x", store.Sidecar{})
+	e.put(t, "any", "shared", store.Sidecar{Client: wire.Meta{Access: wire.AccessAny}})
+	w := e.do(t, "GET", "/d/", basic(nil, "alice", "pw"))
+	if got := links(w.Body.String()); w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") || len(got) != 2 || got[0][0] != "./b/" || got[1][0] != "./pub.txt" {
+		t.Errorf("html index: %d %v %v", w.Code, w.Header(), got)
+	}
+	if w := e.do(t, "GET", "/d", basic(nil, "alice", "pw")); w.Code/100 != 3 {
+		t.Errorf("index without slash: %d", w.Code)
+	}
+	if got := names(e.signedList(t, "/d/")); got != "b/ pub.txt" {
+		t.Errorf("signed listing: %q", got)
+	}
+	if w := e.do(t, "GET", "/d/", nil); w.Code != 401 {
+		t.Errorf("index without auth: %d", w.Code)
+	}
+	var ents []wire.ListEntry
+	if w := e.do(t, "GET", "/d/b/", as("alice")); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &ents) != nil || names(ents) != "f" {
+		t.Errorf("signed sub listing: %d %s", w.Code, w.Body)
+	}
+}

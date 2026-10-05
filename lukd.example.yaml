@@ -311,10 +311,13 @@ expose:
   #                             # names and <ca>:<glob> as in an endpoint allow
   # vault:                      # the storage expose of vault: every public file and a
   #   listen: secure            # signed JSON listing of the directories (luk get URL/);
-  #   path: /v/                 # no index; the first listener needs an https public URL
-  #   auth:
-  #     ssh:
+  #   path: /v/                 # the first listener needs an https public URL
+  #   # index: true             # with basic only: the HTML listing for unsigned requests
+  #   auth:                     # more than one method: any one of them suffices
+  #     ssh:                    # a signed request is judged by its signature alone
   #       allow: [robert.socha, "hosts:*"]
+  #     # basic:                # unsigned requests (a browser, curl -u); public files only
+  #     #   - 'dev:$2y$05$TpFzQdt1oY6UgSKCZGgt8eCbBXDAuiQxNl13XDuDnYKUSuIC9O79W'
 
 # Keys of encrypt steps.
 # gpg:
