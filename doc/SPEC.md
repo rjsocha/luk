@@ -3061,6 +3061,12 @@ key reads as a warning in the configuration on purpose.
 - Decrypt an `.enc` file with the password in a file (only its first
   line is read):
   `openssl enc -d -aes-256-cbc -pbkdf2 -in db-latest.sql.zst.enc -out db-latest.sql.zst -pass file:password.txt`.
+  The openssl command reads at most 1023 bytes from `-pass file:`, so the
+  password named by `insecure.openssl.key` must not be longer than that
+  (without the trailing newline); the encrypt step and `lukd check`
+  reject a longer one. The passwords of `symmetric` keep the limit of
+  4096 bytes. A password file holds one line: more than one line is
+  rejected, as both decrypt commands read the first line only.
 
 ## Storage and catalog
 

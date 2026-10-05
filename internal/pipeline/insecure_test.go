@@ -93,7 +93,7 @@ func TestEncryptSymmetricPasswords(t *testing.T) {
 	if got := string(gpgtest.Decrypt(t, msg, k)); got != "data-id1" {
 		t.Fatalf("key decrypted %q", got)
 	}
-	gpgDecrypt(t, msg, k, "data-id1")
+	gpgDecrypt(t, msg, k, "data-id1", "cancel")
 	gpgDecryptPassword(t, msg, "second secret", "data-id1")
 	var m insecureMeta
 	if err := json.Unmarshal(g.sidecar(t, "a/.db/meta/robert.socha/f.txt.gpg.json").Meta, &m); err != nil {
@@ -360,7 +360,7 @@ func gpgDecryptPassword(t *testing.T, msg []byte, password, want string) {
 	if err := os.WriteFile(pw, []byte(password), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, errOut, err := gpg(msg, "--passphrase-file", pw, "--decrypt")
+	out, errOut, err := gpg(msg, "--pinentry-mode", "loopback", "--passphrase-file", pw, "--decrypt")
 	if err != nil {
 		t.Fatalf("gpg --decrypt with a password: %v\n%s", err, errOut)
 	}

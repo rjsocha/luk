@@ -2474,6 +2474,19 @@ func (c *Config) PasswordNames() []string {
 	return sortedKeys(seen)
 }
 
+// OpenSSLPasswordNames lists the passwords used for the openssl format.
+func (c *Config) OpenSSLPasswordNames() map[string]bool {
+	seen := map[string]bool{}
+	for _, p := range c.Pipeline {
+		for _, s := range p.Steps {
+			if s.Encrypt != nil && s.Encrypt.Insecure != nil && s.Encrypt.Insecure.OpenSSL != nil {
+				seen[s.Encrypt.Insecure.OpenSSL.Key] = true
+			}
+		}
+	}
+	return seen
+}
+
 // validAddress accepts a bare local@domain address that is safe as a file
 // name.
 func validAddress(a string) bool {

@@ -133,7 +133,7 @@ func TestEncryptRoundTrip(t *testing.T) {
 		t.Errorf("wkd key not cached: %v", err)
 	}
 	gone(t, filepath.Join(g.root, "work", "id1", "p"))
-	gpgDecrypt(t, msg, robert, "data-id1")
+	gpgDecrypt(t, msg, robert, "data-id1", "loopback")
 }
 
 // isolatedGPG returns a runner of the gpg binary on a fresh home, or nil
@@ -141,7 +141,7 @@ func TestEncryptRoundTrip(t *testing.T) {
 // binary: gpg may start an agent and ask for passphrases, which a
 // developer machine must not see. The environment is built from scratch: no inherited
 // GNUPGHOME or agent, no display or session bus, so no pinentry of the
-// desktop ever opens; passphrases go through loopback only. The agent
+// desktop ever opens; passphrases go through the loopback pinentry mode of the caller only. The agent
 // started for the home is killed when the test ends.
 func isolatedGPG(t *testing.T) func(stdin []byte, args ...string) (string, string, error) {
 	t.Helper()
@@ -171,7 +171,7 @@ func isolatedGPG(t *testing.T) func(stdin []byte, args ...string) (string, strin
 		os.RemoveAll(home)
 	})
 	return func(stdin []byte, args ...string) (string, string, error) {
-		cmd := exec.Command(bin, append([]string{"--homedir", home, "--batch", "--no-tty", "--pinentry-mode", "loopback"}, args...)...)
+		cmd := exec.Command(bin, append([]string{"--homedir", home, "--batch", "--no-tty"}, args...)...)
 		var stdout, stderr bytes.Buffer
 		cmd.Env, cmd.Stdin, cmd.Stdout, cmd.Stderr = env, bytes.NewReader(stdin), &stdout, &stderr
 		err := cmd.Run()
@@ -180,8 +180,9 @@ func isolatedGPG(t *testing.T) func(stdin []byte, args ...string) (string, strin
 }
 
 // gpgDecrypt checks msg with the gpg binary and the secret key when there
-// is one.
-func gpgDecrypt(t *testing.T, msg []byte, key *openpgp.Entity, want string) {
+// is one. pinentry is the --pinentry-mode of the decrypt: "cancel" for a
+// message that also carries passwords, as scripts are told to use it.
+func gpgDecrypt(t *testing.T, msg []byte, key *openpgp.Entity, want, pinentry string) {
 	t.Helper()
 	gpg := isolatedGPG(t)
 	if gpg == nil {
@@ -190,7 +191,7 @@ func gpgDecrypt(t *testing.T, msg []byte, key *openpgp.Entity, want string) {
 	if _, errOut, err := gpg(gpgtest.ArmoredPrivate(t, key), "--import"); err != nil {
 		t.Fatalf("gpg --import: %v\n%s", err, errOut)
 	}
-	out, errOut, err := gpg(msg, "--decrypt")
+	out, errOut, err := gpg(msg, "--pinentry-mode", pinentry, "--decrypt")
 	if err != nil {
 		t.Fatalf("gpg --decrypt: %v\n%s", err, errOut)
 	}

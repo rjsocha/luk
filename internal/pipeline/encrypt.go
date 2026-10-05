@@ -110,7 +110,7 @@ func (d *Dispatcher) encryptStep(j Job, keys *gpgkeys.Resolver, passwordDir, nam
 	}
 	var osslPassword []byte
 	if ossl != nil {
-		pw, err := config.ReadPassword(passwordDir, ossl.Key)
+		pw, err := config.ReadOpenSSLPassword(passwordDir, ossl.Key)
 		if err != nil {
 			return nil, fmt.Errorf("password %s: %w", ossl.Key, err)
 		}

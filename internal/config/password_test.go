@@ -81,6 +81,7 @@ func TestReadPassword(t *testing.T) {
 		"newline": "secret\n",
 		"two":     "secret\n\n",
 		"crlf":    " sec ret\r\n",
+		"crlf2":   "a\r\nb\r\n",
 		"empty":   "",
 		"only":    "\n",
 	} {
@@ -88,13 +89,13 @@ func TestReadPassword(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for n, want := range map[string]string{"plain": "secret", "newline": "secret", "two": "secret\n", "crlf": " sec ret\r"} {
+	for n, want := range map[string]string{"plain": "secret", "newline": "secret"} {
 		got, err := ReadPassword(dir, n)
 		if err != nil || string(got) != want {
 			t.Errorf("%s: %q %v", n, got, err)
 		}
 	}
-	for _, n := range []string{"empty", "only", "missing"} {
+	for _, n := range []string{"empty", "only", "missing", "two", "crlf", "crlf2"} {
 		if _, err := ReadPassword(dir, n); err == nil || !strings.Contains(err.Error(), filepath.Join(dir, n)) {
 			t.Errorf("%s: %v", n, err)
 		}
@@ -108,5 +109,24 @@ func TestReadPassword(t *testing.T) {
 	}
 	if _, err := ReadPassword(dir, "big"); err == nil {
 		t.Error("oversized password accepted")
+	}
+}
+
+func TestReadOpenSSLPassword(t *testing.T) {
+	dir := t.TempDir()
+	for n, l := range map[string]int{"ok": maxOpenSSLPassword, "long": maxOpenSSLPassword + 1} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(strings.Repeat("x", l)+"\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ReadOpenSSLPassword(dir, "ok"); err != nil {
+		t.Error(err)
+	}
+	_, err := ReadOpenSSLPassword(dir, "long")
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(dir, "long")) || !strings.Contains(err.Error(), "1023") {
+		t.Errorf("long: %v", err)
+	}
+	if _, err := ReadPassword(dir, "long"); err != nil {
+		t.Errorf("gpg password limit: %v", err)
 	}
 }

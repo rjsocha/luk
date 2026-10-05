@@ -132,8 +132,13 @@ func rootCmd() *cobra.Command {
 				// is hidden from it, and it need not be readable here.
 				cfg.PasswordDir = ""
 			} else {
+				ossl := cfg.OpenSSLPasswordNames()
 				for _, n := range cfg.PasswordNames() {
-					if _, err := config.ReadPassword(cfg.PasswordDir, n); err != nil {
+					read := config.ReadPassword
+					if ossl[n] {
+						read = config.ReadOpenSSLPassword
+					}
+					if _, err := read(cfg.PasswordDir, n); err != nil {
 						fmt.Fprintf(errw, "password %s: %v\n", n, err)
 						failed = true
 					}
