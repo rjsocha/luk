@@ -552,9 +552,8 @@ func (s *Server) serveControl(w http.ResponseWriter, r *http.Request, cs *chanSe
 	s.seal(w, r, cs, n, a, false)
 }
 
-// complete commits the upload once every part is verified and answers as
-// an upload outside the channel does; the answer is kept for a repeated
-// complete.
+// complete commits the upload once every part is verified and answers
+// as accept does; the answer is kept for a repeated complete.
 func (s *Server) complete(r *http.Request, pu *partsUpload) answer {
 	pu.finish.Lock()
 	defer pu.releaseFinish()

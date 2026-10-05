@@ -191,7 +191,7 @@ func newReloadEnv(t *testing.T) *reloadEnv {
 	if err := prepareDirs(cfg, "receive"); err != nil {
 		t.Fatal(err)
 	}
-	srv := New(cfg, slog.New(slog.NewTextHandler(e.logs, nil)))
+	srv := withIdentity(t, New(cfg, slog.New(slog.NewTextHandler(e.logs, nil))))
 	e.fixture = &fixture{srv: srv, user: user, root: root}
 	return e
 }
@@ -480,12 +480,9 @@ storage:
 	}
 	put := func(signer ssh.Signer) int {
 		t.Helper()
-		resp, err := http.DefaultClient.Do(signedPut(t, signer, "http://"+plain, plain, "/up", []byte("x")))
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		return resp.StatusCode
+		x := []byte("x")
+		rec, _ := chanUpload(t, req{signer: signer, host: plain, path: "/up", meta: fileMeta(x), body: x, via: remote{http.DefaultClient, "http://" + plain}})
+		return rec.Code
 	}
 	hup := func() {
 		t.Helper()
@@ -546,7 +543,7 @@ expose:
 		if e.srv.reload() == nil {
 			t.Fatalf("reload failed:\n%s", e.logs)
 		}
-		rec, _ := e.do(t, req{signer: e.user, path: "/drop", meta: meta, body: []byte("x"), chunked: true})
+		rec, _ := e.do(t, req{signer: e.user, path: "/drop", meta: meta, body: []byte("x")})
 		if c.code != http.StatusCreated {
 			wantCode(t, c.pretty, rec, c.code, "does not offer pretty URLs")
 			continue
@@ -579,7 +576,7 @@ expose:
 			t.Fatalf("reload failed:\n%s", e.logs)
 		}
 		before := time.Now()
-		rec, _ := e.do(t, req{signer: e.user, path: "/drop", meta: meta, body: []byte("x"), chunked: true})
+		rec, _ := e.do(t, req{signer: e.user, path: "/drop", meta: meta, body: []byte("x")})
 		exp, err := time.Parse(time.RFC3339, receipt(t, rec, http.StatusCreated).Expires)
 		if err != nil || exp.Before(before.Add(want-time.Second)) || exp.After(time.Now().Add(want)) {
 			t.Fatalf("ttl.max %v: expires %v %v", want, exp, err)
@@ -595,7 +592,7 @@ func TestReloadLogLevel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.srv = New(cfg, NewLogger(e.logs, cfg))
+	e.srv = withIdentity(t, New(cfg, NewLogger(e.logs, cfg)))
 	unknown := func() {
 		rec := httptest.NewRecorder()
 		e.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://other.test/x", nil))
@@ -628,9 +625,10 @@ func TestReloadLogLevel(t *testing.T) {
 }
 
 // A reload that raises auth.clock_skew widens the timestamp window back
-// past what the nonce cache remembers: a request captured 10 minutes
-// before, whose nonce the cache dropped under the old 1m skew, stays
-// refused, while timestamps within the old skew pass.
+// past what the nonce cache remembers: a request signed again with the
+// timestamp and nonce of one 10 minutes before, whose nonce the cache
+// dropped under the old 1m skew, stays refused, while timestamps within
+// the old skew pass.
 func TestReloadSkewRaiseNoReplay(t *testing.T) {
 	f := newFixture(t)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -638,15 +636,13 @@ func TestReloadSkewRaiseNoReplay(t *testing.T) {
 	f.srv.start = now.Add(-time.Minute)
 	f.srv.SetClock(func() time.Time { return clock })
 	stream := wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}
-	var captured *http.Request
-	r, _ := f.do(t, req{signer: f.user, path: "/drop", meta: stream, ts: now,
-		tamper: func(r *http.Request) { captured = r.Clone(context.Background()) }})
+	first := req{signer: f.user, path: "/drop", meta: stream, ts: now, nonce: wire.NewNonce()}
+	r, _ := f.do(t, first)
 	if r.Code != http.StatusCreated {
 		t.Fatalf("first %d %s", r.Code, r.Body)
 	}
 	replay := func() *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		f.handler().ServeHTTP(rec, captured.Clone(context.Background()))
+		rec, _ := f.do(t, first)
 		return rec
 	}
 	// 10 minutes later other traffic sweeps the nonce out of the cache.

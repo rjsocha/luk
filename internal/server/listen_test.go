@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +19,6 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"luk/internal/config"
-	"luk/internal/sshsig"
 	"luk/internal/tlsself"
 	"luk/internal/wire"
 )
@@ -33,38 +31,6 @@ func freePort(t *testing.T) string {
 	}
 	defer ln.Close()
 	return ln.Addr().String()
-}
-
-// signedPut is a signed upload of body to base+path with the given Host.
-func signedPut(t *testing.T, signer ssh.Signer, base, host, path string, body []byte) *http.Request {
-	t.Helper()
-	return signedPutMeta(t, signer, base, host, path, fileMeta(body), body)
-}
-
-func signedPutMeta(t *testing.T, signer ssh.Signer, base, host, path string, meta wire.Meta, body []byte) *http.Request {
-	t.Helper()
-	if err := meta.Normalize(); err != nil {
-		t.Fatal(err)
-	}
-	metaS, err := wire.EncodeMeta(meta)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ts, nonce := time.Now().UTC().Format(time.RFC3339), wire.NewNonce()
-	sig, err := sshsig.Sign(signer, wire.Namespace, wire.CanonicalText(host, path, ts, nonce, metaS))
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, err := http.NewRequest(http.MethodPut, base+path, bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.Host = host
-	r.Header.Set(wire.HeaderMeta, metaS)
-	r.Header.Set(wire.HeaderTimestamp, ts)
-	r.Header.Set(wire.HeaderNonce, nonce)
-	r.Header.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
-	return r
 }
 
 type listenEnv struct {
@@ -111,6 +77,8 @@ expose:
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.IdentityPath = config.IdentityPath(filepath.Join(root, "config.yaml"))
+	writeIdentity(t, filepath.Join(root, "config.yaml"))
 	for _, n := range []string{"intake", "download"} {
 		l := cfg.Listen[n]
 		pin, err := tlsself.Generate(l.TLS.Cert, l.TLS.Key, l.TLS.Host, l.TLS.Algorithm)
@@ -185,15 +153,9 @@ func TestListenersRouting(t *testing.T) {
 	}
 	tlsBase, plainBase := "https://"+e.shared, "http://"+e.plain
 
-	resp, err := e.client.Do(signedPut(t, e.user, tlsBase, "a.vm:443", "/up", []byte("hello")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out wire.Receipt
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusCreated {
-		t.Fatalf("upload %d %v", resp.StatusCode, err)
-	}
-	resp.Body.Close()
+	body := []byte("hello")
+	rec, _ := chanUpload(t, req{signer: e.user, host: "a.vm:443", path: "/up", meta: fileMeta(body), body: body, via: remote{e.client, tlsBase}})
+	out := receipt(t, rec, http.StatusCreated)
 	name, ok := strings.CutPrefix(out.URL, "https://drop.example.com/")
 	if !ok || len(name) != 32 {
 		t.Fatalf("url %q", out.URL)
@@ -215,7 +177,7 @@ func TestListenersRouting(t *testing.T) {
 		{tlsBase, "b.vm", "/" + name, 200},
 		{tlsBase, "B.VM:8443", "/" + name, 200},
 		{tlsBase, "a.vm", "/" + name, 404},
-		{tlsBase, "a.vm", "/up", 405},
+		{tlsBase, "a.vm", "/up", 400},
 		{tlsBase, "c.vm", "/" + name, 421},
 		{plainBase, "b.vm", "/" + name, 421},
 		{plainBase, "Drop.Example.com:80", "/" + name, 200},
@@ -224,25 +186,20 @@ func TestListenersRouting(t *testing.T) {
 			t.Errorf("%s %s%s: %d %s, want %d", c.base, c.host, c.path, code, body, c.code)
 		}
 	}
-	// An upload to a listener without endpoints (405 there), and one
-	// replayed towards another host of the same server, are refused.
+	// An upload to a listener without endpoints (no handshake there), and
+	// one replayed towards another host of the same server, are refused.
 	for _, c := range []struct {
 		base, signed, sent string
 		code               int
 	}{
-		{tlsBase, "b.vm", "b.vm", 405},
+		{tlsBase, "b.vm", "b.vm", 404},
 		{plainBase, "a.vm", "a.vm", 421},
-		{tlsBase, "a.vm", "b.vm", 405},
+		{tlsBase, "a.vm", "b.vm", 404},
 	} {
-		r := signedPut(t, e.user, c.base, c.signed, "/up", []byte("x"))
-		r.Host = c.sent
-		resp, err := e.client.Do(r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != c.code {
-			t.Errorf("put signed %s sent %s to %s: %d, want %d", c.signed, c.sent, c.base, resp.StatusCode, c.code)
+		x := []byte("x")
+		rec, _ := chanUpload(t, req{signer: e.user, host: c.sent, signHost: c.signed, path: "/up", meta: fileMeta(x), body: x, via: remote{e.client, c.base}})
+		if rec.Code != c.code {
+			t.Errorf("put signed %s sent %s to %s: %d %s, want %d", c.signed, c.sent, c.base, rec.Code, rec.Body, c.code)
 		}
 	}
 }
@@ -318,7 +275,7 @@ func TestPublicURLInCreated(t *testing.T) {
 			"listen:\n  main: {addr: \"127.0.0.1:0\"}\n  pub: {addr: \"127.0.0.1:1\", host: [x.vm], tls: {mode: self, cert: c, key: k, host: x.vm}}\n  web: {addr: \"127.0.0.1:2\", public: \"https://files.example.com/\"}", 1)
 		return strings.Replace(s, "drop: {listen: main, path: /d/}", "drop: {listen: [web, pub], path: /d/}", 1)
 	})
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, File: "a b.txt", Source: wire.SourceStdin}, body: []byte("x"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, File: "a b.txt", Source: wire.SourceStdin}, body: []byte("x")})
 	out := receipt(t, rec, http.StatusCreated)
 	if u, err := url.Parse(out.URL); err != nil || u.Scheme != "https" || u.Host != "files.example.com" || !strings.HasPrefix(u.Path, "/d/") {
 		t.Fatalf("url %q", out.URL)

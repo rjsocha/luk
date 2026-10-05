@@ -15,17 +15,16 @@ import (
 	"luk/internal/wire"
 )
 
-// serveEndpoints answers the endpoint listing (wire.EndpointsPath): a
-// signed GET (luk-list@v1) gets the endpoints of l whose allow admits the
-// signer; anything unsigned or not verified is 401 as for any signed
-// request.
+// serveEndpoints answers the endpoint listing (wire.EndpointsPath), an
+// operation of the channel: a signed GET (luk-list@v2) gets the endpoints
+// of l whose allow admits the signer; anything unsigned or not verified
+// is 401 as for any signed request.
 func (s *Server) serveEndpoints(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener) {
 	reject := func(level slog.Level, he *httpError) {
 		s.log.Log(r.Context(), level, "endpoint list rejected", "remote", r.RemoteAddr, "host", r.Host, "listen", l.cfg.Name, "status", he.code, "error", he.msg)
 		if he.code == http.StatusMethodNotAllowed {
 			w.Header().Set("Allow", http.MethodGet)
 		}
-		w.Header().Set("Connection", "close")
 		writeJSON(w, he.code, wire.ErrorResponse{Error: he.msg})
 	}
 	if r.Method != http.MethodGet {
@@ -43,11 +42,8 @@ func (s *Server) serveEndpoints(w http.ResponseWriter, r *http.Request, sn *snap
 		reject(level, &httpError{code: http.StatusUnauthorized, msg: "missing signature headers"})
 		return
 	}
-	ns, text := wire.ListNamespace, wire.ListCanonicalText(r.Method, r.Host, r.URL.EscapedPath(), ts, nonce)
-	if cs := sessionOf(r.Context()); cs != nil {
-		ns, text = wire.ListNamespaceV2, wire.ListCanonicalTextV2(r.Method, r.Host, r.URL.EscapedPath(), ts, nonce, cs.sess.H())
-	}
-	id, err := s.verify(r, sn, l, s.now(), ts, nonce, sigS, ns, text)
+	text := wire.ListCanonicalText(r.Method, r.Host, r.URL.EscapedPath(), ts, nonce, sessionOf(r.Context()).sess.H())
+	id, err := s.verify(r, sn, l, s.now(), ts, nonce, sigS, wire.ListNamespace, text)
 	if err != nil {
 		var he *httpError
 		if !errors.As(err, &he) {

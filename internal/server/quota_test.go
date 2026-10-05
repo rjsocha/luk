@@ -63,11 +63,11 @@ func TestQuotaSignedSize(t *testing.T) {
 	// A dry run is checked the same and charges nothing.
 	m := fileMeta(body, "prod")
 	m.DryRun = true
-	if rec, _ = f.do(t, req{signer: f.user, path: "/backup", meta: m, chunked: true}); rec.Code != http.StatusTooManyRequests {
+	if rec, _ = f.do(t, req{signer: f.user, path: "/backup", meta: m}); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("dry run %d: %s", rec.Code, rec.Body)
 	}
 	*now = now.Add(time.Hour)
-	if rec, _ = f.do(t, req{ts: *now, signer: f.user, path: "/backup", meta: m, chunked: true}); rec.Code != http.StatusOK {
+	if rec, _ = f.do(t, req{ts: *now, signer: f.user, path: "/backup", meta: m}); rec.Code != http.StatusOK {
 		t.Fatalf("dry run %d: %s", rec.Code, rec.Body)
 	}
 	rec, _ = f.do(t, req{ts: *now, signer: f.user, path: "/backup", meta: fileMeta(body, "prod"), body: body})
@@ -81,14 +81,14 @@ func TestQuotaSignedSize(t *testing.T) {
 func TestQuotaStream(t *testing.T) {
 	f, _ := quotaFixture(t, `{rate: 100/1h, burst: 300}`)
 	do := func(n int) int {
-		rec, _ := f.do(t, req{signer: f.user, path: "/backup", meta: stream(), body: fresh(n), chunked: true})
+		rec, _ := f.do(t, req{signer: f.user, path: "/backup", meta: stream(), body: fresh(n)})
 		return rec.Code
 	}
 	if c := do(250); c != http.StatusAccepted {
 		t.Fatal(c)
 	}
 	// Cut at the limit; what it took goes back.
-	rec, _ := f.do(t, req{signer: f.user, path: "/backup", meta: stream(), body: fresh(100), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/backup", meta: stream(), body: fresh(100)})
 	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "1800" {
 		t.Fatalf("%d %q: %s", rec.Code, rec.Header().Get("Retry-After"), rec.Body)
 	}
@@ -100,7 +100,7 @@ func TestQuotaStream(t *testing.T) {
 	}
 	// A stream over the burst never passes.
 	f2, _ := quotaFixture(t, `{rate: 100/1h, burst: 300}`)
-	rec, _ = f2.do(t, req{signer: f2.user, path: "/backup", meta: stream(), body: fresh(400), chunked: true})
+	rec, _ = f2.do(t, req{signer: f2.user, path: "/backup", meta: stream(), body: fresh(400)})
 	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), wire.ErrQuotaTooLarge) {
 		t.Fatalf("%d: %s", rec.Code, rec.Body)
 	}
@@ -163,7 +163,7 @@ func TestQuotaPersisted(t *testing.T) {
 	rec, _ := f.do(t, req{signer: f.user, path: "/backup", meta: fileMeta(body, "prod"), body: body})
 	receipt(t, rec, http.StatusAccepted)
 
-	s := New(f.srv.config(), slog.New(slog.DiscardHandler))
+	s := withIdentity(t, New(f.srv.config(), slog.New(slog.DiscardHandler)))
 	s.SetClock(func() time.Time { return *now })
 	if _, err := s.quota.Open(p); err != nil {
 		t.Fatal(err)

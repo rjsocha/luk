@@ -73,7 +73,7 @@ func linkOp(ctx context.Context, o Options, method, link, action, metaS string) 
 	defer c.Close()
 	header := map[string]string{wire.HeaderLink: link, wire.HeaderLinkAction: action}
 	req, err := signedOp(o, c, method, metaS, header, func(host, path, ts, nonce string) (string, []byte) {
-		return wire.LinkNamespaceV2, wire.LinkCanonicalTextV2(method, host, path, link, action, ts, nonce, metaS, c.H())
+		return wire.LinkNamespace, wire.LinkCanonicalText(method, host, path, link, action, ts, nonce, metaS, c.H())
 	})
 	if err != nil {
 		return nil, err
@@ -93,7 +93,7 @@ func linkReplace(ctx context.Context, o LinkOptions, method string) (*wire.LinkA
 	header := map[string]string{wire.HeaderLink: o.Link, wire.HeaderLinkAction: o.Action}
 	res, err := uploadParts(ctx, o.Options, func(c *Channel) (channel.Request, error) {
 		return signedOp(o.Options, c, method, metaS, header, func(host, path, ts, nonce string) (string, []byte) {
-			return wire.LinkNamespaceV2, wire.LinkCanonicalTextV2(method, host, path, o.Link, o.Action, ts, nonce, metaS, c.H())
+			return wire.LinkNamespace, wire.LinkCanonicalText(method, host, path, o.Link, o.Action, ts, nonce, metaS, c.H())
 		})
 	})
 	if err != nil {

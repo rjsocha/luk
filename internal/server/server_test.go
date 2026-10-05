@@ -25,6 +25,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"luk/internal/channel"
 	"luk/internal/config"
 	"luk/internal/expose"
 	"luk/internal/pipeline"
@@ -109,8 +110,20 @@ expose:
 	if err := prepareDirs(cfg, "receive"); err != nil {
 		t.Fatal(err)
 	}
-	srv := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := withIdentity(t, New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	return &fixture{srv: srv, user: user, hostCA: hostCA, root: root}
+}
+
+// withIdentity gives s a new identity key: endpoint requests go through
+// the channel, also on a server whose configuration has no key file.
+func withIdentity(t *testing.T, s *Server) *Server {
+	t.Helper()
+	k, err := channel.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetIdentity(k)
+	return s
 }
 
 // handler serves the only address of the fixture.
@@ -156,26 +169,47 @@ func entries(t *testing.T, dir string) []string {
 	return out
 }
 
+// req is an upload through the channel, served in process.
 type req struct {
-	signer  ssh.Signer
-	path    string
-	meta    wire.Meta
-	body    []byte
-	chunked bool
-	ts      time.Time
-	nonce   string
-	host    string
-	tamper  func(*http.Request)
-	// rd is the body sent instead of body, which is still what is signed.
+	signer ssh.Signer
+	path   string
+	meta   wire.Meta
+	body   []byte
+	ts     time.Time
+	nonce  string
+	host   string
+	// signHost is the Host signed; host when empty.
+	signHost string
+	// tamper changes the signed OP before it is sent; its body is the
+	// content sent in parts.
+	tamper func(*http.Request)
+	// rd is the content sent instead of body, which is still what is signed.
 	rd io.Reader
 	// via serves the request instead of the fixture handler.
 	via http.Handler
 }
 
+// do runs the upload r through the fixture handler, or r.via (see
+// chanUpload).
 func (f *fixture) do(t *testing.T, r req) (*httptest.ResponseRecorder, wire.Response) {
+	t.Helper()
+	if r.via == nil {
+		r.via = f.handler()
+	}
+	return chanUpload(t, r)
+}
+
+// chanUpload runs the upload r through r.via: the handshake, the signed OP
+// and, when lukd asks for it, the content in parts and the complete. It
+// returns the answer that ended the upload; for a dry run also the
+// decoded debug answer.
+func chanUpload(t *testing.T, r req) (*httptest.ResponseRecorder, wire.Response) {
 	t.Helper()
 	if r.host == "" {
 		r.host = "lukd.test"
+	}
+	if r.signHost == "" {
+		r.signHost = strings.ToLower(r.host)
 	}
 	if r.ts.IsZero() {
 		r.ts = time.Now()
@@ -190,33 +224,30 @@ func (f *fixture) do(t *testing.T, r req) (*httptest.ResponseRecorder, wire.Resp
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := r.ts.UTC().Format(time.RFC3339)
-	sig, err := sshsig.Sign(r.signer, wire.Namespace, wire.CanonicalText(r.host, r.path, ts, r.nonce, metaS))
-	if err != nil {
-		t.Fatal(err)
+	c, rec := recOpen(t, r.via, r.host, r.path)
+	if c != nil {
+		ts := r.ts.UTC().Format(time.RFC3339)
+		sig, err := sshsig.Sign(r.signer, wire.Namespace, wire.CanonicalText(r.signHost, r.path, ts, r.nonce, metaS, c.sess.H()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rd io.Reader = bytes.NewReader(r.body)
+		if r.rd != nil {
+			rd = r.rd
+		}
+		hr := httptest.NewRequest(http.MethodPut, "http://"+r.host+r.path, rd)
+		hr.Header.Set(wire.HeaderMeta, metaS)
+		hr.Header.Set(wire.HeaderTimestamp, ts)
+		hr.Header.Set(wire.HeaderNonce, r.nonce)
+		hr.Header.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
+		if r.tamper != nil {
+			r.tamper(hr)
+		}
+		rec = c.op(t, channel.Request{Method: hr.Method, Target: r.path, Header: hr.Header})
+		if rec.Code == http.StatusOK && !r.meta.DryRun {
+			rec = c.content(t, rec, hr.Body, r.meta.Size != nil)
+		}
 	}
-	var rd io.Reader = bytes.NewReader(r.body)
-	if r.rd != nil {
-		rd = r.rd
-	}
-	hr := httptest.NewRequest(http.MethodPut, "http://"+r.host+r.path, rd)
-	hr.Host = r.host
-	if r.chunked {
-		hr.ContentLength = -1
-	}
-	hr.Header.Set(wire.HeaderMeta, metaS)
-	hr.Header.Set(wire.HeaderTimestamp, ts)
-	hr.Header.Set(wire.HeaderNonce, r.nonce)
-	hr.Header.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
-	if r.tamper != nil {
-		r.tamper(hr)
-	}
-	rec := httptest.NewRecorder()
-	h := r.via
-	if h == nil {
-		h = f.handler()
-	}
-	h.ServeHTTP(rec, hr)
 	var out wire.Response
 	if rec.Code == http.StatusOK {
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -271,12 +302,12 @@ func TestAcceptHostCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, out := f.do(t, req{signer: cs, path: "/backup", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Tags: []string{"prod"}, DryRun: true}, body: []byte("x"), chunked: true})
+	rec, out := f.do(t, req{signer: cs, path: "/backup", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Tags: []string{"prod"}, DryRun: true}, body: []byte("x")})
 	if rec.Code != 200 || out.Identity.Name != "hosts:luk.vm" || out.Identity.Serial != 9 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	// a host certificate is not allowed on /drop
-	rec, _ = f.do(t, req{signer: cs, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x"), chunked: true})
+	rec, _ = f.do(t, req{signer: cs, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x")})
 	if rec.Code != 403 {
 		t.Fatalf("drop: %d", rec.Code)
 	}
@@ -286,7 +317,7 @@ func TestRespondURL(t *testing.T) {
 	f := newFixture(t)
 	const prefix = "https://lukd.vm:8443/d/"
 	before := time.Now()
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x")})
 	out := receipt(t, rec, http.StatusCreated)
 	name := strings.TrimPrefix(out.URL, prefix)
 	if !strings.HasPrefix(out.URL, prefix) || len(name) != 32 || out.Size != 1 || out.ID == "" {
@@ -296,7 +327,7 @@ func TestRespondURL(t *testing.T) {
 	if err != nil || exp.Before(before.Add(7*24*time.Hour-time.Second)) || exp.After(time.Now().Add(7*24*time.Hour)) {
 		t.Fatalf("expires %q: %v", out.Expires, err)
 	}
-	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, File: "notes.txt", Source: wire.SourceStdin}, body: []byte("y"), chunked: true})
+	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, File: "notes.txt", Source: wire.SourceStdin}, body: []byte("y")})
 	out2 := receipt(t, rec, http.StatusCreated)
 	if strings.HasSuffix(out2.URL, "notes.txt") || len(strings.TrimPrefix(out2.URL, prefix)) != 32 || out2.URL == out.URL {
 		t.Fatalf("%+v", out2)
@@ -314,7 +345,7 @@ func TestRespondURL(t *testing.T) {
 
 func TestDropDownload(t *testing.T) {
 	f := newFixture(t)
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, File: "a.txt", Source: wire.SourceStdin}, body: []byte("hello"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, File: "a.txt", Source: wire.SourceStdin}, body: []byte("hello")})
 	out := receipt(t, rec, http.StatusCreated)
 	f.settle(t)
 	u, err := url.Parse(out.URL)
@@ -333,7 +364,7 @@ func TestDropRandomAlphabet(t *testing.T) {
 	f := newFixtureWith(t, func(s string) string {
 		return strings.Replace(s, `expose: drop}`, `expose: drop, random: {alphabet: "`+alphabet+`"}}`, 1)
 	})
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, File: "a.txt", Source: wire.SourceStdin}, body: []byte("hello"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, File: "a.txt", Source: wire.SourceStdin}, body: []byte("hello")})
 	out := receipt(t, rec, http.StatusCreated)
 	name := strings.TrimPrefix(out.URL, "https://lukd.vm:8443/d/")
 	if len(name) != 26 || strings.Trim(name, alphabet) != "" {
@@ -357,13 +388,13 @@ func TestDropPrettyURL(t *testing.T) {
 		return strings.Replace(s, `expose: drop}`, `expose: drop, random: {alphabet: "abc"}}`, 1)
 	})
 	meta := wire.Meta{Portal: wire.PortalDirect, File: "a.txt", Source: wire.SourceStdin, PrettyURL: true, DryRun: true}
-	rec, out := f.do(t, req{signer: f.user, path: "/drop", meta: meta, body: []byte("hello"), chunked: true})
+	rec, out := f.do(t, req{signer: f.user, path: "/drop", meta: meta, body: []byte("hello")})
 	name := strings.TrimPrefix(out.Respond.URL, "https://lukd.vm:8443/d/")
 	if rec.Code != 200 || !out.Client.PrettyURL || !proquintRe.MatchString(name) || strings.Count(name, "-") != 7 {
 		t.Fatalf("dry run: %d %s", rec.Code, rec.Body)
 	}
 	meta.DryRun = false
-	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: meta, body: []byte("hello"), chunked: true})
+	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: meta, body: []byte("hello")})
 	name = strings.TrimPrefix(receipt(t, rec, http.StatusCreated).URL, "https://lukd.vm:8443/d/")
 	if !proquintRe.MatchString(name) || strings.Count(name, "-") != 7 {
 		t.Fatalf("name %q", name)
@@ -400,7 +431,7 @@ func TestPrettyURLNotOfferedBeforeBody(t *testing.T) {
 func TestURLStorageNotLocal(t *testing.T) {
 	f := newFixture(t)
 	f.srv.config().Storage["drop"] = &config.Storage{Type: "s3", Bucket: "b", Expose: "drop"}
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x")})
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "storage drop is not a local storage") {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
@@ -457,7 +488,7 @@ func (f *fixture) hostCert(t *testing.T) ssh.Signer {
 
 func TestIngestHostCertificate(t *testing.T) {
 	f := newFixture(t)
-	rec, _ := f.do(t, req{signer: f.hostCert(t), path: "/backup", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Tags: []string{"prod"}}, body: []byte("host data"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.hostCert(t), path: "/backup", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Tags: []string{"prod"}}, body: []byte("host data")})
 	out := receipt(t, rec, http.StatusAccepted)
 	f.settle(t)
 	got, err := os.ReadFile(filepath.Join(f.root, "s/archive/file", out.ID))
@@ -494,7 +525,7 @@ func TestExpiresFromClientTTL(t *testing.T) {
 		{wire.TTLMax, "7d", "", 7 * 24 * time.Hour},
 	} {
 		before := time.Now()
-		rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: tc.ttl}, body: []byte("x"), chunked: true})
+		rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: tc.ttl}, body: []byte("x")})
 		out := receipt(t, rec, http.StatusCreated)
 		expiresAbout(t, "ttl "+tc.ttl, out.Expires, before, tc.d)
 		if out.TTL != tc.want || out.TTLNote != tc.note || out.TTLMin != "3h" || out.TTLMax != "7d" {
@@ -502,13 +533,13 @@ func TestExpiresFromClientTTL(t *testing.T) {
 		}
 	}
 	f.srv.config().Storage["drop"].TTL.Max = 0
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: "1h"}, body: []byte("x"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: "1h"}, body: []byte("x")})
 	if out := receipt(t, rec, http.StatusCreated); out.TTL != "3h" || out.TTLNote != wire.TTLRaised || out.TTLMin != "3h" || out.TTLMax != "" {
 		t.Fatalf("only min: %+v", out)
 	}
 	f.srv.config().Storage["drop"].TTL.Min = 0
 	for _, ttl := range []string{"", wire.TTLMax} {
-		rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: ttl}, body: []byte("x"), chunked: true})
+		rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: ttl}, body: []byte("x")})
 		if out := receipt(t, rec, http.StatusCreated); out.Expires != "" || out.TTL != "" || out.TTLNote != "" || out.TTLMin != "" || out.TTLMax != "" {
 			t.Fatalf("no ttl anywhere, ttl %q: %+v", ttl, out)
 		}
@@ -518,7 +549,7 @@ func TestExpiresFromClientTTL(t *testing.T) {
 func TestExpiresOnceClamped(t *testing.T) {
 	f := newFixture(t)
 	before := time.Now()
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: "30d", Once: true}, body: []byte("x"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: "30d", Once: true}, body: []byte("x")})
 	out := receipt(t, rec, http.StatusCreated)
 	if out.TTL != "7d" || out.TTLNote != wire.TTLCapped {
 		t.Errorf("once: %+v", out)
@@ -537,22 +568,22 @@ func TestExpiresUserFalse(t *testing.T) {
 		return strings.Replace(s, "ttl: {user: true, max: 7d}", "ttl: {max: 21d}", 1)
 	})
 	before := time.Now()
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: "1h"}, body: []byte("x"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: "1h"}, body: []byte("x")})
 	out := receipt(t, rec, http.StatusCreated)
 	expiresAbout(t, "fixed", out.Expires, before, 21*24*time.Hour)
 	if out.TTL != "21d" || out.TTLNote != wire.TTLIgnored || out.TTLMin != "" || out.TTLMax != "21d" {
 		t.Errorf("fixed: %+v", out)
 	}
-	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x"), chunked: true})
+	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x")})
 	if out := receipt(t, rec, http.StatusCreated); out.TTL != "21d" || out.TTLNote != "" {
 		t.Errorf("fixed without ttl: %+v", out)
 	}
-	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: wire.TTLMax}, body: []byte("x"), chunked: true})
+	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: wire.TTLMax}, body: []byte("x")})
 	if out := receipt(t, rec, http.StatusCreated); out.TTL != "21d" || out.TTLNote != wire.TTLIgnored {
 		t.Errorf("fixed with ttl max: %+v", out)
 	}
 	f.srv.config().Storage["drop"].TTL.Max = 0
-	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: "1h"}, body: []byte("x"), chunked: true})
+	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, TTL: "1h"}, body: []byte("x")})
 	if out := receipt(t, rec, http.StatusCreated); out.Expires != "" || out.TTL != "" || out.TTLNote != wire.TTLIgnored {
 		t.Errorf("no max: %+v", out)
 	}
@@ -578,7 +609,7 @@ func TestExpiresPerStorage(t *testing.T) {
 		return strings.Replace(s, `base: s/archive, path: "{{ .File }}"}`, `base: s/archive, path: "{{ .File }}", ttl: {max: 1h}}`, 1)
 	})
 	before := time.Now()
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, File: "a.txt", TTL: "2d"}, body: []byte("x"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, File: "a.txt", TTL: "2d"}, body: []byte("x")})
 	out := receipt(t, rec, http.StatusCreated)
 	f.settle(t)
 	if out.TTL != "2d" || out.TTLNote != "" {
@@ -635,31 +666,14 @@ func TestExpiresAcceptFanOut(t *testing.T) {
 func TestNoSpaceBeforeBody(t *testing.T) {
 	f := newFixture(t)
 	f.srv.queue = queue.New(0, func(string) (int64, error) { return 3, nil })
-	ts := httptest.NewServer(f.handler())
-	defer ts.Close()
 	body := []byte("abcd")
 	var read int
-	rd := readFunc(func(p []byte) (int, error) {
-		read++
-		return 0, io.EOF
-	})
-	hr := f.signed(t, "/drop", body, rd)
-	hr.URL.Host = ts.Listener.Addr().String()
-	hr.ContentLength = int64(len(body))
-	hr.Header.Set("Expect", "100-continue")
-	hr.Proto, hr.ProtoMajor, hr.ProtoMinor = "HTTP/1.1", 1, 1
-	c := &http.Client{Transport: &http.Transport{ExpectContinueTimeout: 5 * time.Second}}
-	resp, err := c.Do(hr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusInsufficientStorage || strings.TrimSpace(string(b)) != "{\n  \"error\": \"not enough space\"\n}" {
-		t.Fatalf("%d %s", resp.StatusCode, b)
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: fileMeta(body), body: body, tamper: countBody(&read)})
+	if rec.Code != http.StatusInsufficientStorage || strings.TrimSpace(rec.Body.String()) != "{\n  \"error\": \"not enough space\"\n}" {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	if read != 0 {
-		t.Fatalf("body read %d times", read)
+		t.Fatalf("body read %d bytes", read)
 	}
 	if e := entries(t, filepath.Join(f.root, "q/drop")); len(e) != 0 {
 		t.Fatalf("queue %v", e)
@@ -674,8 +688,8 @@ func TestReservationReleased(t *testing.T) {
 	f := newFixture(t)
 	f.srv.queue = queue.New(0, func(string) (int64, error) { return 4, nil })
 	m := fileMeta([]byte("abcd"), "prod")
-	rec, _ := f.do(t, req{signer: f.user, path: "/backup", meta: m, body: []byte("abc"), chunked: true})
-	if rec.Code != http.StatusUnprocessableEntity {
+	rec, _ := f.do(t, req{signer: f.user, path: "/backup", meta: m, body: []byte("abc")})
+	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("short body: %d %s", rec.Code, rec.Body)
 	}
 	rec, _ = f.do(t, req{signer: f.user, path: "/backup", meta: m, body: []byte("abcd")})
@@ -709,7 +723,7 @@ func TestRouting(t *testing.T) {
 		{http.MethodPut, "/d/abc", http.StatusNotFound},
 		{http.MethodPost, "/d/abc/reveal", http.StatusTeapot},
 		{http.MethodPost, "/nope", http.StatusTeapot},
-		{http.MethodGet, "/backup", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/backup", http.StatusBadRequest},
 	} {
 		rec := httptest.NewRecorder()
 		f.handler().ServeHTTP(rec, httptest.NewRequest(c.method, "http://lukd.test"+c.path, nil))
@@ -750,7 +764,7 @@ func TestRejections(t *testing.T) {
 			s, _ := wire.EncodeMeta(m)
 			h.Header.Set(wire.HeaderMeta, s)
 		}}, 401},
-		"other host":        {req{signer: f.user, path: "/backup", meta: fileMeta(body, "prod"), body: body, tamper: func(h *http.Request) { h.Host = "evil.test" }}, 401},
+		"other host":        {req{signer: f.user, path: "/backup", meta: fileMeta(body, "prod"), body: body, host: "evil.test", signHost: "lukd.test"}, 401},
 		"missing signature": {req{signer: f.user, path: "/backup", meta: fileMeta(body, "prod"), body: body, tamper: func(h *http.Request) { h.Header.Del(wire.HeaderSignature) }}, 401},
 		"wrong method":      {req{signer: f.user, path: "/backup", meta: fileMeta(body, "prod"), body: body, tamper: func(h *http.Request) { h.Method = http.MethodPost }}, 405},
 	}
@@ -788,8 +802,9 @@ func TestSignedHashMismatch(t *testing.T) {
 	if rec.Code != 422 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
-	rec, _ = f.do(t, req{signer: f.user, path: "/backup", meta: m, body: []byte("abc"), chunked: true})
-	if rec.Code != 422 {
+	// A content shorter than the signed size is refused at its last part.
+	rec, _ = f.do(t, req{signer: f.user, path: "/backup", meta: m, body: []byte("abc")})
+	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("short body: %d %s", rec.Code, rec.Body)
 	}
 	if e := entries(t, filepath.Join(f.root, "q/backup")); len(e) != 0 {
@@ -797,9 +812,9 @@ func TestSignedHashMismatch(t *testing.T) {
 	}
 }
 
-func TestBodyOverMaxSizeChunked(t *testing.T) {
+func TestStreamOverMaxSize(t *testing.T) {
 	f := newFixture(t)
-	rec, _ := f.do(t, req{signer: f.user, path: "/backup", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Tags: []string{"prod"}}, body: bytes.Repeat([]byte("x"), 2000), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/backup", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Tags: []string{"prod"}}, body: bytes.Repeat([]byte("x"), 2000)})
 	if rec.Code != 413 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
@@ -921,7 +936,7 @@ func TestDryRunEchoedAndVerified(t *testing.T) {
 	}
 	var read int
 	rec, _ = f.do(t, req{signer: f.user, path: "/backup", meta: m, body: body, tamper: countBody(&read)})
-	if rec.Code != 200 || read != 0 || rec.Header().Get("Connection") != "close" {
+	if rec.Code != 200 || read != 0 {
 		t.Fatalf("dry run read %d body bytes: %d %s", read, rec.Code, rec.Body)
 	}
 	big := make([]byte, 2048)
@@ -931,7 +946,7 @@ func TestDryRunEchoedAndVerified(t *testing.T) {
 		t.Fatalf("dry run over the size limit: %d %s", rec.Code, rec.Body)
 	}
 	dm := wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, DryRun: true}
-	rec, out = f.do(t, req{signer: f.user, path: "/drop", meta: dm, body: []byte("x"), chunked: true})
+	rec, out = f.do(t, req{signer: f.user, path: "/drop", meta: dm, body: []byte("x")})
 	if rec.Code != 200 || out.Respond.Mode != "url" || len(strings.TrimPrefix(out.Respond.URL, "https://lukd.vm:8443/d/")) != 32 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
@@ -1012,7 +1027,7 @@ func TestDotFileStored(t *testing.T) {
 func TestCreatedAlwaysHasExpires(t *testing.T) {
 	f := newFixture(t)
 	f.srv.config().Storage["drop"].TTL.Max = 0
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x")})
 	var raw map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
@@ -1047,7 +1062,7 @@ func TestRevealOverLimitBeforeBody(t *testing.T) {
 
 func TestRevealPortalEndToEnd(t *testing.T) {
 	f := newFixture(t)
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalReveal, Once: true, Source: wire.SourceStdin}, body: []byte("pw<b>"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalReveal, Once: true, Source: wire.SourceStdin}, body: []byte("pw<b>")})
 	out := receipt(t, rec, http.StatusCreated)
 	f.settle(t)
 	u, err := url.Parse(out.URL)
@@ -1113,18 +1128,18 @@ func TestRevealUnsizedOverLimit(t *testing.T) {
 	f := newFixture(t)
 	body := bytes.Repeat([]byte("s"), expose.MaxReveal+1)
 	m := wire.Meta{Portal: wire.PortalReveal, Source: wire.SourceStdin}
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: m, body: body, chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: m, body: body})
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "reveal") {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	// Without a signed size a dry run has nothing to check: no body is read.
 	m.DryRun = true
-	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: m, body: body, chunked: true})
+	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: m, body: body})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dry run %d %s", rec.Code, rec.Body)
 	}
 	m.DryRun = false
-	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: m, body: body[:expose.MaxReveal], chunked: true})
+	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: m, body: body[:expose.MaxReveal]})
 	receipt(t, rec, http.StatusCreated)
 }
 
@@ -1177,7 +1192,7 @@ func TestDownloadListenerMethods(t *testing.T) {
 			`listen: {main: {addr: "127.0.0.1:0", public: "https://lukd.vm:8443"}, dl: {addr: "127.0.0.1:1", public: "https://dl.vm"}}`, 1)
 		return strings.Replace(s, `drop: {listen: main, path: /d/}`, `drop: {listen: dl, path: /}`, 1)
 	})
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDownload, Source: wire.SourceStdin}, body: []byte("hello"), chunked: true, via: f.srv.Handler("127.0.0.1:0")})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDownload, Source: wire.SourceStdin}, body: []byte("hello"), via: f.srv.Handler("127.0.0.1:0")})
 	out := receipt(t, rec, http.StatusCreated)
 	f.settle(t)
 	name, ok := strings.CutPrefix(out.URL, "https://dl.vm/")
@@ -1222,18 +1237,24 @@ func TestRejectedLogLevel(t *testing.T) {
 	if rec.Code != http.StatusNotFound || !strings.Contains(logs.String(), `level=DEBUG msg="upload rejected"`) || strings.Contains(logs.String(), "level=INFO") {
 		t.Errorf("unsigned junk: %d %s", rec.Code, logs)
 	}
+	// A signed request outside the channel is an old luk: worth an info
+	// line; an unsigned one is not.
 	logs.Reset()
-	body := []byte("x")
-	if rec, _ := f.do(t, req{signer: f.user, path: "/nope", meta: fileMeta(body), body: body}); rec.Code != http.StatusNotFound {
-		t.Fatalf("signed: %d", rec.Code)
+	metaS, err := wire.EncodeMeta(fileMeta([]byte("x"), "prod"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(logs.String(), `level=INFO msg="upload rejected"`) {
-		t.Errorf("signed request not logged at info: %s", logs)
+	hr := httptest.NewRequest(http.MethodPut, "http://lukd.test/backup", strings.NewReader("x"))
+	signV1(t, f.user, hr, before(wire.Namespace), metaS, http.MethodPut, "lukd.test", "/backup")
+	rec = httptest.NewRecorder()
+	f.handler().ServeHTTP(rec, hr)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(logs.String(), `level=INFO msg="endpoint request outside the channel"`) {
+		t.Errorf("signed request outside the channel: %d %s", rec.Code, logs)
 	}
 	logs.Reset()
 	rec = httptest.NewRecorder()
 	f.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "http://lukd.test/backup", nil))
-	if rec.Code != http.StatusMethodNotAllowed || !strings.Contains(logs.String(), `level=INFO msg="upload rejected"`) {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(logs.String(), `level=DEBUG msg="endpoint request outside the channel"`) || strings.Contains(logs.String(), "level=INFO") {
 		t.Errorf("unsigned request to an endpoint: %d %s", rec.Code, logs)
 	}
 }
@@ -1287,7 +1308,7 @@ func TestPortalOwner(t *testing.T) {
 		{"no_owner reveal", userCert, wire.PortalReveal, true, ""},
 	} {
 		meta := wire.Meta{Portal: tc.portal, Source: wire.SourceStdin, NoOwner: tc.hide}
-		rec, _ := f.do(t, req{signer: tc.signer, path: "/drop", meta: meta, body: []byte("x"), chunked: true})
+		rec, _ := f.do(t, req{signer: tc.signer, path: "/drop", meta: meta, body: []byte("x")})
 		out := receipt(t, rec, http.StatusCreated)
 		f.settle(t)
 		u, err := url.Parse(out.URL)
@@ -1313,7 +1334,7 @@ func TestPortalOwner(t *testing.T) {
 func TestRevealSecretType(t *testing.T) {
 	f := newFixture(t)
 	meta := wire.Meta{Portal: wire.PortalReveal, Source: wire.SourceStdin, Type: "text/plain; charset=utf-8"}
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: meta, body: []byte("pw"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: meta, body: []byte("pw")})
 	out := receipt(t, rec, http.StatusCreated)
 	f.settle(t)
 	u, err := url.Parse(out.URL)
@@ -1336,7 +1357,7 @@ func TestRevealSecretType(t *testing.T) {
 	// The download keeps the full type too.
 	dl := newFixture(t)
 	meta = wire.Meta{Portal: wire.PortalDownload, Source: wire.SourceStdin, Type: "text/csv; charset=utf-8; header=present"}
-	rec, _ = dl.do(t, req{signer: dl.user, path: "/drop", meta: meta, body: []byte("a,b"), chunked: true})
+	rec, _ = dl.do(t, req{signer: dl.user, path: "/drop", meta: meta, body: []byte("a,b")})
 	out = receipt(t, rec, http.StatusCreated)
 	dl.settle(t)
 	u, _ = url.Parse(out.URL)
@@ -1352,9 +1373,9 @@ func TestRevealSecretType(t *testing.T) {
 	}
 }
 
-// A request signed ahead of the server clock and replayed after a restart
-// within the window is refused by the persisted nonce cache; a reload
-// keeps the cache too.
+// A request signed ahead of the server clock, signed again with its
+// timestamp and nonce after a restart within the window, is refused by
+// the persisted nonce cache; a reload keeps the cache too.
 func TestReplayAfterRestartRefused(t *testing.T) {
 	f := newFixture(t)
 	dir := t.TempDir()
@@ -1364,23 +1385,23 @@ func TestReplayAfterRestartRefused(t *testing.T) {
 	if err := f.srv.persistNonces(dir); err != nil {
 		t.Fatal(err)
 	}
-	var captured *http.Request
-	r, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, ts: now.Add(30 * time.Second),
-		tamper: func(r *http.Request) { captured = r.Clone(context.Background()) }})
+	first := req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, ts: now.Add(30 * time.Second), nonce: wire.NewNonce()}
+	r, _ := f.do(t, first)
 	if r.Code != http.StatusCreated {
 		t.Fatalf("first %d %s", r.Code, r.Body)
 	}
 	replay := func(s *Server) *httptest.ResponseRecorder {
 		t.Helper()
-		rec := httptest.NewRecorder()
-		s.Handler(s.config().Addrs()[0].Addr).ServeHTTP(rec, captured.Clone(context.Background()))
+		again := first
+		again.via = s.Handler(s.config().Addrs()[0].Addr)
+		rec, _ := f.do(t, again)
 		return rec
 	}
 	f.srv.apply(f.srv.config())
 	if rec := replay(f.srv); rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "replayed nonce") {
 		t.Fatalf("after a reload %d %s", rec.Code, rec.Body)
 	}
-	fresh := New(f.srv.config(), f.srv.log)
+	fresh := withIdentity(t, New(f.srv.config(), f.srv.log))
 	fresh.start = now.Add(time.Second)
 	fresh.SetClock(func() time.Time { return now.Add(time.Second) })
 	if err := fresh.persistNonces(dir); err != nil {

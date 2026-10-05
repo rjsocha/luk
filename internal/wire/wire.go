@@ -21,32 +21,29 @@ import (
 )
 
 const (
-	Namespace       = "luk-upload@v1"
+	// Namespace, ListNamespace and LinkNamespace sign the upload, the
+	// endpoint listing and the link requests inside the channel; their
+	// texts end with the session hash, so a signature is good for one
+	// session only. None of them verifies as another.
+	Namespace     = "luk-upload@v2"
+	ListNamespace = "luk-list@v2"
+	LinkNamespace = "luk-link@v2"
+
 	HeaderMeta      = "Luk-Meta"
 	HeaderTimestamp = "Luk-Timestamp"
 	HeaderNonce     = "Luk-Nonce"
 	HeaderSignature = "Luk-Signature"
 
-	// LinkNamespace signs the requests that manage a stored link; an
-	// upload signature never verifies as one, nor the other way round.
-	LinkNamespace    = "luk-link@v1"
+	// HeaderLink and HeaderLinkAction name the link and the action of a
+	// link request.
 	HeaderLink       = "Luk-Link"
 	HeaderLinkAction = "Luk-Link-Action"
 
-	// GetNamespace signs a download from an expose with auth.ssh; no
-	// other signature verifies as one, nor a get signature as anything
-	// else.
+	// GetNamespace signs a download from an expose with auth.ssh, also
+	// the listing of a directory there, in HTTP headers outside the
+	// channel; no other signature verifies as one, nor a get signature as
+	// anything else.
 	GetNamespace = "luk-get@v1"
-	// ListNamespace signs the endpoint listing (EndpointsPath); no other
-	// signature verifies as one, nor a list signature as anything else.
-	ListNamespace = "luk-list@v1"
-	// NamespaceV2, ListNamespaceV2 and LinkNamespaceV2 sign the upload,
-	// the endpoint listing and the link requests inside the channel; their
-	// texts end with the session hash, so a signature is good for one
-	// session only and never verifies as a v1 one.
-	NamespaceV2     = "luk-upload@v2"
-	ListNamespaceV2 = "luk-list@v2"
-	LinkNamespaceV2 = "luk-link@v2"
 	// EndpointsPath is the endpoint listing, on every listener.
 	EndpointsPath = "/.well-known/luk/endpoints"
 	// WellKnown is reserved: no endpoint or expose path is equal to it or
@@ -314,19 +311,16 @@ func decodeJSON(s string, v any) error {
 	return nil
 }
 
-// CanonicalText is what the client signs and the server verifies.
-func CanonicalText(host, path, timestamp, nonce, meta string) []byte {
-	return []byte(strings.Join([]string{Namespace, "PUT", host, path, timestamp, nonce, meta}, "\n"))
+// CanonicalText is what the client signs and the server verifies for an
+// upload: the namespace, the method (PUT), the Host, the path, the
+// timestamp, the nonce, the meta and the session hash h (base64url
+// without padding), one per line.
+func CanonicalText(host, path, timestamp, nonce, meta string, h []byte) []byte {
+	return text(Namespace, h, "PUT", host, path, timestamp, nonce, meta)
 }
 
-// CanonicalTextV2 is CanonicalText inside the channel: the v2 namespace,
-// then the session hash h on a last line (base64url without padding).
-func CanonicalTextV2(host, path, timestamp, nonce, meta string, h []byte) []byte {
-	return textV2(NamespaceV2, h, "PUT", host, path, timestamp, nonce, meta)
-}
-
-// textV2 joins the namespace, the lines and the session hash h.
-func textV2(namespace string, h []byte, lines ...string) []byte {
+// text joins the namespace, the lines and the session hash h.
+func text(namespace string, h []byte, lines ...string) []byte {
 	all := append(append([]string{namespace}, lines...), base64.RawURLEncoding.EncodeToString(h))
 	return []byte(strings.Join(all, "\n"))
 }
@@ -365,15 +359,9 @@ func GetTarget(escapedPath, rawQuery string) string {
 
 // ListCanonicalText is what the client signs and the server verifies for
 // the endpoint listing: the method (GET), the Host, the path as requested
-// (escaped), the timestamp and the nonce.
-func ListCanonicalText(method, host, path, timestamp, nonce string) []byte {
-	return []byte(strings.Join([]string{ListNamespace, method, host, path, timestamp, nonce}, "\n"))
-}
-
-// ListCanonicalTextV2 is ListCanonicalText inside the channel (see
-// CanonicalTextV2).
-func ListCanonicalTextV2(method, host, path, timestamp, nonce string, h []byte) []byte {
-	return textV2(ListNamespaceV2, h, method, host, path, timestamp, nonce)
+// (escaped), the timestamp, the nonce and the session hash h.
+func ListCanonicalText(method, host, path, timestamp, nonce string, h []byte) []byte {
+	return text(ListNamespace, h, method, host, path, timestamp, nonce)
 }
 
 // LinkMethod is the HTTP method of a link action; false for an unknown
@@ -394,15 +382,10 @@ func LinkMethod(action string) (string, bool) {
 
 // LinkCanonicalText is what the client signs and the server verifies for
 // a link request: the method, the Host, the endpoint path, the link URL
-// (empty for a list) and the action as sent, then the timestamp, the nonce and the meta.
-func LinkCanonicalText(method, host, path, link, action, timestamp, nonce, meta string) []byte {
-	return []byte(strings.Join([]string{LinkNamespace, method, host, path, link, action, timestamp, nonce, meta}, "\n"))
-}
-
-// LinkCanonicalTextV2 is LinkCanonicalText inside the channel (see
-// CanonicalTextV2).
-func LinkCanonicalTextV2(method, host, path, link, action, timestamp, nonce, meta string, h []byte) []byte {
-	return textV2(LinkNamespaceV2, h, method, host, path, link, action, timestamp, nonce, meta)
+// (empty for a list) and the action as sent, then the timestamp, the
+// nonce, the meta and the session hash h.
+func LinkCanonicalText(method, host, path, link, action, timestamp, nonce, meta string, h []byte) []byte {
+	return text(LinkNamespace, h, method, host, path, link, action, timestamp, nonce, meta)
 }
 
 // LinkMeta is the meta of a remove, ttl or list link request; a replace sends
@@ -666,7 +649,7 @@ type Receipt struct {
 }
 
 // Created is the 201 answer; it always carries url and expires.
-// Deduplicated marks an upload answered before 100 Continue, its content
+// Deduplicated marks an upload answered without its content, the content
 // taken from what the server holds for the sender.
 type Created struct {
 	ID           string `json:"id"`

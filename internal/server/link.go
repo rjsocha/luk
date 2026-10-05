@@ -41,7 +41,7 @@ type linkTarget struct {
 // handleLink serves a link request on an endpoint path: remove (DELETE),
 // ttl (PATCH), replace (PUT with the new content) or list (GET, without a
 // link).
-func (s *Server) handleLink(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener, ep *config.Endpoint) (int, any, error) {
+func (s *Server) handleLink(r *http.Request, sn *snapshot, l *listener, ep *config.Endpoint) (int, any, error) {
 	link, action := r.Header.Get(wire.HeaderLink), r.Header.Get(wire.HeaderLinkAction)
 	method, known := wire.LinkMethod(action)
 	switch {
@@ -57,15 +57,11 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request, sn *snapshot
 	now := s.now()
 	var meta wire.Meta
 	var lm wire.LinkMeta
-	ns, text := wire.LinkNamespace, func(ts, nonce, metaS string) []byte {
-		return wire.LinkCanonicalText(r.Method, r.Host, r.URL.Path, link, action, ts, nonce, metaS)
+	cs := sessionOf(r.Context())
+	text := func(ts, nonce, metaS string) []byte {
+		return wire.LinkCanonicalText(r.Method, r.Host, r.URL.Path, link, action, ts, nonce, metaS, cs.sess.H())
 	}
-	if cs := sessionOf(r.Context()); cs != nil {
-		ns, text = wire.LinkNamespaceV2, func(ts, nonce, metaS string) []byte {
-			return wire.LinkCanonicalTextV2(r.Method, r.Host, r.URL.Path, link, action, ts, nonce, metaS, cs.sess.H())
-		}
-	}
-	id, err := s.authenticate(r, sn, l, ep, now, ns, text,
+	id, err := s.authenticate(r, sn, l, ep, now, wire.LinkNamespace, text,
 		func(metaS string) (err error) {
 			if action == wire.LinkReplace {
 				meta, err = wire.DecodeMeta(metaS)
@@ -120,7 +116,7 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request, sn *snapshot
 	case wire.LinkTTL:
 		return s.linkTTL(t, sc, id, ep, link, lm.TTL, now)
 	}
-	return s.linkReplace(w, r, sn, t, sc, id, ep, link, meta, now)
+	return s.linkReplace(r, cs, sn, t, sc, id, ep, link, meta, now)
 }
 
 // resolveLink finds the stored file of a link URL: its host and path
@@ -240,10 +236,10 @@ func (s *Server) linkTTL(t *linkTarget, sc store.Sidecar, id *wire.Identity, ep 
 	return http.StatusOK, a, nil
 }
 
-// linkReplace receives the new content of a mutable link into the queue,
-// like an upload with the tags of the stored one; the store step of the
-// link storage puts it in place.
-func (s *Server) linkReplace(w http.ResponseWriter, r *http.Request, sn *snapshot, t *linkTarget, sc store.Sidecar, id *wire.Identity, ep *config.Endpoint, link string, meta wire.Meta, now time.Time) (int, any, error) {
+// linkReplace opens the upload in parts of the new content of a mutable
+// link in the session cs, like an upload with the tags of the stored one;
+// the store step of the link storage puts it in place.
+func (s *Server) linkReplace(r *http.Request, cs *chanSession, sn *snapshot, t *linkTarget, sc store.Sidecar, id *wire.Identity, ep *config.Endpoint, link string, meta wire.Meta, now time.Time) (int, any, error) {
 	if !sc.Client.Mutable {
 		return 0, nil, fail(http.StatusConflict, "link is not mutable")
 	}
@@ -265,7 +261,7 @@ func (s *Server) linkReplace(w http.ResponseWriter, r *http.Request, sn *snapsho
 		return 0, nil, fail(http.StatusUnprocessableEntity, "no pipeline of endpoint %s stores into storage %s", ep.Name, t.storage)
 	}
 	// The link keeps its portal, so a reveal link keeps its limit.
-	max, reveal, err := bodyLimit(r, ep, meta, sc.Client.Portal)
+	max, reveal, err := bodyLimit(ep, meta, sc.Client.Portal)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -274,10 +270,7 @@ func (s *Server) linkReplace(w http.ResponseWriter, r *http.Request, sn *snapsho
 	if err := s.prepare(u); err != nil {
 		return 0, nil, err
 	}
-	if cs := sessionOf(r.Context()); cs != nil {
-		return s.openUpload(cs, r, u, max)
-	}
-	return s.receive(w, r, u, max)
+	return s.openUpload(cs, r, u, max)
 }
 
 // maxLinkList caps a list answer; tests lower it.

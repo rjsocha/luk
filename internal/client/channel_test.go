@@ -105,9 +105,9 @@ func signed(t *testing.T, s ssh.Signer, h http.Header, ns string, text func(ts, 
 // listOp is the signed endpoint listing OP of c on u.
 func listOp(t *testing.T, s ssh.Signer, c *Channel, u *url.URL) channel.Request {
 	t.Helper()
-	return channel.Request{Method: http.MethodGet, Target: wire.EndpointsPath, Header: signed(t, s, nil, wire.ListNamespaceV2,
+	return channel.Request{Method: http.MethodGet, Target: wire.EndpointsPath, Header: signed(t, s, nil, wire.ListNamespace,
 		func(ts, nonce string) []byte {
-			return wire.ListCanonicalTextV2(http.MethodGet, strings.ToLower(u.Host), wire.EndpointsPath, ts, nonce, c.H())
+			return wire.ListCanonicalText(http.MethodGet, strings.ToLower(u.Host), wire.EndpointsPath, ts, nonce, c.H())
 		})}
 }
 
@@ -250,8 +250,8 @@ func TestChannelUploadParts(t *testing.T) {
 	}
 	h := http.Header{}
 	h.Set(wire.HeaderMeta, metaS)
-	op := channel.Request{Method: http.MethodPut, Target: "/drop", Header: signed(t, s, h, wire.NamespaceV2, func(ts, nonce string) []byte {
-		return wire.CanonicalTextV2(strings.ToLower(u.Host), "/drop", ts, nonce, metaS, c.H())
+	op := channel.Request{Method: http.MethodPut, Target: "/drop", Header: signed(t, s, h, wire.Namespace, func(ts, nonce string) []byte {
+		return wire.CanonicalText(strings.ToLower(u.Host), "/drop", ts, nonce, metaS, c.H())
 	})}
 	r, err := c.Do(ctx, op, nil)
 	if err != nil || r.Status != http.StatusOK {

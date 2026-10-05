@@ -193,12 +193,12 @@ func signHeaders(t *testing.T, signer ssh.Signer, h http.Header, ns string, text
 }
 
 // listReq is a signed endpoint listing OP of c whose text uses session
-// hash h under the v2 namespace.
+// hash h.
 func (c *testChan) listReq(t *testing.T, signer ssh.Signer, h []byte) channel.Request {
 	t.Helper()
-	return channel.Request{Method: http.MethodGet, Target: wire.EndpointsPath, Header: signHeaders(t, signer, nil, wire.ListNamespaceV2,
+	return channel.Request{Method: http.MethodGet, Target: wire.EndpointsPath, Header: signHeaders(t, signer, nil, wire.ListNamespace,
 		func(ts, nonce string) []byte {
-			return wire.ListCanonicalTextV2(http.MethodGet, c.host, wire.EndpointsPath, ts, nonce, h)
+			return wire.ListCanonicalText(http.MethodGet, c.host, wire.EndpointsPath, ts, nonce, h)
 		})}
 }
 
@@ -248,10 +248,11 @@ func TestChannelSignedList(t *testing.T) {
 		t.Fatalf("%+v", list)
 	}
 
+	// The text of the listing before the channel, without a session hash.
 	v1 := chanOpen(t, srvURL, wire.EndpointsPath, pin)
-	req := channel.Request{Method: http.MethodGet, Target: wire.EndpointsPath, Header: signHeaders(t, f.user, nil, wire.ListNamespace,
+	req := channel.Request{Method: http.MethodGet, Target: wire.EndpointsPath, Header: signHeaders(t, f.user, nil, before(wire.ListNamespace),
 		func(ts, nonce string) []byte {
-			return wire.ListCanonicalText(http.MethodGet, v1.host, wire.EndpointsPath, ts, nonce)
+			return []byte(strings.Join([]string{before(wire.ListNamespace), http.MethodGet, v1.host, wire.EndpointsPath, ts, nonce}, "\n"))
 		})}
 	if head, body := v1.op(t, req, nil); head.Status != http.StatusUnauthorized {
 		t.Fatalf("v1 text: %d %s", head.Status, body)
@@ -276,8 +277,8 @@ func TestChannelLinkList(t *testing.T) {
 	h := http.Header{}
 	h.Set(wire.HeaderLinkAction, wire.LinkList)
 	h.Set(wire.HeaderMeta, metaS)
-	signHeaders(t, f.user, h, wire.LinkNamespaceV2, func(ts, nonce string) []byte {
-		return wire.LinkCanonicalTextV2(http.MethodGet, c.host, "/drop", "", wire.LinkList, ts, nonce, metaS, c.sess.H())
+	signHeaders(t, f.user, h, wire.LinkNamespace, func(ts, nonce string) []byte {
+		return wire.LinkCanonicalText(http.MethodGet, c.host, "/drop", "", wire.LinkList, ts, nonce, metaS, c.sess.H())
 	})
 	head, body := c.op(t, channel.Request{Method: http.MethodGet, Target: "/drop", Header: h}, nil)
 	if head.Status != http.StatusOK {
@@ -456,17 +457,18 @@ func TestChannelStalledBody(t *testing.T) {
 	}
 }
 
-// A v2 signature in HTTP headers, outside the channel, does not verify.
+// A signature of the channel in HTTP headers, outside the channel, is
+// refused as any endpoint request there.
 func TestChannelV2OutsideChannel(t *testing.T) {
 	f, _, _ := chanFixture(t, nil)
 	const host = "lukd.test"
 	hr := httptest.NewRequest(http.MethodGet, "https://"+host+wire.EndpointsPath, nil)
-	hr.Header = signHeaders(t, f.user, nil, wire.ListNamespaceV2, func(ts, nonce string) []byte {
-		return wire.ListCanonicalTextV2(http.MethodGet, host, wire.EndpointsPath, ts, nonce, nil)
+	hr.Header = signHeaders(t, f.user, nil, wire.ListNamespace, func(ts, nonce string) []byte {
+		return wire.ListCanonicalText(http.MethodGet, host, wire.EndpointsPath, ts, nonce, nil)
 	})
 	rec := httptest.NewRecorder()
 	f.handler().ServeHTTP(rec, hr)
-	if rec.Code != http.StatusUnauthorized {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), errOutsideChannel) {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 }
@@ -617,8 +619,8 @@ func (c *testChan) putReq(t *testing.T, signer ssh.Signer, meta wire.Meta) chann
 	}
 	h := http.Header{}
 	h.Set(wire.HeaderMeta, metaS)
-	signHeaders(t, signer, h, wire.NamespaceV2, func(ts, nonce string) []byte {
-		return wire.CanonicalTextV2(c.host, c.path, ts, nonce, metaS, c.sess.H())
+	signHeaders(t, signer, h, wire.Namespace, func(ts, nonce string) []byte {
+		return wire.CanonicalText(c.host, c.path, ts, nonce, metaS, c.sess.H())
 	})
 	return channel.Request{Method: http.MethodPut, Target: c.path, Header: h}
 }
@@ -644,4 +646,204 @@ func wantInner(t *testing.T, what string, head channel.Response, body []byte, co
 	if head.Status != code {
 		t.Fatalf("%s: %d, want %d: %s", what, head.Status, code, body)
 	}
+}
+
+// before is the namespace that ns replaced: the one of the header-signed
+// requests lukd took before the channel.
+func before(ns string) string { return strings.TrimSuffix(ns, "@v2") + "@v1" }
+
+// signV1 sets on hr the signature headers of the header-signed requests
+// lukd took before the channel: namespace ns over the lines of text
+// after it, the timestamp, the nonce and meta (when not empty).
+func signV1(t *testing.T, signer ssh.Signer, hr *http.Request, ns, meta string, text ...string) {
+	t.Helper()
+	ts := time.Now().UTC().Format(time.RFC3339)
+	nonce := wire.NewNonce()
+	lines := append(append([]string{ns}, text...), ts, nonce)
+	if meta != "" {
+		lines = append(lines, meta)
+		hr.Header.Set(wire.HeaderMeta, meta)
+	}
+	sig, err := sshsig.Sign(signer, ns, []byte(strings.Join(lines, "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr.Header.Set(wire.HeaderTimestamp, ts)
+	hr.Header.Set(wire.HeaderNonce, nonce)
+	hr.Header.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
+}
+
+// The header-signed endpoint requests of the old luk are refused with a
+// hint to update it; a signed GET of an expose is no endpoint request.
+func TestSignedOutsideChannelRefused(t *testing.T) {
+	f := newSignedFixture(t)
+	const host = "lukd.test"
+	metaS, err := wire.EncodeMeta(wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkS, err := wire.EncodeLinkMeta(wire.LinkMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := httptest.NewRequest(http.MethodPut, "http://"+host+"/drop", strings.NewReader("x"))
+	signV1(t, f.user, put, before(wire.Namespace), metaS, http.MethodPut, host, "/drop")
+	list := httptest.NewRequest(http.MethodGet, "http://"+host+"/drop", nil)
+	list.Header.Set(wire.HeaderLinkAction, wire.LinkList)
+	signV1(t, f.user, list, before(wire.LinkNamespace), linkS, http.MethodGet, host, "/drop", "", wire.LinkList)
+	eps := httptest.NewRequest(http.MethodGet, "http://"+host+wire.EndpointsPath, nil)
+	signV1(t, f.user, eps, before(wire.ListNamespace), "", http.MethodGet, host, wire.EndpointsPath)
+	for name, hr := range map[string]*http.Request{"upload": put, "link list": list, "endpoint listing": eps} {
+		rec := httptest.NewRecorder()
+		f.handler().ServeHTTP(rec, hr)
+		var e wire.ErrorResponse
+		if rec.Code != http.StatusBadRequest || json.Unmarshal(rec.Body.Bytes(), &e) != nil ||
+			e.Error != "endpoint requests go through the channel (update luk)" || rec.Header().Get("Connection") != "close" {
+			t.Errorf("%s: %d %v %s", name, rec.Code, rec.Header(), rec.Body)
+		}
+	}
+	link := f.drop(t, f.user, wire.Meta{File: "a.txt"}, "open")
+	if rec := f.get(t, getReq{signer: f.user, link: link}); rec.Code != http.StatusOK || rec.Body.String() != "open" {
+		t.Fatalf("signed GET of an expose: %d %q", rec.Code, rec.Body)
+	}
+}
+
+// recChan is the client side of a channel session served in process by
+// h, for the tests that read their answers from a recorder.
+type recChan struct {
+	h          http.Handler
+	host, path string
+	sess       *channel.Session
+}
+
+// recPost posts a channel request body to path of host through h.
+func recPost(h http.Handler, host, path string, body []byte) *httptest.ResponseRecorder {
+	hr := httptest.NewRequest(http.MethodPost, "http://"+host+path, bytes.NewReader(body))
+	hr.Host = host
+	hr.Header.Set("Content-Type", channel.ContentType)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, hr)
+	return rec
+}
+
+// recOpen runs a handshake on path of host through h; a refused handshake
+// returns its answer instead of a session.
+func recOpen(t *testing.T, h http.Handler, host, path string) (*recChan, *httptest.ResponseRecorder) {
+	t.Helper()
+	hs, msg, err := channel.NewClientHandshake(strings.ToLower(host), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := recPost(h, host, path, msg)
+	if rec.Code != http.StatusOK {
+		return nil, rec
+	}
+	sess, _, err := hs.Finish(rec.Body.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &recChan{h: h, host: host, path: path, sess: sess}, nil
+}
+
+// send posts the message of nonce n carrying plain and returns the inner
+// answer as a recorder, with the Connection of the outer one; an outer
+// answer other than 200 is returned as it is.
+func (c *recChan) send(t *testing.T, n channel.Nonce, plain []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := c.sess.SealRequest(&buf, n, bytes.NewReader(plain)); err != nil {
+		t.Fatal(err)
+	}
+	out := recPost(c.h, c.host, c.path, buf.Bytes())
+	if out.Code != http.StatusOK {
+		return out
+	}
+	rc, err := c.sess.OpenResponse(out.Body, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var head channel.Response
+	if err := channel.ReadHead(rc, &head); err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	for k, vs := range head.Header {
+		for _, v := range vs {
+			rec.Header().Add(k, v)
+		}
+	}
+	if v := out.Header().Get("Connection"); v != "" {
+		rec.Header().Set("Connection", v)
+	}
+	rec.WriteHeader(head.Status)
+	rec.Write(body)
+	return rec
+}
+
+// op sends req as the OP of the session.
+func (c *recChan) op(t *testing.T, req channel.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	return c.send(t, channel.Nonce{Kind: channel.KindOp}, opPlain(t, req, nil))
+}
+
+// content sends body in the parts the offer of the OP answer rec asks
+// for, then completes. The parts of a content of a signed size (sized)
+// end with it; those of a stream end with a short part, empty when the
+// content fills its last part. It returns the answer to the first part
+// refused, after aborting the upload as luk does, or to the complete.
+func (c *recChan) content(t *testing.T, rec *httptest.ResponseRecorder, body io.Reader, sized bool) *httptest.ResponseRecorder {
+	t.Helper()
+	var offer wire.PartsOffer
+	if err := json.Unmarshal(rec.Body.Bytes(), &offer); err != nil || offer.Parts.Size <= 0 {
+		t.Fatalf("no parts offer: %v: %s", err, rec.Body)
+	}
+	buf := make([]byte, offer.Parts.Size)
+	for n := uint32(0); ; n++ {
+		k, err := io.ReadFull(body, buf)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			t.Fatal(err)
+		}
+		if k == 0 && sized {
+			break
+		}
+		if a := c.send(t, channel.Nonce{Kind: channel.KindPart, Number: n}, buf[:k]); a.Code != http.StatusOK {
+			c.send(t, channel.Nonce{Kind: channel.KindAbort}, nil)
+			return a
+		}
+		if k < len(buf) {
+			break
+		}
+	}
+	return c.send(t, channel.Nonce{Kind: channel.KindComplete}, nil)
+}
+
+// remote serves each request by sending it to base with c, so that the
+// in-process channel client reaches a server over a real connection.
+type remote struct {
+	c    *http.Client
+	base string
+}
+
+func (h remote) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	req, err := http.NewRequest(r.Method, h.base+r.URL.RequestURI(), r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	req.Host, req.Header = r.Host, r.Header.Clone()
+	resp, err := h.c.Do(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for k, vs := range resp.Header {
+		w.Header()[k] = vs
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }

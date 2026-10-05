@@ -62,7 +62,8 @@ the config key, else each key of the SSH agent in turn until the server
 knows one.
 
 When the listing fails the pin is still printed, the error follows and
-the exit code is that of luk send.
+the exit code is that of luk send. A key that matches no configured pin
+gets no listing: the signed request is never sent to it.
 
 --json prints one JSON object: {"pin": ..., "download_pin": ...,
 "endpoints": [...]}, each only when asked for and download_pin only for
@@ -147,7 +148,9 @@ address). A key that matches no configured pin gets no commands.`,
 			var list *wire.EndpointList
 			var listErr error
 			var usedKey string
-			if wantList {
+			// The signed listing goes only to a key the pins accept: a
+			// signature for another key tells it who asks.
+			if wantList && mismatch == nil {
 				seen, err := channel.ParsePin(channel.KeyString(peer))
 				if err != nil {
 					return err

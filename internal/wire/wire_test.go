@@ -107,26 +107,19 @@ func TestMetaRoundTrip(t *testing.T) {
 }
 
 func TestCanonicalText(t *testing.T) {
-	got := string(CanonicalText("h:8080", "/backup", "T", "N", "M"))
-	want := "luk-upload@v1\nPUT\nh:8080\n/backup\nT\nN\nM"
-	if got != want {
-		t.Fatalf("%q", got)
-	}
-}
-
-func TestCanonicalTextV2(t *testing.T) {
 	h := []byte{0xfb, 0xff, 0x01}
 	for _, c := range []struct{ got, want string }{
-		{string(CanonicalTextV2("h:8080", "/backup", "T", "N", "M", h)), "luk-upload@v2\nPUT\nh:8080\n/backup\nT\nN\nM\n-_8B"},
-		{string(ListCanonicalTextV2("GET", "h", EndpointsPath, "T", "N", h)), "luk-list@v2\nGET\nh\n/.well-known/luk/endpoints\nT\nN\n-_8B"},
-		{string(LinkCanonicalTextV2("GET", "h", "/drop", "", "list", "T", "N", "M", h)), "luk-link@v2\nGET\nh\n/drop\n\nlist\nT\nN\nM\n-_8B"},
+		{string(CanonicalText("h:8080", "/backup", "T", "N", "M", h)), "luk-upload@v2\nPUT\nh:8080\n/backup\nT\nN\nM\n-_8B"},
+		{string(ListCanonicalText("GET", "h", EndpointsPath, "T", "N", h)), "luk-list@v2\nGET\nh\n/.well-known/luk/endpoints\nT\nN\n-_8B"},
+		{string(LinkCanonicalText("PATCH", "h:8080", "/drop", "https://d/x", "ttl", "T", "N", "M", h)), "luk-link@v2\nPATCH\nh:8080\n/drop\nhttps://d/x\nttl\nT\nN\nM\n-_8B"},
+		{string(LinkCanonicalText("GET", "h", "/drop", "", "list", "T", "N", "M", h)), "luk-link@v2\nGET\nh\n/drop\n\nlist\nT\nN\nM\n-_8B"},
 	} {
 		if c.got != c.want {
 			t.Errorf("%q, want %q", c.got, c.want)
 		}
 	}
-	if NamespaceV2 != "luk-upload@v2" || ListNamespaceV2 != "luk-list@v2" || LinkNamespaceV2 != "luk-link@v2" {
-		t.Fatal("v2 namespaces")
+	if Namespace != "luk-upload@v2" || ListNamespace != "luk-list@v2" || LinkNamespace != "luk-link@v2" || GetNamespace != "luk-get@v1" {
+		t.Fatal("namespaces")
 	}
 }
 
@@ -277,12 +270,7 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
-func TestLinkCanonicalText(t *testing.T) {
-	got := string(LinkCanonicalText("PATCH", "h:8080", "/drop", "https://d/x", "ttl", "T", "N", "M"))
-	want := "luk-link@v1\nPATCH\nh:8080\n/drop\nhttps://d/x\nttl\nT\nN\nM"
-	if got != want {
-		t.Fatalf("%q", got)
-	}
+func TestLinkMethod(t *testing.T) {
 	for action, method := range map[string]string{LinkRemove: "DELETE", LinkTTL: "PATCH", LinkReplace: "PUT"} {
 		if m, ok := LinkMethod(action); !ok || m != method {
 			t.Errorf("%s: %s %v", action, m, ok)

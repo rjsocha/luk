@@ -188,7 +188,8 @@ func TestScanDownloadPin(t *testing.T) {
 }
 
 // A lukd key that matches none of the pins configured or given for the
-// URL is printed, said to differ, and gets no commands from --print.
+// URL is printed and said to differ; the signed listing never goes to it,
+// so there are no endpoints and no commands from --print.
 func TestScanPinMismatch(t *testing.T) {
 	e := newScanEnv(t)
 	other, err := channel.GenerateKey()
@@ -205,9 +206,17 @@ func TestScanPinMismatch(t *testing.T) {
 	if code != 3 || out != "" || !strings.Contains(errs, "matches no pin of this endpoint") {
 		t.Fatalf("--print: exit %d %q %q", code, out, errs)
 	}
-	code, out, _ = runLuk(t, "scan", "drop")
-	if code != 3 || !strings.HasPrefix(out, e.words+"\n") || !strings.Contains(out, "drop  "+e.url+"/drop") {
-		t.Fatalf("default: exit %d %q", code, out)
+	code, out, errs = runLuk(t, "scan", "drop")
+	if code != 3 || out != e.words+"\n" || !strings.Contains(errs, "matches no pin of this endpoint") || strings.Contains(errs, "listing endpoints") {
+		t.Fatalf("default: exit %d %q %q", code, out, errs)
+	}
+	code, out, _ = runLuk(t, "scan", "--json", "drop")
+	var res map[string]any
+	if code != 3 || json.Unmarshal([]byte(out), &res) != nil || res["pin"] != e.words || res["endpoints"] != nil {
+		t.Fatalf("--json: exit %d %q", code, out)
+	}
+	if code, out, _ = runLuk(t, "scan", "--endpoints", "drop"); code != 3 || out != "" {
+		t.Fatalf("--endpoints: exit %d %q", code, out)
 	}
 }
 

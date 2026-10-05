@@ -79,7 +79,7 @@ func TestLinksMaxAtStore(t *testing.T) {
 	}
 	f.settle(t)
 	// A stream signs no sha256: accepted, refused by the store step.
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: body, chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: body})
 	receipt(t, rec, http.StatusCreated)
 	f.settle(t)
 	if n := f.owned(body, "key:robert.socha"); n != 3 {

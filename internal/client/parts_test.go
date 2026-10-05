@@ -564,29 +564,55 @@ func TestUploadCompleteMissingOutOfRange(t *testing.T) {
 	}
 }
 
-// inflight tracks the parts lukd is answering at once, from part from on.
+// inflight tracks the parts lukd is answering at once. Its peak counts
+// the parts from part from on, or, after settle, those that come once
+// every part in flight at the settle has ended.
 type inflight struct {
 	mu        sync.Mutex
 	from      uint32
 	now, peak int
+	parts     map[uint32]bool
+	// settled is set by settle; wait holds the parts still to end.
+	settled bool
+	wait    map[uint32]bool
 }
 
 func (f *inflight) enter(n channel.Nonce) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.now++
-	if n.Number >= f.from {
+	if f.parts == nil {
+		f.parts = map[uint32]bool{}
+	}
+	f.parts[n.Number] = true
+	if (!f.settled && n.Number >= f.from) || (f.settled && len(f.wait) == 0) {
 		f.peak = max(f.peak, f.now)
 	}
 }
 
-func (f *inflight) leave() {
+func (f *inflight) leave(n channel.Nonce) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.now--
+	delete(f.parts, n.Number)
+	delete(f.wait, n.Number)
 }
 
-// A timeout of lukd on a part sends it again with one worker less.
+// settle makes the peak count only once the parts in flight now have
+// ended.
+func (f *inflight) settle() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.settled, f.peak, f.wait = true, 0, map[uint32]bool{}
+	for p := range f.parts {
+		f.wait[p] = true
+	}
+}
+
+// A timeout of lukd on a part sends it again with one worker less. With
+// the timeout the other parts wait for that retry, which comes after the
+// workers were lowered: once the parts in flight then have ended, at
+// most 3 parts are ever in flight, whatever the timing.
 func TestUploadPartTimeoutSlower(t *testing.T) {
 	for _, timeout := range []bool{false, true} {
 		t.Run(fmt.Sprint("408=", timeout), func(t *testing.T) {
@@ -594,17 +620,30 @@ func TestUploadPartTimeoutSlower(t *testing.T) {
 			srv := fakeParts(t, func(_ channel.Nonce, content []byte) chantest.Answer { return receipt(content) })
 			f := &inflight{from: 8}
 			var timeouts atomic.Int32
+			retried := make(chan struct{})
 			srv.Part = func(w http.ResponseWriter, r *http.Request, n channel.Nonce) bool {
+				if timeout && n.Number == 0 && n.Attempt == 1 {
+					f.settle()
+					close(retried)
+				}
 				f.enter(n)
 				return true
 			}
 			srv.PartAnswer = func(n channel.Nonce, _ []byte) *chantest.Answer {
-				time.Sleep(50 * time.Millisecond)
-				f.leave()
 				if timeout && n.Number == 0 && n.Attempt == 0 {
+					f.leave(n)
 					timeouts.Add(1)
 					return &chantest.Answer{Status: http.StatusRequestTimeout, Body: wire.ErrorResponse{Error: "slow"}}
 				}
+				if timeout && n.Number != 0 {
+					select {
+					case <-retried:
+					case <-time.After(10 * time.Second):
+						t.Error("part 0 not sent again")
+					}
+				}
+				time.Sleep(50 * time.Millisecond)
+				f.leave(n)
 				return nil
 			}
 			o := fakeOpts(t, srv, data)
@@ -612,12 +651,14 @@ func TestUploadPartTimeoutSlower(t *testing.T) {
 			if _, err := Upload(context.Background(), o); err != nil {
 				t.Fatal(err)
 			}
-			want := 4
-			if timeout {
-				want = 3
-			}
-			if f.peak != want || (timeout && timeouts.Load() != 1) {
-				t.Fatalf("peak %d parts at once, want %d; %d timeouts", f.peak, want, timeouts.Load())
+			f.mu.Lock()
+			peak := f.peak
+			f.mu.Unlock()
+			switch {
+			case !timeout && peak != 4:
+				t.Fatalf("peak %d parts at once, want 4", peak)
+			case timeout && (peak < 1 || peak > 3 || timeouts.Load() != 1):
+				t.Fatalf("peak %d parts at once after the timeout, want 1 to 3; %d timeouts", peak, timeouts.Load())
 			}
 		})
 	}

@@ -113,17 +113,12 @@ func (e *roleEnv) upload(t *testing.T, file string, once bool, body string) wire
 	t.Helper()
 	m := fileMeta([]byte(body))
 	m.File, m.Once = file, once
-	resp, err := http.DefaultClient.Do(signedPutMeta(t, e.user, "http://"+e.addr, e.addr, "/drop", m, []byte(body)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("upload %s: %d %s", file, resp.StatusCode, b)
+	rec, _ := chanUpload(t, req{signer: e.user, host: e.addr, path: "/drop", meta: m, body: []byte(body), via: remote{http.DefaultClient, "http://" + e.addr}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("upload %s: %d %s", file, rec.Code, rec.Body)
 	}
 	var c wire.Created
-	if err := json.Unmarshal(b, &c); err != nil {
+	if err := json.Unmarshal(rec.Body.Bytes(), &c); err != nil {
 		t.Fatal(err)
 	}
 	return c

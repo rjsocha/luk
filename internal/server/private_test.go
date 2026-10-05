@@ -112,7 +112,7 @@ func (f *privateFixture) get(t *testing.T, r getReq) *httptest.ResponseRecorder 
 		ts := time.Now().UTC().Format(time.RFC3339)
 		text := wire.GetCanonicalText(r.signAs, r.host, r.target, ts, r.nonce)
 		if r.upload {
-			text = wire.CanonicalText(r.host, u.EscapedPath(), ts, r.nonce, "e30")
+			text = wire.CanonicalText(r.host, u.EscapedPath(), ts, r.nonce, "e30", nil)
 		}
 		sig, err := sshsig.Sign(r.signer, r.ns, text)
 		if err != nil {
@@ -281,9 +281,9 @@ func TestGetNamespaces(t *testing.T) {
 		}
 	}
 	// A get signature never verifies as an upload.
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, chunked: true,
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin},
 		tamper: func(hr *http.Request) {
-			sig, err := sshsig.Sign(f.user, wire.GetNamespace, wire.CanonicalText("lukd.test", "/drop", hr.Header.Get(wire.HeaderTimestamp), hr.Header.Get(wire.HeaderNonce), hr.Header.Get(wire.HeaderMeta)))
+			sig, err := sshsig.Sign(f.user, wire.GetNamespace, wire.CanonicalText("lukd.test", "/drop", hr.Header.Get(wire.HeaderTimestamp), hr.Header.Get(wire.HeaderNonce), hr.Header.Get(wire.HeaderMeta), nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -309,7 +309,7 @@ func TestPrivateModes(t *testing.T) {
 	f := newPrivateFixture(t, func(s string) string {
 		return strings.Replace(s, `private: {owner: ['*'], any: ['*']}`, `private: {owner: ['*']}`, 1)
 	})
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Access: wire.AccessAny}, chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Access: wire.AccessAny}})
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "private.any") {
 		t.Fatalf("any: %d %s", rec.Code, rec.Body)
 	}
@@ -318,7 +318,7 @@ func TestPrivateModes(t *testing.T) {
 	g := newPrivateFixture(t, func(s string) string {
 		return strings.Replace(s, `, private: {owner: ['*'], any: ['*']}`, ``, 1)
 	})
-	rec, _ = g.do(t, req{signer: g.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Access: wire.AccessPrivate}, chunked: true})
+	rec, _ = g.do(t, req{signer: g.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Access: wire.AccessPrivate}})
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "private.owner") {
 		t.Fatalf("private: %d %s", rec.Code, rec.Body)
 	}
@@ -369,7 +369,7 @@ func TestAllowAllHotReload(t *testing.T) {
 	link := f.drop(t, f.certSigner(t, "web1"), wire.Meta{Access: wire.AccessAny}, "x")
 	f.drop(t, f.other, wire.Meta{}, "y")
 	late := newSigner(t)
-	rec, _ := f.do(t, req{signer: late, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, chunked: true})
+	rec, _ := f.do(t, req{signer: late, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}})
 	wantStatus(t, "unknown key before the reload", rec, http.StatusUnauthorized)
 	wantStatus(t, "unknown key get before the reload", f.get(t, getReq{signer: late, link: link}), http.StatusUnauthorized)
 

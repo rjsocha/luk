@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"luk/internal/channel"
 	"luk/internal/pipeline"
 	"luk/internal/sshsig"
 	"luk/internal/store"
@@ -55,6 +56,8 @@ type linkReq struct {
 	upload bool
 }
 
+// link runs the link request r through the channel; a replace sends its
+// body in parts when lukd asks for it.
 func (f *fixture) link(t *testing.T, r linkReq) *httptest.ResponseRecorder {
 	t.Helper()
 	const host = "lukd.test"
@@ -80,25 +83,30 @@ func (f *fixture) link(t *testing.T, r linkReq) *httptest.ResponseRecorder {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c, rec := recOpen(t, f.handler(), host, r.path)
+	if c == nil {
+		return rec
+	}
 	ts := time.Now().UTC().Format(time.RFC3339)
-	text := wire.LinkCanonicalText(r.method, host, r.path, r.link, r.action, ts, r.nonce, metaS)
+	text := wire.LinkCanonicalText(r.method, host, r.path, r.link, r.action, ts, r.nonce, metaS, c.sess.H())
 	if r.upload {
-		text = wire.CanonicalText(host, r.path, ts, r.nonce, metaS)
+		text = wire.CanonicalText(host, r.path, ts, r.nonce, metaS, c.sess.H())
 	}
 	sig, err := sshsig.Sign(r.signer, r.ns, text)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hr := httptest.NewRequest(r.method, "http://"+host+r.path, bytes.NewReader(r.body))
-	hr.Host = host
-	hr.Header.Set(wire.HeaderLink, r.link)
-	hr.Header.Set(wire.HeaderLinkAction, r.action)
-	hr.Header.Set(wire.HeaderMeta, metaS)
-	hr.Header.Set(wire.HeaderTimestamp, ts)
-	hr.Header.Set(wire.HeaderNonce, r.nonce)
-	hr.Header.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
-	rec := httptest.NewRecorder()
-	f.handler().ServeHTTP(rec, hr)
+	h := http.Header{}
+	h.Set(wire.HeaderLink, r.link)
+	h.Set(wire.HeaderLinkAction, r.action)
+	h.Set(wire.HeaderMeta, metaS)
+	h.Set(wire.HeaderTimestamp, ts)
+	h.Set(wire.HeaderNonce, r.nonce)
+	h.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
+	rec = c.op(t, channel.Request{Method: r.method, Target: r.path, Header: h})
+	if rec.Code == http.StatusOK && r.action == wire.LinkReplace {
+		rec = c.content(t, rec, bytes.NewReader(r.body), r.meta != nil && r.meta.Size != nil)
+	}
 	return rec
 }
 
@@ -125,7 +133,7 @@ func (f *fixture) drop(t *testing.T, signer ssh.Signer, meta wire.Meta, body str
 	if meta.Source == "" {
 		meta.Source = wire.SourceStdin
 	}
-	rec, _ := f.do(t, req{signer: signer, path: "/drop", meta: meta, body: []byte(body), chunked: true})
+	rec, _ := f.do(t, req{signer: signer, path: "/drop", meta: meta, body: []byte(body)})
 	out := receipt(t, rec, http.StatusCreated)
 	f.settle(t)
 	return out.URL
@@ -434,7 +442,7 @@ func TestLinkReplaceRemovedMeanwhile(t *testing.T) {
 func TestMutableNeedsReplace(t *testing.T) {
 	f := newFixture(t)
 	var read int
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Mutable: true}, body: []byte("x"), chunked: true, tamper: countBody(&read)})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Mutable: true}, body: []byte("x"), tamper: countBody(&read)})
 	if rec.Code != http.StatusUnprocessableEntity || read != 0 || !strings.Contains(rec.Body.String(), "link.replace") {
 		t.Fatalf("%d read %d %s", rec.Code, read, rec.Body)
 	}
@@ -563,13 +571,14 @@ func TestLinkNamespaces(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("upload signature as a link: %d %s", rec.Code, rec.Body)
 	}
-	// A link signature on an upload: no link headers, luk-link@v1.
-	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x"), chunked: true,
+	// A link signature on an upload: no link headers, the link namespace.
+	// The texts carry no session hash: the namespace alone refuses them.
+	rec, _ = f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x"),
 		tamper: func(r *http.Request) {
 			ts, nonce, metaS := r.Header.Get(wire.HeaderTimestamp), r.Header.Get(wire.HeaderNonce), r.Header.Get(wire.HeaderMeta)
 			for _, text := range [][]byte{
-				wire.CanonicalText(r.Host, r.URL.Path, ts, nonce, metaS),
-				wire.LinkCanonicalText(http.MethodPut, r.Host, r.URL.Path, "", "", ts, nonce, metaS),
+				wire.CanonicalText(r.Host, r.URL.Path, ts, nonce, metaS, nil),
+				wire.LinkCanonicalText(http.MethodPut, r.Host, r.URL.Path, "", "", ts, nonce, metaS, nil),
 			} {
 				sig, err := sshsig.Sign(f.user, wire.LinkNamespace, text)
 				if err != nil {
@@ -698,7 +707,7 @@ func TestLinkList(t *testing.T) {
 	expired := f.drop(t, f.user, wire.Meta{TTL: "1h"}, "e")
 	f.setSidecar(t, expired, func(sc *store.Sidecar) { sc.Expires = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339) })
 	f.drop(t, other, wire.Meta{}, "o")
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop2", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("2"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.user, path: "/drop2", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("2")})
 	viaDrop2 := receipt(t, rec, http.StatusCreated).URL
 	f.settle(t)
 

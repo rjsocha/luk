@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"luk/internal/channel"
 	"luk/internal/sshsig"
 	"luk/internal/wire"
 )
@@ -31,6 +32,8 @@ type listReq struct {
 	via      http.Handler
 }
 
+// list runs the endpoint listing r through the channel, its session on
+// r.path.
 func (f *fixture) list(t *testing.T, r listReq) *httptest.ResponseRecorder {
 	t.Helper()
 	if r.method == "" {
@@ -51,25 +54,26 @@ func (f *fixture) list(t *testing.T, r listReq) *httptest.ResponseRecorder {
 	if r.ts.IsZero() {
 		r.ts = time.Now()
 	}
-	hr := httptest.NewRequest(r.method, "https://"+r.host+r.path, nil)
-	hr.Host = r.host
-	if !r.unsigned {
-		ts := r.ts.UTC().Format(time.RFC3339)
-		sig, err := sshsig.Sign(r.signer, r.ns, wire.ListCanonicalText(r.method, r.host, r.path, ts, r.nonce))
-		if err != nil {
-			t.Fatal(err)
-		}
-		hr.Header.Set(wire.HeaderTimestamp, ts)
-		hr.Header.Set(wire.HeaderNonce, r.nonce)
-		hr.Header.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
-	}
-	rec := httptest.NewRecorder()
 	h := r.via
 	if h == nil {
 		h = f.handler()
 	}
-	h.ServeHTTP(rec, hr)
-	return rec
+	c, rec := recOpen(t, h, r.host, r.path)
+	if c == nil {
+		return rec
+	}
+	hd := http.Header{}
+	if !r.unsigned {
+		ts := r.ts.UTC().Format(time.RFC3339)
+		sig, err := sshsig.Sign(r.signer, r.ns, wire.ListCanonicalText(r.method, r.host, r.path, ts, r.nonce, c.sess.H()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hd.Set(wire.HeaderTimestamp, ts)
+		hd.Set(wire.HeaderNonce, r.nonce)
+		hd.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
+	}
+	return c.op(t, channel.Request{Method: r.method, Target: r.path, Header: hd})
 }
 
 func decodeList(t *testing.T, rec *httptest.ResponseRecorder) wire.EndpointList {
@@ -177,7 +181,8 @@ func TestEndpointListPerListener(t *testing.T) {
 }
 
 // The acme: true listener keeps answering the challenges and redirects
-// the listing to https like any other path.
+// the listing to https like any other path; there, outside the channel,
+// it is refused.
 func TestEndpointListACME(t *testing.T) {
 	cfg := acmeTestConfig(t, t.TempDir(), "https://ca.example.com/dir", "0.0.0.0:8443", "127.0.0.1:8080")
 	s := New(cfg, slog.New(slog.DiscardHandler))
@@ -188,7 +193,7 @@ func TestEndpointListACME(t *testing.T) {
 	}{
 		{"127.0.0.1:8080", wire.EndpointsPath, http.StatusPermanentRedirect},
 		{"127.0.0.1:8080", "/.well-known/acme-challenge/tok", http.StatusNotFound},
-		{"0.0.0.0:8443", wire.EndpointsPath, http.StatusUnauthorized},
+		{"0.0.0.0:8443", wire.EndpointsPath, http.StatusBadRequest},
 	} {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, c.path, nil)

@@ -413,8 +413,8 @@ func TestLinkReplaceInParts(t *testing.T) {
 	h.Set(wire.HeaderLink, link)
 	h.Set(wire.HeaderLinkAction, wire.LinkReplace)
 	h.Set(wire.HeaderMeta, metaS)
-	signHeaders(t, f.user, h, wire.LinkNamespaceV2, func(ts, nonce string) []byte {
-		return wire.LinkCanonicalTextV2(http.MethodPut, c.host, "/drop", link, wire.LinkReplace, ts, nonce, metaS, c.sess.H())
+	signHeaders(t, f.user, h, wire.LinkNamespace, func(ts, nonce string) []byte {
+		return wire.LinkCanonicalText(http.MethodPut, c.host, "/drop", link, wire.LinkReplace, ts, nonce, metaS, c.sess.H())
 	})
 	head, body := c.op(t, channel.Request{Method: http.MethodPut, Target: "/drop", Header: h}, nil)
 	wantInner(t, "replace", head, body, http.StatusOK)

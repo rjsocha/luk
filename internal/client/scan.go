@@ -89,7 +89,7 @@ func ListEndpoints(ctx context.Context, u *url.URL, pins []channel.Pin, signer s
 	}
 	defer c.Close()
 	req, err := signedOp(Options{URL: lu.String(), Signer: signer}, c, http.MethodGet, "", nil, func(host, path, ts, nonce string) (string, []byte) {
-		return wire.ListNamespaceV2, wire.ListCanonicalTextV2(http.MethodGet, host, path, ts, nonce, c.H())
+		return wire.ListNamespace, wire.ListCanonicalText(http.MethodGet, host, path, ts, nonce, c.H())
 	})
 	if err != nil {
 		return nil, err

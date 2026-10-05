@@ -1,12 +1,12 @@
 // Package server runs the lukd roles. Its HTTP side (the receive role)
-// authenticates, authorizes and routes an upload and receives the body
-// into the endpoint queue, where the entry stays committed for the process
-// role. A dry run only reads and hashes the body and answers a debug JSON.
+// takes the endpoint requests inside the channel: it authenticates,
+// authorizes and routes an upload and receives its content in parts into
+// the endpoint queue, where the entry stays committed for the process
+// role. A dry run answers a debug JSON without any content.
 package server
 
 import (
 	"cmp"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -76,7 +76,7 @@ type snapshot struct {
 	listeners map[string]*listener
 }
 
-// listener is the routing table of one named listener: PUT to its
+// listener is the routing table of one named listener: the channel to its
 // endpoints, GET, HEAD and POST to its exposes.
 type listener struct {
 	cfg    *config.Listen
@@ -258,14 +258,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request, sn *snapshot,
 		s.serveChannel(w, r, sn, l)
 		return
 	}
-	if r.URL.Path == wire.EndpointsPath {
-		s.serveEndpoints(w, r, sn, l)
+	ep, ok := endpointOf(l, r.URL.Path)
+	if ok || r.URL.Path == wire.EndpointsPath {
+		s.outsideChannel(w, r)
 		return
 	}
-	ep, ok := endpointOf(l, r.URL.Path)
 	// Without endpoints nothing is an upload: the expose answers every
 	// request, 405 for what it does not take.
-	if !ok && (len(l.byPath) == 0 || r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost) {
+	if len(l.byPath) == 0 || r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost {
 		h := l.expose
 		if h == nil {
 			h = http.NotFoundHandler()
@@ -276,8 +276,26 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request, sn *snapshot,
 	s.serveEndpoint(w, r, sn, l, ep, ok)
 }
 
-// serveEndpoint answers a request on the endpoint ep of l, or 404 when the
-// path is none (!ok).
+// errOutsideChannel is the answer to an endpoint request outside the
+// channel: only a luk from before the channel sends one.
+const errOutsideChannel = "endpoint requests go through the channel (update luk)"
+
+// outsideChannel refuses a request on an endpoint path or the endpoint
+// listing that came outside the channel.
+func (s *Server) outsideChannel(w http.ResponseWriter, r *http.Request) {
+	// Unsigned requests are scanners and stray clients, not an old luk.
+	level := slog.LevelInfo
+	if !signed(r) {
+		level = slog.LevelDebug
+	}
+	s.log.Log(r.Context(), level, "endpoint request outside the channel", "remote", r.RemoteAddr, "host", r.Host, "method", r.Method, "path", r.URL.Path)
+	// The body is left unread; do not keep the connection.
+	w.Header().Set("Connection", "close")
+	writeJSON(w, http.StatusBadRequest, wire.ErrorResponse{Error: errOutsideChannel})
+}
+
+// serveEndpoint answers an operation of the channel on the endpoint ep of
+// l, or a request outside it on a path that is no endpoint (!ok): 404.
 func (s *Server) serveEndpoint(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener, ep *config.Endpoint, ok bool) {
 	var (
 		code int
@@ -287,7 +305,7 @@ func (s *Server) serveEndpoint(w http.ResponseWriter, r *http.Request, sn *snaps
 	if !ok {
 		err = fail(http.StatusNotFound, "no endpoint %s", r.URL.Path)
 	} else {
-		code, resp, err = s.handle(w, r, sn, l, ep)
+		code, resp, err = s.handle(r, sn, l, ep)
 	}
 	what := "upload rejected"
 	if isLink(r) {
@@ -313,8 +331,10 @@ func (s *Server) serveEndpoint(w http.ResponseWriter, r *http.Request, sn *snaps
 		if he.retry > 0 {
 			w.Header().Set("Retry-After", strconv.FormatInt(int64(he.retry/time.Second), 10))
 		}
-		// The body may be unread; do not keep the connection.
-		w.Header().Set("Connection", "close")
+		if !ok {
+			// The body is left unread; do not keep the connection.
+			w.Header().Set("Connection", "close")
+		}
 		writeJSON(w, he.code, wire.ErrorResponse{Error: he.msg})
 		return
 	}
@@ -387,22 +407,22 @@ func (u *upload) tooLarge(max int64) error {
 	return fail(http.StatusRequestEntityTooLarge, "body exceeds the limit %d of %s", max, u.ep.Name)
 }
 
-func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener, ep *config.Endpoint) (int, any, error) {
+// handle runs an operation of the channel on the endpoint ep: an upload
+// or a link request.
+func (s *Server) handle(r *http.Request, sn *snapshot, l *listener, ep *config.Endpoint) (int, any, error) {
 	if isLink(r) {
-		return s.handleLink(w, r, sn, l, ep)
+		return s.handleLink(r, sn, l, ep)
 	}
 	if r.Method != http.MethodPut {
 		return 0, nil, fail(http.StatusMethodNotAllowed, "method %s not allowed, use PUT", r.Method)
 	}
 	now := s.now()
 	var meta wire.Meta
-	ns, text := wire.Namespace, func(ts, nonce, metaS string) []byte { return wire.CanonicalText(r.Host, r.URL.Path, ts, nonce, metaS) }
-	if cs := sessionOf(r.Context()); cs != nil {
-		ns, text = wire.NamespaceV2, func(ts, nonce, metaS string) []byte {
-			return wire.CanonicalTextV2(r.Host, r.URL.Path, ts, nonce, metaS, cs.sess.H())
-		}
+	cs := sessionOf(r.Context())
+	text := func(ts, nonce, metaS string) []byte {
+		return wire.CanonicalText(r.Host, r.URL.Path, ts, nonce, metaS, cs.sess.H())
 	}
-	id, err := s.authenticate(r, sn, l, ep, now, ns, text,
+	id, err := s.authenticate(r, sn, l, ep, now, wire.Namespace, text,
 		func(metaS string) (err error) { meta, err = wire.DecodeMeta(metaS); return err })
 	if err != nil {
 		return 0, nil, err
@@ -433,7 +453,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 	if len(pipes) == 0 {
 		return 0, nil, fail(http.StatusUnprocessableEntity, "no pipeline for endpoint %s and tags [%s]", ep.Name, strings.Join(meta.Tags, ","))
 	}
-	max, reveal, err := bodyLimit(r, ep, meta, meta.Portal)
+	max, reveal, err := bodyLimit(ep, meta, meta.Portal)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -463,17 +483,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 		if err := s.quotaCheck(u); err != nil {
 			return 0, nil, err
 		}
-		return s.dryRun(w, u)
+		return s.dryRun(u)
 	}
 	if e, ok := s.dedup(u); ok {
-		// The body is never read, so no 100 Continue is sent.
-		w.Header().Set("Connection", "close")
 		return s.accept(u, e, *meta.Size, meta.SHA256, true)
 	}
-	if cs := sessionOf(r.Context()); cs != nil {
-		return s.openUpload(cs, r, u, max)
-	}
-	return s.receive(w, r, u, max)
+	return s.openUpload(cs, r, u, max)
 }
 
 // permanentGate checks an upload of a permanent name before the body: no
@@ -707,16 +722,12 @@ func queued(dir, sum string, size int64, owner string) (string, os.FileInfo, boo
 
 // bodyLimit checks the signed size against the limits of ep before the
 // body and returns the limit of the body; the content of a reveal portal
-// is capped at expose.MaxReveal (reveal). Inside the channel the content
-// comes in parts, so there is no Content-Length to check.
-func bodyLimit(r *http.Request, ep *config.Endpoint, meta wire.Meta, portal string) (int64, bool, error) {
+// is capped at expose.MaxReveal (reveal).
+func bodyLimit(ep *config.Endpoint, meta wire.Meta, portal string) (int64, bool, error) {
 	max := int64(ep.Limits.Body.Size)
 	if meta.Size != nil {
 		if max > 0 && *meta.Size > max {
 			return 0, false, fail(http.StatusRequestEntityTooLarge, "size %d exceeds the limit %d of %s", *meta.Size, max, ep.Name)
-		}
-		if sessionOf(r.Context()) == nil && r.ContentLength >= 0 && r.ContentLength != *meta.Size {
-			return 0, false, fail(http.StatusUnprocessableEntity, "Content-Length %d differs from the signed size %d", r.ContentLength, *meta.Size)
 		}
 		if portal == wire.PortalReveal && *meta.Size > expose.MaxReveal {
 			return 0, false, fail(http.StatusUnprocessableEntity, "size %d exceeds the reveal limit %d", *meta.Size, expose.MaxReveal)
@@ -770,31 +781,6 @@ func (s *Server) prepare(u *upload) error {
 		}
 	}
 	return checkPaths(sn.cfg, u.pipes, u.secret, u.vars, skip)
-}
-
-// receive reads the body into the queue; Go sends 100 Continue on its
-// first read. With a quota on the endpoint the signed size is charged
-// before (refused before any body), a body without one while it streams;
-// an upload not accepted gives back what it took.
-func (s *Server) receive(w http.ResponseWriter, r *http.Request, u *upload, max int64) (int, any, error) {
-	if lim, ok := quota.Resolve(u.ep.Quota, u.id); ok {
-		u.charge = s.quota.Begin(u.ep.Name, auth.OwnerKey(u.id), lim)
-		defer u.charge.Cancel()
-		if u.meta.Size != nil {
-			if err := u.charge.Take(*u.meta.Size); err != nil {
-				return 0, nil, quotaFail(err)
-			}
-		}
-	}
-	bl := u.ep.Limits.Body
-	rc := http.NewResponseController(w)
-	defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
-	ir := &idleReader{r: r.Body, rc: rc, d: time.Duration(bl.Idle)}
-	if bl.Timeout > 0 {
-		ir.total = time.Duration(bl.Timeout)
-		ir.end = time.Now().Add(ir.total)
-	}
-	return s.ingest(r.Context(), u, ir, max)
 }
 
 // quotaCheck is the quota check of a dry run: the signed size against the
@@ -918,14 +904,13 @@ func checkPaths(cfg *config.Config, pipes []string, secret string, v store.Vars,
 	return nil
 }
 
-// dryRun answers once every check before the body passed; the body is
-// never read, so no 100 Continue is sent.
-func (s *Server) dryRun(w http.ResponseWriter, u *upload) (int, any, error) {
+// dryRun answers once every check before the content passed; no content
+// is sent.
+func (s *Server) dryRun(u *upload) (int, any, error) {
 	respond := wire.Respond{Mode: "accept"}
 	if u.ep.Respond == "url" {
 		respond = wire.Respond{Mode: "url", URL: u.url}
 	}
-	w.Header().Set("Connection", "close")
 	s.log.Info("dry run accepted", append([]any{"id", u.vars.Id, "sender", u.id.Name, "endpoint", u.ep.Name,
 		"tags", strings.Join(u.meta.Tags, ","), "pipelines", strings.Join(u.pipes, ",")}, u.claimLog()...)...)
 	var claimed *wire.Claimed
@@ -978,49 +963,6 @@ func schedule(u *upload) []wire.Scheduled {
 		return cmp.Or(strings.Compare(a.Group, b.Group), cmp.Compare(a.Order, b.Order), strings.Compare(a.Pipeline, b.Pipeline))
 	})
 	return out
-}
-
-func (s *Server) ingest(ctx context.Context, u *upload, ir *idleReader, max int64) (int, any, error) {
-	var res *queue.Reservation
-	if u.meta.Size != nil {
-		var err error
-		res, err = s.queue.Reserve(u.queueDir(), *u.meta.Size)
-		if errors.Is(err, queue.ErrNoSpace) {
-			return 0, nil, fail(http.StatusInsufficientStorage, "not enough space")
-		}
-		if err != nil {
-			return 0, nil, fmt.Errorf("queue %s: %w", u.queueDir(), err)
-		}
-	}
-	defer res.Release()
-	var body io.Reader = ir
-	if u.charge != nil && u.meta.Size == nil {
-		body = u.charge.Reader(ir)
-	}
-	e, n, sum, err := s.queue.Receive(ctx, u.queueDir(), u.vars.Id, body, max, u.meta.Size, u.meta.SHA256, res)
-	var qr *quota.Refusal
-	switch {
-	case err == nil:
-	case errors.As(err, &qr):
-		return 0, nil, quotaFail(err)
-	case errors.Is(err, queue.ErrNoSpace):
-		return 0, nil, fail(http.StatusInsufficientStorage, "not enough space")
-	case errors.Is(err, queue.ErrTooLarge):
-		return 0, nil, u.tooLarge(max)
-	case errors.Is(err, queue.ErrMismatch):
-		// The answer and its log line keep nothing derived from a secret.
-		if u.secret != "" {
-			return 0, nil, fail(http.StatusUnprocessableEntity, "body differs from the signed %d bytes", *u.meta.Size)
-		}
-		return 0, nil, fail(http.StatusUnprocessableEntity, "body differs from the signed %d bytes sha256 %s", *u.meta.Size, u.meta.SHA256)
-	case ir.err != nil && errors.Is(err, ir.err):
-		return 0, nil, ir.fail(err)
-	case ctx.Err() != nil:
-		return 0, nil, fail(http.StatusBadRequest, "reading body: %v", err)
-	default:
-		return 0, nil, fmt.Errorf("queue %s: %w", u.queueDir(), err)
-	}
-	return s.accept(u, e, n, sum, false)
 }
 
 // accept commits the entry e of the upload, its content of n bytes with
@@ -1241,12 +1183,12 @@ func (s *Server) verifyGet(r *http.Request, sn *snapshot, l *listener) (*wire.Id
 
 // verify checks the timestamp, the nonce and the signature of a signed
 // request under namespace over text, and returns the identity of the
-// signer on the configuration of sn. Inside the channel only the v2
-// namespaces verify, whose texts carry the session hash, and the signer
-// becomes the identity of the session.
+// signer on the configuration of sn. Inside the channel only the
+// namespaces of the endpoint requests verify, whose texts carry the
+// session hash, and the signer becomes the identity of the session.
 func (s *Server) verify(r *http.Request, sn *snapshot, l *listener, now time.Time, ts, nonce, sigS, namespace string, text []byte) (*wire.Identity, error) {
 	cs := sessionOf(r.Context())
-	if cs != nil && namespace != wire.NamespaceV2 && namespace != wire.ListNamespaceV2 && namespace != wire.LinkNamespaceV2 {
+	if cs != nil && namespace != wire.Namespace && namespace != wire.ListNamespace && namespace != wire.LinkNamespace {
 		return nil, fail(http.StatusUnauthorized, "namespace %s is not signed inside the channel", namespace)
 	}
 	t, err := time.Parse(time.RFC3339, ts)

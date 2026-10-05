@@ -198,7 +198,7 @@ func TestPermanentGate(t *testing.T) {
 	// The dry run answers the permanent URL.
 	m := permMeta("builds/a", body)
 	m.DryRun = true
-	rec, out := f.do(t, req{signer: f.user, path: "/drop", meta: m, chunked: true})
+	rec, out := f.do(t, req{signer: f.user, path: "/drop", meta: m})
 	if rec.Code != 200 || out.Respond.URL != "https://lukd.vm:8443/d/permanent/builds/a" || out.Client.Permanent != "builds/a" {
 		t.Errorf("dry run: %d %+v", rec.Code, out)
 	}
@@ -208,7 +208,7 @@ func TestPermanentGate(t *testing.T) {
 		return strings.Replace(s, `path: "{{ .Random }}", expose: drop`, `path: "{{ .File }}", expose: drop`, 1)
 	})
 	m = wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, File: "permanent"}
-	rec, _ = g.do(t, req{signer: g.user, path: "/drop", meta: m, body: body, chunked: true})
+	rec, _ = g.do(t, req{signer: g.user, path: "/drop", meta: m, body: body})
 	want("stored at the path", rec, http.StatusUnprocessableEntity, "reserved for the permanent names under permanent/")
 }
 

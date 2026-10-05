@@ -62,7 +62,7 @@ func TestCapabilitiesUpload(t *testing.T) {
 		}
 		m := c.meta
 		m.Portal, m.Source = wire.PortalDirect, wire.SourceStdin
-		rec, _ := f.do(t, req{signer: signer, path: "/drop", meta: m, chunked: true})
+		rec, _ := f.do(t, req{signer: signer, path: "/drop", meta: m})
 		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), c.msg) {
 			t.Errorf("%s: %d %s", name, rec.Code, rec.Body)
 		}
@@ -176,7 +176,7 @@ func TestBackupHostnameUpload(t *testing.T) {
 		"plain key in principal": {f.other, "other"},
 		"no principals":          {f.hostCertWith(t, "web1"), "web1"},
 	} {
-		rec, _ := f.do(t, req{signer: c.signer, path: "/drop", meta: backupMeta(c.hostname), chunked: true})
+		rec, _ := f.do(t, req{signer: c.signer, path: "/drop", meta: backupMeta(c.hostname)})
 		body := rec.Body.String()
 		if rec.Code != http.StatusForbidden || !strings.Contains(body, `backup hostname \"`+c.hostname+`\" not allowed for this key`) ||
 			strings.Contains(body, "robert.socha") || strings.Contains(body, "hosts") {
@@ -190,7 +190,7 @@ func TestBackupHostnameUpload(t *testing.T) {
 func TestBackupHostnameBothLists(t *testing.T) {
 	f := backupFixture(t, `{any: [robert.socha], principal: [robert.socha]}`)
 	f.drop(t, f.user, backupMeta("db9.example.net"), "both")
-	rec, _ := f.do(t, req{signer: f.other, path: "/drop", meta: backupMeta("other"), chunked: true})
+	rec, _ := f.do(t, req{signer: f.other, path: "/drop", meta: backupMeta("other")})
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("neither: %d %s", rec.Code, rec.Body)
 	}

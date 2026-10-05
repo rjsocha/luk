@@ -134,7 +134,7 @@ func Upload(ctx context.Context, o Options) (*Answer, error) {
 	}
 	res, err := uploadParts(ctx, o, func(c *Channel) (channel.Request, error) {
 		return signedOp(o, c, http.MethodPut, metaS, nil, func(host, path, ts, nonce string) (string, []byte) {
-			return wire.NamespaceV2, wire.CanonicalTextV2(host, path, ts, nonce, metaS, c.H())
+			return wire.Namespace, wire.CanonicalText(host, path, ts, nonce, metaS, c.H())
 		})
 	})
 	if err != nil {
