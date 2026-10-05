@@ -131,7 +131,7 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	expose.StartJanitor(ctx, s.config, log, time.Minute, expose.Expire, nil, func(time.Time) { s.chans.sweep(s.now()) }, beat)
+	expose.StartJanitor(ctx, s.config, log, time.Minute, expose.Expire, nil, func(time.Time) { s.sweepChannels() }, beat)
 	errc := make(chan error, 1)
 	if servers, err = s.listen(cfg, certs, errc); err != nil {
 		return err

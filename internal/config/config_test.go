@@ -446,6 +446,15 @@ func TestLimitsDefaults(t *testing.T) {
 	if ch := l.Channel; ch.Auth != Duration(time.Minute) || ch.Pending != 1024 || ch.Idle != Duration(2*time.Minute) {
 		t.Fatalf("%+v", ch)
 	}
+	if u := l.Uploads; u.Total != 256 || u.Identity != 8 {
+		t.Fatalf("%+v", u)
+	}
+	if b.BytesPerSecond() != 64<<10 {
+		t.Fatalf("rate %d", b.BytesPerSecond())
+	}
+	if p := c.Endpoint["drop"].Parts; p.Size != 8<<20 || p.Parallel != 4 {
+		t.Fatalf("%+v", p)
+	}
 }
 
 func TestLimitsSet(t *testing.T) {
@@ -468,11 +477,35 @@ func TestLimitsSet(t *testing.T) {
 	if b.Size != 1024 || b.Idle != Duration(5*time.Second) || b.Timeout != Duration(time.Hour) {
 		t.Fatalf("%+v", b)
 	}
+	c, err = Parse([]byte(strings.Replace(good, "limits: {body: {size: 50G}}", "limits: {body: {rate: 0}}\n    parts: {size: 2097088K, parallel: 64}", 1) +
+		"\nlimits: {uploads: {total: 3, identity: 2}}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Endpoint["backup"].Limits.Body.BytesPerSecond(); r != 0 {
+		t.Fatalf("rate %d", r)
+	}
+	if p := c.Endpoint["backup"].Parts; p.Size != 2<<30-64<<10 || p.Parallel != 64 {
+		t.Fatalf("%+v", p)
+	}
+	if u := c.Limits.Uploads; u.Total != 3 || u.Identity != 2 {
+		t.Fatalf("%+v", u)
+	}
+}
+
+func TestPartsInvalid(t *testing.T) {
+	for _, p := range []string{"size: 32K", "size: 100K", "size: 2G", "parallel: 65", "parallel: -1"} {
+		text := strings.Replace(good, "limits: {body: {size: 50G}}", "limits: {body: {size: 50G}}\n    parts: {"+p+"}", 1)
+		if _, err := Parse([]byte(text)); err == nil || !strings.Contains(err.Error(), "parts.") {
+			t.Fatalf("%s: %v", p, err)
+		}
+	}
 }
 
 func TestLimitsInvalid(t *testing.T) {
 	for _, l := range []string{"conn: {max: -1}", "conn: {idle: -1s}", "header: {timeout: -1s}",
-		"channel: {auth: -1s}", "channel: {idle: -1s}", "channel: {pending: -1}"} {
+		"channel: {auth: -1s}", "channel: {idle: -1s}", "channel: {pending: -1}",
+		"uploads: {total: -1}", "uploads: {identity: -1}"} {
 		if _, err := Parse([]byte(good + "\nlimits: {" + l + "}\n")); err == nil || !strings.Contains(err.Error(), "limits.") {
 			t.Fatalf("%s: %v", l, err)
 		}

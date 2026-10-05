@@ -64,6 +64,8 @@ type Server struct {
 	key atomic.Pointer[channel.Key]
 	// chans are the open channel sessions.
 	chans *chanTable
+	// uploads counts the open uploads in parts.
+	uploads uploadSlots
 }
 
 // snapshot is one configuration and what is built from it; it is never
@@ -351,6 +353,9 @@ type upload struct {
 	// charge accounts the body against the quota of the endpoint; nil
 	// without one.
 	charge *quota.Charge
+	// accepted is the acceptance order of an upload in parts, taken when
+	// it was admitted; nil takes it at the commit.
+	accepted *queue.Acceptance
 }
 
 // storage is the respond storage of the upload: the secret storage of a
@@ -459,6 +464,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 		// The body is never read, so no 100 Continue is sent.
 		w.Header().Set("Connection", "close")
 		return s.accept(u, e, *meta.Size, meta.SHA256, true)
+	}
+	if cs := sessionOf(r.Context()); cs != nil {
+		return s.openUpload(cs, r, u, max)
 	}
 	return s.receive(w, r, u, max)
 }
@@ -694,14 +702,15 @@ func queued(dir, sum string, size int64, owner string) (string, os.FileInfo, boo
 
 // bodyLimit checks the signed size against the limits of ep before the
 // body and returns the limit of the body; the content of a reveal portal
-// is capped at expose.MaxReveal (reveal).
+// is capped at expose.MaxReveal (reveal). Inside the channel the content
+// comes in parts, so there is no Content-Length to check.
 func bodyLimit(r *http.Request, ep *config.Endpoint, meta wire.Meta, portal string) (int64, bool, error) {
 	max := int64(ep.Limits.Body.Size)
 	if meta.Size != nil {
 		if max > 0 && *meta.Size > max {
 			return 0, false, fail(http.StatusRequestEntityTooLarge, "size %d exceeds the limit %d of %s", *meta.Size, max, ep.Name)
 		}
-		if r.ContentLength >= 0 && r.ContentLength != *meta.Size {
+		if sessionOf(r.Context()) == nil && r.ContentLength >= 0 && r.ContentLength != *meta.Size {
 			return 0, false, fail(http.StatusUnprocessableEntity, "Content-Length %d differs from the signed size %d", r.ContentLength, *meta.Size)
 		}
 		if portal == wire.PortalReveal && *meta.Size > expose.MaxReveal {
@@ -1030,8 +1039,14 @@ func (s *Server) accept(u *upload, e queue.Entry, n int64, sum string, dedup boo
 		sc.PermanentPath = u.ep.Permanent.Path
 	}
 	// The acceptance order, taken right before the commit: the order in
-	// which the entries are committed, whatever their start.
-	acc := s.accepted.Next()
+	// which the entries are committed, whatever their start. An upload in
+	// parts took it when it was admitted.
+	var acc queue.Acceptance
+	if u.accepted != nil {
+		acc = *u.accepted
+	} else {
+		acc = s.accepted.Next()
+	}
 	sc.Accepted, sc.AcceptedSeq = acc.NS, acc.Seq
 	job := pipeline.Job{Entry: e, Pipelines: u.pipes, Stages: pipeline.Stages(u.sn.cfg, u.pipes), Vars: u.vars, Sidecar: sc, Expires: exp, Replace: u.replace, Secret: u.secret}
 	if err := s.queue.Commit(e, job.Meta()); errors.Is(err, queue.ErrNotSynced) {

@@ -161,6 +161,15 @@ type Limits struct {
 	Failed FailedLimits `yaml:"failed"`
 	// Channel bounds the channel sessions of the receive role.
 	Channel ChannelLimits `yaml:"channel"`
+	// Uploads bounds the uploads in parts open at once.
+	Uploads UploadLimits `yaml:"uploads"`
+}
+
+// UploadLimits: Total is the number of uploads in parts open at once,
+// Identity the number open at once per identity.
+type UploadLimits struct {
+	Total    int `yaml:"total"`
+	Identity int `yaml:"identity"`
 }
 
 // ChannelLimits: Auth is the time from a handshake to its OP, Pending the
@@ -210,6 +219,25 @@ type BodyLimits struct {
 	Size    Size     `yaml:"size"`
 	Idle    Duration `yaml:"idle"`
 	Timeout Duration `yaml:"timeout"`
+	// Rate is the slowest a part may arrive, in bytes per second: a part
+	// must arrive within its size / Rate. 0 turns it off; unset is
+	// DefaultBodyRate.
+	Rate *Size `yaml:"rate"`
+}
+
+// BytesPerSecond is Rate, DefaultBodyRate when unset.
+func (b BodyLimits) BytesPerSecond() int64 {
+	if b.Rate == nil {
+		return DefaultBodyRate
+	}
+	return int64(*b.Rate)
+}
+
+// Parts is how an upload in parts is cut: every part but the last has
+// Size bytes, and a client sends at most Parallel of them at once.
+type Parts struct {
+	Size     Size `yaml:"size"`
+	Parallel int  `yaml:"parallel"`
 }
 
 const (
@@ -225,6 +253,19 @@ const (
 	DefaultChannelAuth    = 60 * time.Second
 	DefaultChannelPending = 1024
 	DefaultChannelIdle    = 2 * time.Minute
+)
+
+const (
+	DefaultPartSize = 8 << 20
+	MinPartSize     = 64 << 10
+	// MaxPartSize is the largest part whose frames the nonce of a
+	// message can number (32768 frames, the last one empty).
+	MaxPartSize            = 2<<30 - 64<<10
+	DefaultPartParallel    = 4
+	MaxPartParallel        = 64
+	DefaultBodyRate        = 64 << 10
+	DefaultUploadsTotal    = 256
+	DefaultUploadsIdentity = 8
 )
 
 // Listen is a named listener. Several listeners may share an address;
@@ -347,6 +388,8 @@ type Endpoint struct {
 	Respond  string         `yaml:"respond"`
 	Storage  string         `yaml:"storage"`
 	Limits   EndpointLimits `yaml:"limits"`
+	// Parts is how an upload inside the channel is cut.
+	Parts Parts `yaml:"parts"`
 	// Pretty, when present, lets the identities of pretty.allow ask for a
 	// proquint .Random (pretty_url); anyone else is refused.
 	Pretty *Pretty `yaml:"pretty"`
@@ -1255,6 +1298,21 @@ func (c *Config) validate() []error {
 	if l.Channel.Pending == 0 {
 		l.Channel.Pending = DefaultChannelPending
 	}
+	for _, n := range []struct {
+		name string
+		v    *int
+		def  int
+	}{
+		{"limits.uploads.total", &l.Uploads.Total, DefaultUploadsTotal},
+		{"limits.uploads.identity", &l.Uploads.Identity, DefaultUploadsIdentity},
+	} {
+		if *n.v < 0 {
+			bad("%s must be at least 1", n.name)
+		}
+		if *n.v == 0 {
+			*n.v = n.def
+		}
+	}
 
 	if l.Queue.Reserve < 0 {
 		bad("limits.queue.reserve must not be negative")
@@ -1457,6 +1515,25 @@ func (c *Config) validate() []error {
 		}
 		if bl.Timeout < 0 {
 			bad("endpoint %s: limits.body.timeout must be positive", name)
+		}
+		if bl.Rate == nil {
+			r := Size(DefaultBodyRate)
+			bl.Rate = &r
+		} else if *bl.Rate < 0 {
+			bad("endpoint %s: limits.body.rate must not be negative", name)
+		}
+		pt := &e.Parts
+		switch {
+		case pt.Size == 0:
+			pt.Size = DefaultPartSize
+		case pt.Size < MinPartSize || pt.Size > MaxPartSize || pt.Size%MinPartSize != 0:
+			bad("endpoint %s: parts.size must be a multiple of 64KiB from 64KiB to 2GiB-64KiB", name)
+		}
+		switch {
+		case pt.Parallel == 0:
+			pt.Parallel = DefaultPartParallel
+		case pt.Parallel < 1 || pt.Parallel > MaxPartParallel:
+			bad("endpoint %s: parts.parallel must be 1 to %d", name, MaxPartParallel)
 		}
 		if e.Quota != nil {
 			e.Quota.validate(bad, "endpoint "+name, names, cas, c.Auth.Keys)

@@ -731,6 +731,22 @@ type LinkAnswer struct {
 	SHA256  string `json:"sha256,omitempty"`
 }
 
+// PartsOffer is the answer to an upload or a link replace inside the
+// channel that passed every check before the body: the content goes in
+// parts of Size bytes (the last one shorter), at most Parallel at once.
+type PartsOffer struct {
+	Parts struct {
+		Size     int64 `json:"size"`
+		Parallel int   `json:"parallel"`
+	} `json:"parts"`
+}
+
+// PartsMissing is the answer to a complete before every part arrived:
+// the numbers of the parts still missing.
+type PartsMissing struct {
+	Missing []uint32 `json:"missing"`
+}
+
 // LinkListAnswer is the answer of a link list: the links of the caller on
 // the endpoint, newest first; Truncated when there were more than
 // MaxLinkList.

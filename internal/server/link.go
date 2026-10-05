@@ -274,6 +274,9 @@ func (s *Server) linkReplace(w http.ResponseWriter, r *http.Request, sn *snapsho
 	if err := s.prepare(u); err != nil {
 		return 0, nil, err
 	}
+	if cs := sessionOf(r.Context()); cs != nil {
+		return s.openUpload(cs, r, u, max)
+	}
 	return s.receive(w, r, u, max)
 }
 

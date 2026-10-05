@@ -283,24 +283,15 @@ func TestChannelLinkList(t *testing.T) {
 
 func TestChannelUpload(t *testing.T) {
 	f, srvURL, pin := chanFixture(t, nil)
-	c := chanOpen(t, srvURL, "/drop", pin)
 	meta := wire.Meta{Portal: wire.PortalDirect, File: "a.txt", Source: wire.SourceStdin}
-	if err := meta.Normalize(); err != nil {
-		t.Fatal(err)
+	c, offer := create(t, f, srvURL, pin, meta)
+	if offer.Parts.Size != 8<<20 || offer.Parts.Parallel != 4 {
+		t.Fatalf("%+v", offer)
 	}
-	metaS, err := wire.EncodeMeta(meta)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := http.Header{}
-	h.Set(wire.HeaderMeta, metaS)
-	signHeaders(t, f.user, h, wire.NamespaceV2, func(ts, nonce string) []byte {
-		return wire.CanonicalTextV2(c.host, "/drop", ts, nonce, metaS, c.sess.H())
-	})
-	head, body := c.op(t, channel.Request{Method: http.MethodPut, Target: "/drop", Header: h}, []byte("hello"))
-	if head.Status != http.StatusCreated {
-		t.Fatalf("%d %s", head.Status, body)
-	}
+	head, body := c.part(t, 0, 0, []byte("hello"))
+	wantInner(t, "part", head, body, http.StatusOK)
+	head, body = c.control(t, channel.KindComplete, 0, 0)
+	wantInner(t, "complete", head, body, http.StatusCreated)
 	var out wire.Created
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatal(err)
@@ -308,6 +299,17 @@ func TestChannelUpload(t *testing.T) {
 	f.settle(t)
 	if code, got := f.fetch(t, out.URL); code != 200 || got != "hello" {
 		t.Fatalf("%d %s", code, got)
+	}
+}
+
+// An upload OP carries no body inside the channel.
+func TestChannelUploadBodyRefused(t *testing.T) {
+	f, srvURL, pin := chanFixture(t, nil)
+	c := chanOpen(t, srvURL, "/drop", pin)
+	head, body := c.op(t, c.putReq(t, f.user, wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}), []byte("hello"))
+	wantInner(t, "OP with a body", head, body, http.StatusBadRequest)
+	if f.srv.chans.get(c.sess.ID()) != nil {
+		t.Fatal("session kept without an upload")
 	}
 }
 
@@ -458,10 +460,11 @@ func TestChannelV2OutsideChannel(t *testing.T) {
 	}
 }
 
-func TestChannelPartNotImplemented(t *testing.T) {
+// A PART to a session without an upload is refused in the clear.
+func TestChannelPartWithoutUpload(t *testing.T) {
 	_, srvURL, pin := chanFixture(t, nil)
 	c := chanOpen(t, srvURL, "/drop", pin)
-	wantOuter(t, "PART", c.post(t, "/drop", channel.Nonce{Kind: channel.KindPart, Number: 1}, []byte("x")), http.StatusBadRequest)
+	wantOuter(t, "PART", c.post(t, "/drop", channel.Nonce{Kind: channel.KindPart, Number: 1}, []byte("x")), http.StatusNotFound)
 }
 
 func TestChannelTamperedOp(t *testing.T) {
@@ -540,4 +543,94 @@ func TestChannelIdentityReload(t *testing.T) {
 	}
 	f.srv.reload()
 	chanOpen(t, srvURL, wire.EndpointsPath, k.Public)
+}
+
+// seal is the body of a transport request of nonce n carrying plain.
+func (c *testChan) seal(t *testing.T, n channel.Nonce, plain []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := c.sess.SealRequest(&buf, n, bytes.NewReader(plain)); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// inner is the inner response to the request of nonce n; the outer
+// response must be a 200.
+func (c *testChan) inner(t *testing.T, resp *http.Response, n channel.Nonce) (channel.Response, []byte) {
+	t.Helper()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("outer %d: %s", resp.StatusCode, b)
+	}
+	rc, err := c.sess.OpenResponse(resp.Body, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var head channel.Response
+	if err := channel.ReadHead(rc, &head); err != nil {
+		t.Fatal(err)
+	}
+	out, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return head, out
+}
+
+// part sends part n, attempt a, carrying data; it returns the inner
+// response.
+func (c *testChan) part(t *testing.T, n uint32, a uint16, data []byte) (channel.Response, []byte) {
+	t.Helper()
+	nonce := channel.Nonce{Kind: channel.KindPart, Number: n, Attempt: a}
+	return c.inner(t, c.post(t, c.path, nonce, data), nonce)
+}
+
+// control sends a COMPLETE or an ABORT of sequence seq, attempt a; it
+// returns the inner response.
+func (c *testChan) control(t *testing.T, kind channel.Kind, seq uint32, a uint16) (channel.Response, []byte) {
+	t.Helper()
+	nonce := channel.Nonce{Kind: kind, Number: seq, Attempt: a}
+	return c.inner(t, c.post(t, c.path, nonce, nil), nonce)
+}
+
+// putReq is the signed upload OP of meta on the session path.
+func (c *testChan) putReq(t *testing.T, signer ssh.Signer, meta wire.Meta) channel.Request {
+	t.Helper()
+	if err := meta.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	metaS, err := wire.EncodeMeta(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := http.Header{}
+	h.Set(wire.HeaderMeta, metaS)
+	signHeaders(t, signer, h, wire.NamespaceV2, func(ts, nonce string) []byte {
+		return wire.CanonicalTextV2(c.host, c.path, ts, nonce, metaS, c.sess.H())
+	})
+	return channel.Request{Method: http.MethodPut, Target: c.path, Header: h}
+}
+
+// create opens an upload of meta in a new session on /drop and returns
+// the session and the offer.
+func create(t *testing.T, f *fixture, srvURL string, pin []byte, meta wire.Meta) (*testChan, wire.PartsOffer) {
+	t.Helper()
+	c := chanOpen(t, srvURL, "/drop", pin)
+	head, body := c.op(t, c.putReq(t, f.user, meta), nil)
+	if head.Status != http.StatusOK {
+		t.Fatalf("create: %d %s", head.Status, body)
+	}
+	var offer wire.PartsOffer
+	if err := json.Unmarshal(body, &offer); err != nil {
+		t.Fatal(err)
+	}
+	return c, offer
+}
+
+func wantInner(t *testing.T, what string, head channel.Response, body []byte, code int) {
+	t.Helper()
+	if head.Status != code {
+		t.Fatalf("%s: %d, want %d: %s", what, head.Status, code, body)
+	}
 }

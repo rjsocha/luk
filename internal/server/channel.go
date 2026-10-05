@@ -51,6 +51,51 @@ type chanSession struct {
 	// elem is the place of the session in the pending list of its table;
 	// nil once it has its OP or is dropped. The table lock guards it.
 	elem *list.Element
+	// upload is the upload in parts the OP opened; the session lives on
+	// for its parts.
+	upload *partsUpload
+}
+
+// setUpload makes pu the upload of the session; false when it has one.
+func (cs *chanSession) setUpload(pu *partsUpload) bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.upload != nil {
+		return false
+	}
+	cs.upload = pu
+	return true
+}
+
+func (cs *chanSession) uploadOf() *partsUpload {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.upload
+}
+
+// claimNonce takes the message of base nonce n once it opened; false
+// when a message of that nonce was taken.
+func (cs *chanSession) claimNonce(n channel.Nonce, now time.Time) bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.seen[n] {
+		return false
+	}
+	cs.seen[n], cs.last = true, now
+	return true
+}
+
+// touch records activity of the session: bytes of a part that opened.
+func (cs *chanSession) touch(now time.Time) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.last = now
+}
+
+func (cs *chanSession) lastActive() time.Time {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.last
 }
 
 // hasOp reports whether the session has taken its OP.
@@ -141,19 +186,25 @@ func (t *chanTable) dropLocked(cs *chanSession) {
 
 // sweep drops the sessions past their time: without an OP after
 // limits.channel.auth from the handshake, with one after
-// limits.channel.idle without a request.
-func (t *chanTable) sweep(now time.Time) {
+// limits.channel.idle without a request. The sessions of uploads follow
+// the time of their upload: they are returned for that.
+func (t *chanTable) sweep(now time.Time) []*chanSession {
 	lim := t.limits()
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	var uploads []*chanSession
 	for _, cs := range t.m {
 		cs.mu.Lock()
-		op, last := cs.op, cs.last
+		op, last, up := cs.op, cs.last, cs.upload != nil
 		cs.mu.Unlock()
-		if (!op && now.Sub(cs.created) > time.Duration(lim.Auth)) || (op && now.Sub(last) > time.Duration(lim.Idle)) {
+		switch {
+		case up:
+			uploads = append(uploads, cs)
+		case (!op && now.Sub(cs.created) > time.Duration(lim.Auth)) || (op && now.Sub(last) > time.Duration(lim.Idle)):
 			t.dropLocked(cs)
 		}
 	}
+	return uploads
 }
 
 type ctxKey struct{}
@@ -295,7 +346,11 @@ func (s *Server) chanTransport(w http.ResponseWriter, r *http.Request, sn *snaps
 		chanFail(w, http.StatusConflict, "repeated nonce")
 		return
 	}
-	chanFail(w, http.StatusBadRequest, "not implemented")
+	if n.Kind == channel.KindPart {
+		s.servePart(w, r, rc, cs, n, hdr, body)
+		return
+	}
+	s.serveControl(w, r, cs, n, hdr, body)
 }
 
 // chanOp runs the OP of a session: the whole message is read and
@@ -303,7 +358,8 @@ func (s *Server) chanTransport(w http.ResponseWriter, r *http.Request, sn *snaps
 // endpoint handlers and its answer goes back sealed. A session takes one
 // OP: another one that authenticates drops it, while one refused before
 // it is read leaves it alone, as anybody can name a session by the id in
-// the clear. The session ends with the answer to its OP.
+// the clear. The session ends with the answer to its OP, unless the OP
+// opened an upload in parts.
 func (s *Server) chanOp(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener, cs *chanSession, n channel.Nonce, hdr []byte, body io.Reader) {
 	if cs.hasOp() {
 		chanFail(w, http.StatusConflict, "the session has had its operation")
@@ -337,7 +393,9 @@ func (s *Server) chanOp(w http.ResponseWriter, r *http.Request, sn *snapshot, l 
 	if err := cw.Close(); err != nil {
 		s.log.Debug("channel response not sent", "remote", r.RemoteAddr, "host", r.Host, "path", r.URL.Path, "error", err)
 	}
-	s.chans.drop(cs)
+	if cs.uploadOf() == nil {
+		s.chans.drop(cs)
+	}
 }
 
 // innerRequest is the request an OP carries, to the Host of the session
