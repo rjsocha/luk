@@ -169,6 +169,8 @@ func TestCheckCommandReadable(t *testing.T) {
 		t.Fatalf("unknown user: %q %v", errOut, err)
 	}
 	os.Chmod(key, 0o644)
+	// The identity key is 0640: the service user reads it as a group member.
+	fakeUser(t, true)
 	if out, _, err := runCheck(t, "-c", cfg, "--no-running"); err != nil || out != "ok\n" {
 		t.Fatalf("fixed: %q %v", out, err)
 	}
