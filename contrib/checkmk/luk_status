@@ -161,8 +161,8 @@ def check_entry(e, exp, now):
     if failed:
         err = clean_text(e.get("error") or "no error recorded", 200)
         state = CRIT
-        texts.append("%d failed upload(s) in queue, last error: %s; "
-                     "see lukd queue ls / rm / retry" % (failed, err))
+        texts.append("%d failed upload(s), last error: %s; "
+                     "see lukd queue ls / rm" % (failed, err))
     if exp:
         if age is None:
             state = CRIT

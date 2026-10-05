@@ -164,7 +164,8 @@ func (s *Server) persistNonces(dir string) error {
 
 // Process runs the process role: no listener; it runs the pipelines of the
 // committed queue entries, picked up on commit (inotify) and every
-// processPickup, keeps failed/ and status.json and maintains the storages.
+// processPickup, keeps the failure records and status.json and maintains
+// the storages.
 // On the way out it waits for the running pipelines, bounded by the
 // shutdown timeout.
 func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {

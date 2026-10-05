@@ -81,7 +81,7 @@ func rootCmd() *cobra.Command {
 		Use:   "process",
 		Short: "Run the process role: pipelines of the committed queue entries",
 		Long: "Run the process role: no listener; it runs the pipelines of the committed\n" +
-			"queue entries (picked up every 5s), keeps failed/ and status.json and\n" +
+			"queue entries (picked up every 5s), keeps the failure records and status.json and\n" +
 			"maintains the storages. SIGHUP reloads the configuration.",
 		Args: cobra.NoArgs,
 		RunE: run(server.Process),

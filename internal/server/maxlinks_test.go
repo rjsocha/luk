@@ -86,8 +86,8 @@ func TestLinksMaxAtStore(t *testing.T) {
 		t.Fatalf("robert.socha owns %d names", n)
 	}
 	failed, err := pipeline.ListFailed(f.srv.config())
-	if err != nil || len(failed) != 1 || len(failed[0].Meta.Failed) != 1 ||
-		!strings.Contains(failed[0].Meta.Failed[0].Error, "limit of 3 links to the same content reached") {
+	if err != nil || len(failed) != 1 || len(failed[0].Pipelines) != 1 ||
+		!strings.Contains(failed[0].Pipelines[0].Error, "limit of 3 links to the same content reached") {
 		t.Fatalf("failed %+v: %v", failed, err)
 	}
 }

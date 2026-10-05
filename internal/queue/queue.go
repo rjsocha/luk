@@ -46,8 +46,8 @@ type Queue struct {
 
 type Entry struct{ Dir, ID string }
 
-// FailedName is the directory in a queue directory holding failed entries;
-// Pending and Cleanup skip it.
+// FailedName is the directory in a queue directory holding the failure
+// records; Pending and Cleanup skip it.
 const FailedName = "failed"
 
 // New returns a Queue keeping reserve bytes free; nil freeSpace uses statfs.

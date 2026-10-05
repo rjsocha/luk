@@ -198,7 +198,7 @@ func waitDead(t *testing.T, pid int) {
 func childPid(t *testing.T, e *env, id string) int {
 	t.Helper()
 	var pid int
-	if _, err := fmt.Sscan(e.read(t, filepath.Join("work", id, "p", "1", "child")), &pid); err != nil {
+	if _, err := fmt.Sscan(e.read(t, "child-"+id), &pid); err != nil {
 		t.Fatal(err)
 	}
 	return pid
@@ -206,7 +206,7 @@ func childPid(t *testing.T, e *env, id string) int {
 
 func TestRunTimeoutTerm(t *testing.T) {
 	s := script(t, `sleep 30 &
-echo $! > "$LUK_WORK/child"
+echo $! > "$LUK_ROOT/child-$LUK_ID"
 wait
 `)
 	e := newRunEnv(t, fmt.Sprintf("    timeout: 300ms\n    steps:\n      - run: %s\n      - store: a\n", s))
@@ -228,7 +228,7 @@ func TestRunTimeoutKill(t *testing.T) {
 	t.Cleanup(func() { killAfter = old })
 	s := script(t, `trap '' TERM
 sleep 30 &
-echo $! > "$LUK_WORK/child"
+echo $! > "$LUK_ROOT/child-$LUK_ID"
 wait
 `)
 	e := newRunEnv(t, fmt.Sprintf("    timeout: 300ms\n    steps:\n      - run: %s\n      - store: a\n", s))
@@ -247,10 +247,6 @@ exit 3
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n", s))
 	e.runOne(t, "c1")
-	fi, err := os.Stat(filepath.Join(e.root, "work", "c1", "p", "1", "log"))
-	if err != nil || fi.Size() != 1<<20 {
-		t.Fatalf("log: %v %v", err, fi)
-	}
 	r := find(e.logs.records(t), "pipeline failed", "p")
 	if r == nil || !strings.Contains(fmt.Sprint(r["error"]), "exit status 3") {
 		t.Fatalf("logs %v", e.logs.records(t))
@@ -258,6 +254,20 @@ exit 3
 	out := fmt.Sprint(r["output"])
 	if !strings.HasSuffix(out, "tail-marker\n") || len(out) > 4096 {
 		t.Fatalf("output tail %d bytes, ends %q", len(out), out[max(0, len(out)-20):])
+	}
+}
+
+// The log of a run step is capped at 1 MiB; the next step of the pipeline
+// still sees it.
+func TestRunLogCapped(t *testing.T) {
+	big := script(t, `dd if=/dev/zero bs=65536 count=32 2>/dev/null; echo x > "$LUK_OUT/f"
+`)
+	size := script(t, `wc -c < "$LUK_WORK/../1/log" | tr -d ' \n' > "$LUK_WORK/fail"; exit 1
+`)
+	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - run: %s\n", big, size))
+	e.runOne(t, "c2")
+	if r := loadRecord(t, e.recordPath("up", "c2")); len(r.Pipelines) != 1 || r.Pipelines[0].Error != "1048576" {
+		t.Fatalf("record %+v", r.Pipelines)
 	}
 }
 
@@ -283,9 +293,7 @@ func TestRunBadOut(t *testing.T) {
 			if r == nil || r["step"] != float64(1) {
 				t.Fatalf("logs %v", e.logs.records(t))
 			}
-			if !exists(filepath.Join(e.root, "work", "b1", "p", "1", "meta.json")) {
-				t.Fatal("work dir removed")
-			}
+			gone(t, filepath.Join(e.root, "work", "b1"))
 			if ents, _ := os.ReadDir(filepath.Join(e.root, "a", "file")); len(ents) != 0 {
 				t.Fatalf("stored %v", ents)
 			}
@@ -308,9 +316,7 @@ func TestRunStoreFailureFailsPipeline(t *testing.T) {
 	if r == nil || r["step"] != float64(2) || !strings.Contains(fmt.Sprint(r["error"]), "invalid path") {
 		t.Fatalf("logs %v", e.logs.records(t))
 	}
-	if !exists(filepath.Join(e.root, "work", "sf", "p", "1", "out", "f")) {
-		t.Fatal("work dir removed")
-	}
+	gone(t, filepath.Join(e.root, "work", "sf"))
 }
 
 func TestRunSetIntoOnePathVersions(t *testing.T) {
@@ -339,7 +345,7 @@ func TestRunTimeoutKillsTermTrappingChild(t *testing.T) {
 	killAfter = 300 * time.Millisecond
 	t.Cleanup(func() { killAfter = old })
 	s := script(t, `sh -c 'trap "" TERM; while :; do sleep 1; done' >/dev/null 2>&1 &
-echo $! > "$LUK_WORK/child"
+echo $! > "$LUK_ROOT/child-$LUK_ID"
 wait
 `)
 	e := newRunEnv(t, fmt.Sprintf("    timeout: 300ms\n    steps:\n      - run: %s\n", s))
@@ -586,8 +592,8 @@ exit 3
 	if rec == nil || rec["error"] != "disk full [2J" || rec["output"] != "some output\n" {
 		t.Fatalf("log %v", rec)
 	}
-	if m := loadFailed(t, e.failedDir("up", "f1")); len(m.Failed) != 1 || m.Failed[0].Error != "disk full [2J" {
-		t.Fatalf("failed %+v", m.Failed)
+	if r := loadRecord(t, e.recordPath("up", "f1")); len(r.Pipelines) != 1 || r.Pipelines[0].Error != "disk full [2J" {
+		t.Fatalf("failed %+v", r.Pipelines)
 	}
 }
 

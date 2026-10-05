@@ -584,14 +584,14 @@ func TestListenerRoutes(t *testing.T) {
 	}
 }
 
-func TestJanitorKeepsWorkOfFailedEntry(t *testing.T) {
+func TestJanitorKeepsWorkOfQueuedEntry(t *testing.T) {
 	e := newEnv(t, nil)
 	e.cfg.Root = t.TempDir()
 	q := filepath.Join(e.cfg.Root, "queue", "up")
 	e.cfg.Endpoint = map[string]*config.Endpoint{"up": {Path: q}}
 	work := e.cfg.WorkDir()
 	old := t0.Add(-30 * 24 * time.Hour)
-	for _, id := range []string{"failed1", "orphan"} {
+	for _, id := range []string{"queued1", "failed1", "orphan"} {
 		d := filepath.Join(work, id, "p")
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			t.Fatal(err)
@@ -600,15 +600,22 @@ func TestJanitorKeepsWorkOfFailedEntry(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.MkdirAll(filepath.Join(q, "failed", "failed1"), 0o750); err != nil {
+	for _, d := range []string{filepath.Join(q, "queued1"), filepath.Join(q, "failed")} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(q, "failed", "failed1.json"), []byte("{}"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	sweep(e.cfg, e.log(), t0)
-	if !exists(filepath.Join(work, "failed1", "p")) {
-		t.Error("work dir of a failed entry removed")
+	if !exists(filepath.Join(work, "queued1", "p")) {
+		t.Error("work dir of a queued entry removed")
 	}
-	if exists(filepath.Join(work, "orphan")) {
-		t.Error("orphan work dir kept")
+	for _, id := range []string{"failed1", "orphan"} {
+		if exists(filepath.Join(work, id)) {
+			t.Errorf("work dir %s kept", id)
+		}
 	}
 }
 

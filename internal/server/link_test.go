@@ -373,8 +373,14 @@ func TestLinkReplaceFailureKeepsOld(t *testing.T) {
 			if err != nil || len(failed) != 1 {
 				t.Fatalf("failed %+v %v", failed, err)
 			}
-			if n := len(failed[0].Meta.Failed); n != len(failed[0].Meta.Pipelines) || !strings.Contains(failed[0].Meta.Failed[0].Error+failed[0].Meta.Failed[len(failed[0].Meta.Failed)-1].Error, "store copy") {
-				t.Fatalf("failures %+v", failed[0].Meta.Failed)
+			ps := failed[0].Pipelines
+			if len(ps) == 0 || !strings.Contains(ps[0].Error+ps[len(ps)-1].Error, "store copy") {
+				t.Fatalf("failures %+v", ps)
+			}
+			for _, o := range ps {
+				if o.State != pipeline.StateFailed || len(o.Stored) != 0 {
+					t.Fatalf("failures %+v", ps)
+				}
 			}
 		})
 	}

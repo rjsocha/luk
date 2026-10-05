@@ -13,42 +13,76 @@ import (
 
 	"luk/internal/queue"
 	"luk/internal/status"
+	"luk/internal/wire"
 )
 
-func (e *env) failedDir(endpoint, id string) string {
-	return filepath.Join(FailedDir(e.cfg.Endpoint[endpoint].Path), id)
+// recordPath is the failure record of id received on endpoint.
+func (e *env) recordPath(endpoint, id string) string {
+	return filepath.Join(FailedDir(e.cfg.Endpoint[endpoint].Path), id+recordExt)
 }
 
-func loadFailed(t *testing.T, dir string) QueueMeta {
+func loadRecord(t *testing.T, path string) Record {
 	t.Helper()
-	j, err := LoadJob(queue.Entry{Dir: dir, ID: filepath.Base(dir)})
+	r, err := readRecord(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return QueueMeta{Pipelines: j.Pipelines, Failed: j.Failed}
+	return r
 }
 
-func TestFailedEntryMovesToFailed(t *testing.T) {
+// outcome is the outcome of pipeline name in r.
+func outcome(t *testing.T, r Record, name string) Outcome {
+	t.Helper()
+	for _, o := range r.Pipelines {
+		if o.Pipeline == name {
+			return o
+		}
+	}
+	t.Fatalf("no outcome of %s in %+v", name, r.Pipelines)
+	return Outcome{}
+}
+
+// onlyRecord fails unless the failed/ directory of the queue directory of
+// endpoint holds the record of id and nothing else.
+func (e *env) onlyRecord(t *testing.T, endpoint, id string) {
+	t.Helper()
+	ents, err := os.ReadDir(FailedDir(e.cfg.Endpoint[endpoint].Path))
+	if err != nil || len(ents) != 1 || ents[0].Name() != id+recordExt || !ents[0].Type().IsRegular() {
+		t.Fatalf("failed/ holds %v (%v)", ents, err)
+	}
+}
+
+func TestFailureKeepsOnlyRecord(t *testing.T) {
 	e := newEnv(t, 1)
 	d := e.dispatcher()
 	j := e.enqueue(t, "f1", "up", "fail")
 	d.Submit(j)
 	d.Wait()
 	gone(t, j.Entry.Dir)
-	dir := e.failedDir("up", "f1")
-	if _, err := os.Stat(filepath.Join(dir, "payload")); err != nil {
-		t.Fatal(err)
+	e.onlyRecord(t, "up", "f1")
+	b, err := os.ReadFile(e.recordPath("up", "f1"))
+	if err != nil || strings.Contains(string(b), "data-f1") {
+		t.Fatalf("record %s %v", b, err)
 	}
-	m := loadFailed(t, dir)
-	if strings.Join(m.Pipelines, ",") != "fail" || len(m.Failed) != 1 {
-		t.Fatalf("meta %+v", m)
+	r := loadRecord(t, e.recordPath("up", "f1"))
+	if r.ID != "f1" || r.Endpoint != "up" || r.Sender != "robert.socha" || r.Origin != "robert.socha" ||
+		r.Size != int64(len("data-f1")) || r.SHA256 != j.Sidecar.SHA256 || len(r.Pipelines) != 1 {
+		t.Fatalf("record %+v", r)
 	}
-	f := m.Failed[0]
-	if f.Pipeline != "fail" || f.Step != 2 || !strings.Contains(f.Error, "exit status 1") {
-		t.Fatalf("failure %+v", f)
+	if at, err := time.Parse(time.RFC3339, r.FailedAt); err != nil || time.Since(at) > time.Minute || !r.At().Equal(at) {
+		t.Fatalf("failed_at %q %v", r.FailedAt, err)
 	}
-	if at, err := time.Parse(time.RFC3339, f.At); err != nil || time.Since(at) > time.Minute {
-		t.Fatalf("at %q %v", f.At, err)
+	o := r.Pipelines[0]
+	if o.Pipeline != "fail" || o.State != StateFailed || o.Step != 2 || !strings.Contains(o.Error, "exit status 1") ||
+		strings.Join(o.Stored, ",") != "a:robert.socha/f.txt" {
+		t.Fatalf("outcome %+v", o)
+	}
+	if at, err := time.Parse(time.RFC3339, o.At); err != nil || time.Since(at) > time.Minute {
+		t.Fatalf("at %q %v", o.At, err)
+	}
+	// The store of step 1 stays.
+	if e.read(t, "a/file/robert.socha/f.txt") != "data-f1" {
+		t.Fatal("output of a step that succeeded removed")
 	}
 }
 
@@ -59,21 +93,36 @@ func TestSuccessOnlyRemoved(t *testing.T) {
 	d.Submit(j)
 	d.Wait()
 	gone(t, j.Entry.Dir)
-	gone(t, e.failedDir("up", "s1"))
+	gone(t, e.recordPath("up", "s1"))
 }
 
-func TestMixedKeepsOnlyFailedPipelines(t *testing.T) {
+// A partial failure: the pipelines that succeeded keep what they stored
+// and the record lists them with it.
+func TestPartialFailureRecord(t *testing.T) {
 	e := newEnv(t, 1)
 	d := e.dispatcher()
-	d.Submit(e.enqueue(t, "m1", "up", "cloud", "tee", "fail"))
+	j := e.enqueueWith(t, "m1", "up", func(j *Job) {
+		j.Vars.Hostname = "db1"
+		j.Sidecar.Client = wire.Meta{File: "f.txt", Tags: []string{"prod"}}
+	}, "cloud", "tee", "fail")
+	d.Submit(j)
 	d.Wait()
-	m := loadFailed(t, e.failedDir("up", "m1"))
-	if strings.Join(m.Pipelines, ",") != "cloud,fail" || len(m.Failed) != 2 ||
-		m.Failed[0].Pipeline != "cloud" || m.Failed[1].Pipeline != "fail" {
-		t.Fatalf("meta %+v", m)
+	gone(t, j.Entry.Dir)
+	r := loadRecord(t, e.recordPath("up", "m1"))
+	if r.Origin != "db1" || r.Client.File != "f.txt" || strings.Join(r.Client.Tags, ",") != "prod" || len(r.Pipelines) != 3 ||
+		r.Pipelines[0].Pipeline != "cloud" || r.Pipelines[1].Pipeline != "fail" || r.Pipelines[2].Pipeline != "tee" {
+		t.Fatalf("record %+v", r)
 	}
-	if !strings.Contains(m.Failed[0].Error, "not supported yet") {
-		t.Fatalf("error %q", m.Failed[0].Error)
+	if o := outcome(t, r, "cloud"); o.State != StateFailed || o.Step != 2 || !strings.Contains(o.Error, "not supported yet") ||
+		strings.Join(o.Stored, ",") != "a:robert.socha/f.txt" {
+		t.Fatalf("cloud %+v", o)
+	}
+	if o := outcome(t, r, "tee"); o.State != StateOK || o.Step != 0 || o.Error != "" || len(o.Stored) != 2 ||
+		!strings.HasPrefix(o.Stored[0], "a:robert.socha/f.txt") || o.Stored[1] != "b:r-m1" {
+		t.Fatalf("tee %+v", o)
+	}
+	if e.read(t, "b/file/r-m1") != "data-m1" {
+		t.Fatal("store of a pipeline that succeeded removed")
 	}
 }
 
@@ -81,14 +130,50 @@ func TestFailedErrorCapped(t *testing.T) {
 	bad := script(t, `head -c 20000 /dev/zero | tr '\0' x; exit 3`)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n", bad))
 	e.runOne(t, "c1")
-	m := loadFailed(t, e.failedDir("up", "c1"))
-	if len(m.Failed) != 1 || len(m.Failed[0].Error) > status.MaxError || !strings.HasSuffix(m.Failed[0].Error, "xxx") {
-		t.Fatalf("meta %+v", len(m.Failed[0].Error))
+	r := loadRecord(t, e.recordPath("up", "c1"))
+	if len(r.Pipelines) != 1 || len(r.Pipelines[0].Error) > status.MaxError || !strings.HasSuffix(r.Pipelines[0].Error, "xxx") {
+		t.Fatalf("record %+v", r.Pipelines)
+	}
+}
+
+// A failure removes the work directories of every pipeline, also those
+// holding a copy of the input, and the payload: nothing of the content
+// stays.
+func TestFailureRemovesWorkAndPayload(t *testing.T) {
+	bad := script(t, `cp "$LUK_FILE" "$LUK_OUT/copy"; echo scratch > "$LUK_WORK/scratch"; echo step output; exit 1`)
+	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n", bad))
+	j := e.runOne(t, "w1")
+	gone(t, j.Entry.Dir)
+	gone(t, filepath.Join(e.cfg.WorkDir(), "w1"))
+	r := loadRecord(t, e.recordPath("up", "w1"))
+	if o := outcome(t, r, "p"); o.State != StateFailed || o.Step != 1 || !strings.Contains(o.Error, "step output") {
+		t.Fatalf("outcome %+v", o)
+	}
+}
+
+// A secret upload that fails leaves nothing of the secret: the entry of
+// the secret queue goes, the record names the secret storage.
+func TestSecretFailureKeepsNothing(t *testing.T) {
+	e := newEnv(t, 1)
+	d := e.dispatcher()
+	j := e.enqueueWith(t, "v1", "up", func(j *Job) { j.Secret = "s3" }, SecretPipeline)
+	d.Submit(j)
+	d.Wait()
+	gone(t, j.Entry.Dir)
+	e.onlyRecord(t, "up", "v1")
+	b, err := os.ReadFile(e.recordPath("up", "v1"))
+	if err != nil || strings.Contains(string(b), "data-v1") {
+		t.Fatalf("record %s %v", b, err)
+	}
+	r := loadRecord(t, e.recordPath("up", "v1"))
+	if o := outcome(t, r, SecretPipeline); r.Secret != "s3" || o.State != StateFailed || o.Step != 1 || len(o.Stored) != 0 {
+		t.Fatalf("record %+v", r)
 	}
 }
 
 func TestPendingAndResumeIgnoreFailed(t *testing.T) {
 	e := newEnv(t, 1)
+	runs := countRuns(t)
 	d := e.dispatcher()
 	d.Submit(e.enqueue(t, "r1", "up", "fail"))
 	d.Wait()
@@ -100,8 +185,8 @@ func TestPendingAndResumeIgnoreFailed(t *testing.T) {
 	d.Wait()
 	d.Pickup()
 	d.Wait()
-	if _, err := os.Stat(filepath.Join(e.failedDir("up", "r1"), "meta.json")); err != nil {
-		t.Fatal(err)
+	if !exists(e.recordPath("up", "r1")) || runs.Load() != 1 {
+		t.Fatalf("record or runs %d", runs.Load())
 	}
 	if len(e.logs.records(t)) != 0 {
 		t.Fatalf("logs %v", e.logs.records(t))
@@ -126,6 +211,7 @@ func TestStatusFailedCount(t *testing.T) {
 	if err := RemoveFailed(e.cfg, "n1"); err != nil {
 		t.Fatal(err)
 	}
+	gone(t, e.recordPath("up", "n1"))
 	d.Maintain(time.Now())
 	d.Wait()
 	for _, x := range st.Entries() {
@@ -133,105 +219,10 @@ func TestStatusFailedCount(t *testing.T) {
 			t.Fatalf("after rm %+v", x)
 		}
 	}
-	if err := RemoveFailed(e.cfg, "n1"); !errors.Is(err, ErrUnknownID) {
-		t.Fatalf("second rm: %v", err)
-	}
-}
-
-func TestRemoveFailedRemovesWork(t *testing.T) {
-	bad := script(t, `echo x > "$LUK_OUT/f"; exit 1`)
-	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n", bad))
-	e.runOne(t, "w1")
-	work := filepath.Join(e.cfg.WorkDir(), "w1", "p")
-	if !exists(work) {
-		t.Fatal("work dir of the failed pipeline removed")
-	}
-	if err := RemoveFailed(e.cfg, "w1"); err != nil {
-		t.Fatal(err)
-	}
-	gone(t, e.failedDir("up", "w1"))
-	gone(t, filepath.Join(e.cfg.WorkDir(), "w1"))
-}
-
-func retryEnv(t *testing.T) (*env, string) {
-	flag := filepath.Join(t.TempDir(), "ok")
-	s := script(t, `test -e "$FLAG" || exit 1
-ln "$LUK_FILE" "$LUK_OUT/f"
-`)
-	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n        env: {FLAG: %s}\n      - store: a\n  q:\n    endpoint: [up]\n    steps:\n      - store: c\n  r:\n    endpoint: [up]\n    steps:\n      - run: %s\n        env: {FLAG: %s}\n      - store: b\n", s, flag, s, flag))
-	return e, flag
-}
-
-func TestRetryRunsOnlyFailedPipelines(t *testing.T) {
-	e, flag := retryEnv(t)
-	st := status.New(status.Path(e.root))
-	d := e.dispatcher()
-	d.SetStatus(st)
-	j := e.enqueue(t, "t1", "up", "p", "q")
-	d.Submit(j)
-	d.Wait()
-	if !exists(filepath.Join(e.root, "c/file/t1")) {
-		t.Fatal("q not stored")
-	}
-	if err := os.WriteFile(flag, nil, 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := RetryFailed(e.cfg, "t1", nil); err != nil {
-		t.Fatal(err)
-	}
-	gone(t, e.failedDir("up", "t1"))
-	got, err := LoadJob(j.Entry)
-	if err != nil || strings.Join(got.Pipelines, ",") != "p" || len(got.Failed) != 0 {
-		t.Fatalf("queued %+v %v", got, err)
-	}
-	d.Maintain(time.Now())
-	d.Wait()
-	gone(t, j.Entry.Dir)
-	gone(t, e.failedDir("up", "t1"))
-	gone(t, filepath.Join(e.cfg.WorkDir(), "t1"))
-	if e.read(t, "a/file/robert.socha/f") != "data-t1" {
-		t.Fatal("p not stored")
-	}
-	ents, _ := os.ReadDir(filepath.Join(e.root, "c", "file"))
-	if len(ents) != 1 {
-		t.Fatalf("c holds %d entries (q rerun?)", len(ents))
-	}
-	n := 0
-	for _, r := range e.logs.records(t) {
-		if r["msg"] == "pipeline done" && r["pipeline"] == "q" {
-			n++
+	for _, id := range []string{"n1", "", ".", "..", "../n2", ".n2.json.tmp"} {
+		if err := RemoveFailed(e.cfg, id); !errors.Is(err, ErrUnknownID) {
+			t.Fatalf("rm %q: %v", id, err)
 		}
-	}
-	if n != 1 {
-		t.Fatalf("q ran %d times", n)
-	}
-	for _, x := range st.Entries() {
-		if x.Failed != 0 {
-			t.Fatalf("status %+v", x)
-		}
-	}
-}
-
-func TestRetryFailsAgain(t *testing.T) {
-	e, _ := retryEnv(t)
-	d := e.dispatcher()
-	d.Submit(e.enqueue(t, "t2", "up", "p", "r"))
-	d.Wait()
-	if _, err := RetryFailed(e.cfg, "t2", []string{"x"}); err == nil {
-		t.Fatal("unknown pipeline accepted")
-	}
-	if _, err := RetryFailed(e.cfg, "t2", []string{"r"}); err != nil {
-		t.Fatal(err)
-	}
-	gone(t, filepath.Join(e.cfg.WorkDir(), "t2", "p"))
-	d.Maintain(time.Now())
-	d.Wait()
-	m := loadFailed(t, e.failedDir("up", "t2"))
-	if strings.Join(m.Pipelines, ",") != "r" || len(m.Failed) != 1 || m.Failed[0].Pipeline != "r" {
-		t.Fatalf("meta %+v", m)
-	}
-	if _, err := RetryFailed(e.cfg, "nope", nil); !errors.Is(err, ErrUnknownID) {
-		t.Fatalf("unknown id: %v", err)
 	}
 }
 
@@ -248,21 +239,26 @@ func TestExpireFailed(t *testing.T) {
 		t.Fatalf("status %+v", es)
 	}
 	ExpireFailed(e.cfg, 0, now.Add(365*24*time.Hour), d.log)
-	if !exists(e.failedDir("up", "x1")) {
-		t.Fatal("age 0 expired the entry")
+	if !exists(e.recordPath("up", "x1")) {
+		t.Fatal("age 0 expired the record")
 	}
 	ExpireFailed(e.cfg, 3*24*time.Hour, now.Add(2*24*time.Hour), d.log)
-	if !exists(e.failedDir("up", "x1")) {
-		t.Fatal("young entry expired")
+	if !exists(e.recordPath("up", "x1")) {
+		t.Fatal("young record expired")
 	}
 	e.cfg.Limits.Failed.Age = nil
 	d.Maintain(now.Add(4 * 24 * time.Hour))
 	d.Wait()
-	gone(t, e.failedDir("up", "x1"))
-	gone(t, filepath.Join(e.cfg.WorkDir(), "x1"))
+	gone(t, e.recordPath("up", "x1"))
 	if es := st.Entries(); es[0].Failed != 0 {
 		t.Fatalf("status %+v", es)
 	}
+	for _, r := range e.logs.records(t) {
+		if r["msg"] == "failure record expired" && r["id"] == "x1" && r["pipelines"] == "p" {
+			return
+		}
+	}
+	t.Fatalf("logs %v", e.logs.records(t))
 }
 
 func TestPickupSubmitsCommittedEntries(t *testing.T) {
@@ -298,7 +294,7 @@ func TestEntryIDs(t *testing.T) {
 	d.Wait()
 	e.enqueue(t, "i2", "other", "tee")
 	ids := EntryIDs(e.cfg)
-	if !ids["i1"] || !ids["i2"] || len(ids) != 2 {
+	if !ids["i2"] || len(ids) != 1 {
 		t.Fatalf("ids %v", ids)
 	}
 }
@@ -326,17 +322,59 @@ func countRuns(t *testing.T) *atomic.Int32 {
 	return &n
 }
 
-// A failed entry that cannot be moved to failed/ is parked: Pickup never
-// runs its pipelines again, it retries the move after the backoff.
-func TestFailedEntryParkedWhenNotMovable(t *testing.T) {
+// A record that cannot be written does not keep the upload: the entry and
+// its payload go all the same, with an error logged.
+func TestRecordFailureStillRemovesPayload(t *testing.T) {
+	e := newEnv(t, 1)
+	d := e.dispatcher()
+	defer d.Close()
+	runs := countRuns(t)
+	failQueue(t, map[string]bool{"record": true})
+	j := e.enqueue(t, "p2", "up", "fail")
+	d.Submit(j)
+	d.Wait()
+	d.Pickup()
+	d.Wait()
+	gone(t, j.Entry.Dir)
+	gone(t, e.recordPath("up", "p2"))
+	gone(t, filepath.Join(e.cfg.WorkDir(), "p2"))
+	if runs.Load() != 1 || len(d.parked) != 0 {
+		t.Fatalf("runs %d parked %v", runs.Load(), d.parked)
+	}
+	var found bool
+	for _, r := range e.logs.records(t) {
+		if r["msg"] == "failure record not written, the upload is removed all the same" && r["level"] == "ERROR" && r["pipelines"] == "fail" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("logs %s", e.logs.b.String())
+	}
+}
+
+// A failed entry that cannot be removed is parked: Pickup never runs its
+// pipelines again, it tries the removal again after the backoff; the
+// record is written once.
+func TestFailedEntryParkedWhenNotRemovable(t *testing.T) {
 	e := newEnv(t, 1)
 	d := e.dispatcher()
 	defer d.Close()
 	clock := time.Now()
 	d.now = func() time.Time { return clock }
 	runs := countRuns(t)
-	fail := map[string]bool{"commit": true, "move": true}
-	failQueue(t, fail)
+	var records atomic.Int32
+	fail := map[string]bool{"remove": true}
+	old := hookQueue
+	hookQueue = func(op string, en queue.Entry) error {
+		if op == "record" {
+			records.Add(1)
+		}
+		if fail[op] {
+			return fmt.Errorf("simulated %s failure", op)
+		}
+		return nil
+	}
+	t.Cleanup(func() { hookQueue = old })
 	j := e.enqueue(t, "p1", "up", "fail")
 	d.Submit(j)
 	d.Wait()
@@ -350,11 +388,14 @@ func TestFailedEntryParkedWhenNotMovable(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(j.Entry.Dir, "meta.json")); err != nil {
 		t.Fatal(err)
 	}
+	if !exists(e.recordPath("up", "p1")) {
+		t.Fatal("no record while parked")
+	}
 	if !strings.Contains(e.logs.b.String(), "queue entry parked") {
 		t.Fatalf("logs %s", e.logs.b.String())
 	}
 	// Not due yet: still parked when the disk is back.
-	fail["commit"], fail["move"] = false, false
+	fail["remove"] = false
 	clock = clock.Add(30 * time.Second)
 	d.Pickup()
 	d.Wait()
@@ -365,35 +406,12 @@ func TestFailedEntryParkedWhenNotMovable(t *testing.T) {
 	d.Pickup()
 	d.Wait()
 	gone(t, j.Entry.Dir)
-	m := loadFailed(t, e.failedDir("up", "p1"))
-	if len(m.Failed) != 1 || m.Failed[0].Pipeline != "fail" || runs.Load() != 1 {
-		t.Fatalf("meta %+v runs %d", m, runs.Load())
+	r := loadRecord(t, e.recordPath("up", "p1"))
+	if len(r.Pipelines) != 1 || r.Pipelines[0].Pipeline != "fail" || runs.Load() != 1 || records.Load() != 1 {
+		t.Fatalf("record %+v runs %d records %d", r, runs.Load(), records.Load())
 	}
 	if len(d.parked) != 0 {
 		t.Fatalf("parked %v", d.parked)
-	}
-}
-
-// A meta.json that cannot be written does not stop the move to failed/:
-// the entry is there with the meta of its last update.
-func TestFailedEntryMovedWithoutMeta(t *testing.T) {
-	e := newEnv(t, 1)
-	d := e.dispatcher()
-	defer d.Close()
-	runs := countRuns(t)
-	failQueue(t, map[string]bool{"commit": true})
-	j := e.enqueue(t, "p2", "up", "fail")
-	d.Submit(j)
-	d.Wait()
-	d.Pickup()
-	d.Wait()
-	gone(t, j.Entry.Dir)
-	m := loadFailed(t, e.failedDir("up", "p2"))
-	if strings.Join(m.Pipelines, ",") != "fail" || runs.Load() != 1 {
-		t.Fatalf("meta %+v runs %d", m, runs.Load())
-	}
-	if !strings.Contains(e.logs.b.String(), "moved to failed without its failures recorded") {
-		t.Fatalf("logs %s", e.logs.b.String())
 	}
 }
 
@@ -427,7 +445,7 @@ func TestDoneEntryParkedWhenNotRemovable(t *testing.T) {
 	d.Pickup()
 	d.Wait()
 	gone(t, j.Entry.Dir)
-	gone(t, e.failedDir("up", "p3"))
+	gone(t, e.recordPath("up", "p3"))
 	if runs.Load() != 1 {
 		t.Fatalf("runs %d", runs.Load())
 	}

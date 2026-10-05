@@ -100,7 +100,7 @@ func completeOwner(cmd *cobra.Command, _ []string, toComplete string) ([]cobra.C
 	return completeNames(names, toComplete)
 }
 
-// completeFailedID offers the ids of the failed queue entries.
+// completeFailedID offers the ids of the failure records.
 func completeFailedID(cmd *cobra.Command, _ []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
 	cfg := completeConfig(cmd)
 	if cfg == nil {
@@ -112,29 +112,6 @@ func completeFailedID(cmd *cobra.Command, _ []string, toComplete string) ([]cobr
 		ids = append(ids, f.ID)
 	}
 	return completeNames(ids, toComplete)
-}
-
-// completeFailedPipeline offers the failed pipelines of the entry given
-// with --id, or every pipeline without it.
-func completeFailedPipeline(cmd *cobra.Command, _ []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
-	cfg := completeConfig(cmd)
-	if cfg == nil {
-		return nil, cobra.ShellCompDirectiveNoFileComp
-	}
-	id := cmd.Flag("id").Value.String()
-	if id == "" {
-		return completeNames(slices.Collect(maps.Keys(cfg.Pipeline)), toComplete)
-	}
-	list, _ := pipeline.ListFailed(cfg)
-	var names []string
-	for _, f := range list {
-		if f.ID == id {
-			for _, x := range f.Meta.Failed {
-				names = append(names, x.Pipeline)
-			}
-		}
-	}
-	return completeNames(names, toComplete)
 }
 
 // completeACMEHost offers the certificate names of the acme listeners.

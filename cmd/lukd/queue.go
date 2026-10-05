@@ -16,28 +16,15 @@ import (
 	"luk/internal/status"
 )
 
-type queuePipeline struct {
-	Pipeline string `json:"pipeline"`
-	Step     int    `json:"step"`
-	Error    string `json:"error"`
-	FailedAt string `json:"failed_at"`
-}
-
-type queueItem struct {
-	ID        string          `json:"id"`
-	Endpoint  string          `json:"endpoint"`
-	Sender    string          `json:"sender"`
-	FailedAt  string          `json:"failed_at"`
-	Pipelines []queuePipeline `json:"pipelines"`
-}
-
 func queueCmd(cfgPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "queue",
-		Short: "Failed queue entries",
-		Long: "Failed queue entries. The commands work on files and may run while lukd runs.\n" +
-			"Run as root they run again as the owner of root (the service user), so the\n" +
-			"files stay readable by lukd.",
+		Short: "Failure records of uploads",
+		Long: "Failure records of uploads. An upload whose pipelines ended with a failure\n" +
+			"is deleted; what stays is its record: what the upload was and how each\n" +
+			"pipeline ended. The sender sends the upload again. The commands work on\n" +
+			"files and may run while lukd runs. Run as root they run again as the owner\n" +
+			"of root (the service user), so the files stay readable by lukd.",
 		PersistentPreRunE: func(*cobra.Command, []string) error {
 			cfg, err := config.Load(*cfgPath)
 			if err != nil {
@@ -49,7 +36,7 @@ func queueCmd(cfgPath *string) *cobra.Command {
 	var asJSON bool
 	ls := &cobra.Command{
 		Use:   "ls",
-		Short: "List the failed entries",
+		Short: "List the failure records",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(*cfgPath)
@@ -68,7 +55,7 @@ func queueCmd(cfgPath *string) *cobra.Command {
 	var rmID string
 	rm := &cobra.Command{
 		Use:   "rm",
-		Short: "Remove a failed entry and its work directories",
+		Short: "Remove a failure record",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(*cfgPath)
@@ -86,51 +73,16 @@ func queueCmd(cfgPath *string) *cobra.Command {
 	rm.MarkFlagRequired("id")
 	completeFlags(rm, map[string]cobra.CompletionFunc{"id": completeFailedID})
 
-	var retryID string
-	var retryPipes []string
-	retry := &cobra.Command{
-		Use:   "retry",
-		Short: "Put a failed entry back into the queue",
-		Long: "Put a failed entry back into the queue with its failed pipelines, or only\n" +
-			"those given with --pipeline. A running lukd picks it up within a minute,\n" +
-			"otherwise it runs at the next start.",
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(*cfgPath)
-			if err != nil {
-				return err
-			}
-			run, err := pipeline.RetryFailed(cfg, retryID, retryPipes)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: queued (%s), lukd runs it within a minute\n", retryID, strings.Join(run, ","))
-			return nil
-		},
-	}
-	retry.Flags().StringVar(&retryID, "id", "", "entry id")
-	retry.Flags().StringArrayVar(&retryPipes, "pipeline", nil, "failed pipeline to run again (repeatable; default: all)")
-	retry.MarkFlagRequired("id")
-	completeFlags(retry, map[string]cobra.CompletionFunc{"id": completeFailedID, "pipeline": completeFailedPipeline})
-
-	cmd.AddCommand(ls, rm, retry)
+	cmd.AddCommand(ls, rm)
 	return cmd
 }
 
-func printFailed(w io.Writer, list []pipeline.FailedEntry, asJSON bool, now time.Time) error {
+func printFailed(w io.Writer, list []pipeline.Record, asJSON bool, now time.Time) error {
 	if asJSON {
-		items := []queueItem{}
-		for _, f := range list {
-			it := queueItem{ID: f.ID, Endpoint: f.Meta.Sidecar.Endpoint, Sender: f.Meta.Sidecar.Sender, Pipelines: []queuePipeline{}}
-			if !f.At.IsZero() {
-				it.FailedAt = f.At.UTC().Format(time.RFC3339)
-			}
-			for _, x := range f.Meta.Failed {
-				it.Pipelines = append(it.Pipelines, queuePipeline{Pipeline: x.Pipeline, Step: x.Step, Error: x.Error, FailedAt: x.At})
-			}
-			items = append(items, it)
+		if list == nil {
+			list = []pipeline.Record{}
 		}
-		b, err := json.MarshalIndent(items, "", "  ")
+		b, err := json.MarshalIndent(list, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -138,16 +90,22 @@ func printFailed(w io.Writer, list []pipeline.FailedEntry, asJSON bool, now time
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tENDPOINT\tSENDER\tPIPELINE\tSTEP\tFAILED AT\tAGE\tERROR")
-	for _, f := range list {
-		for _, x := range f.Meta.Failed {
-			age := "-"
-			if at, err := time.Parse(time.RFC3339, x.At); err == nil {
+	fmt.Fprintln(tw, "ID\tENDPOINT\tSENDER\tPIPELINE\tSTATE\tSTEP\tAT\tAGE\tDETAIL")
+	for _, r := range list {
+		for _, o := range r.Pipelines {
+			age, step, detail := "-", "-", status.OneLine(o.Error)
+			if at, err := time.Parse(time.RFC3339, o.At); err == nil {
 				age = formatAge(now.Sub(at))
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", status.Clean(f.ID), dash(status.Clean(f.Meta.Sidecar.Endpoint)),
-				dash(status.Clean(f.Meta.Sidecar.Sender)), status.Clean(x.Pipeline), strconv.Itoa(x.Step),
-				dash(status.Clean(x.At)), age, dash(status.OneLine(x.Error)))
+			if o.Failed() {
+				step = strconv.Itoa(o.Step)
+			}
+			if !o.Failed() || detail == "" {
+				detail = status.OneLine(strings.Join(o.Stored, ","))
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", status.Clean(r.ID), dash(status.Clean(r.Endpoint)),
+				dash(status.Clean(r.Sender)), status.Clean(o.Pipeline), status.Clean(o.State), step,
+				dash(status.Clean(o.At)), age, dash(detail))
 		}
 	}
 	return tw.Flush()

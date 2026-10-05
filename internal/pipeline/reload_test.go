@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +46,7 @@ func TestReloadKeepsRunningPipeline(t *testing.T) {
 	close(release)
 	d.Wait()
 	gone(t, j.Entry.Dir)
-	gone(t, filepath.Join(FailedDir(filepath.Dir(j.Entry.Dir)), "r1"))
+	gone(t, e.recordPath("up", "r1"))
 	if e.read(t, "a/file/robert.socha/f.txt") != "data-r1" || e.read(t, "b/file/r-r1") != "data-r1" {
 		t.Fatal("not stored")
 	}
@@ -60,12 +59,10 @@ func TestReloadRemovedPipelineFails(t *testing.T) {
 	j := e.enqueue(t, "r2", "up", "tee")
 	d.Submit(j)
 	d.Wait()
-	f, err := readFailed(filepath.Join(FailedDir(filepath.Dir(j.Entry.Dir)), "r2"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(f.Meta.Failed) != 1 || f.Meta.Failed[0].Pipeline != "tee" || f.Meta.Failed[0].Error != "pipeline not in the config" {
-		t.Fatalf("%+v", f.Meta.Failed)
+	gone(t, j.Entry.Dir)
+	r := loadRecord(t, e.recordPath("up", "r2"))
+	if len(r.Pipelines) != 1 || r.Pipelines[0].Pipeline != "tee" || r.Pipelines[0].Error != "pipeline not in the config" {
+		t.Fatalf("%+v", r.Pipelines)
 	}
 }
 

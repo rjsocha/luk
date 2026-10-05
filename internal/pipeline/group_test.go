@@ -164,7 +164,7 @@ func TestGroupOrder(t *testing.T) {
 	g.open("free")
 	d.Wait()
 	gone(t, j.Entry.Dir)
-	gone(t, filepath.Join(FailedDir(filepath.Dir(j.Entry.Dir)), "o1"))
+	gone(t, e.recordPath("up", "o1"))
 	if e.read(t, "s/file/r-o1") != "data-o1" {
 		t.Fatal("not stored")
 	}
@@ -181,27 +181,28 @@ func TestGroupFailureSkipsLaterOrders(t *testing.T) {
 	d.Wait()
 	g.expect(t, "f1/bad", "f1/hok", "f1/free")
 	g.quiet(t)
-	f, err := readFailed(filepath.Join(FailedDir(filepath.Dir(j.Entry.Dir)), "f1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(f.Meta.Pipelines, ","); got != "after,bad,last" {
-		t.Fatalf("pipelines %s", got)
-	}
-	for _, x := range f.Meta.Failed {
+	gone(t, j.Entry.Dir)
+	r := loadRecord(t, e.recordPath("up", "f1"))
+	var names []string
+	for _, x := range r.Pipelines {
+		names = append(names, x.Pipeline)
 		switch x.Pipeline {
 		case "bad":
-			if x.Step != 2 {
+			if x.State != StateFailed || x.Step != 2 || len(x.Stored) != 1 {
+				t.Fatalf("%+v", x)
+			}
+		case "hok", "free":
+			if x.State != StateOK || x.Error != "" || len(x.Stored) != 1 {
 				t.Fatalf("%+v", x)
 			}
 		default:
-			if x.Step != 0 || x.Error != "not run: bad failed" {
+			if x.State != StateNotRun || x.Step != 0 || x.Error != "not run: bad failed" || len(x.Stored) != 0 {
 				t.Fatalf("%+v", x)
 			}
 		}
 	}
-	if f.Meta.Stages["after"] != (Stage{Group: "h", Order: 2}) {
-		t.Fatalf("stages %+v", f.Meta.Stages)
+	if got := strings.Join(names, ","); got != "after,bad,free,hok,last" {
+		t.Fatalf("pipelines %s", got)
 	}
 	recs := e.logs.records(t)
 	for _, n := range []string{"after", "last"} {
@@ -222,27 +223,6 @@ func TestGroupFailureSkipsLaterOrders(t *testing.T) {
 		}
 	}
 
-	// The retry runs bad first, then after, then last; hok is not rerun.
-	if err := os.WriteFile(filepath.Join(e.root, "ok"), nil, 0o640); err != nil {
-		t.Fatal(err)
-	}
-	run, err := RetryFailed(e.cfg, "f1", nil)
-	if err != nil || strings.Join(run, ",") != "after,bad,last" {
-		t.Fatalf("%v %v", run, err)
-	}
-	g = newGates(t, "bad", "after")
-	d.Pickup()
-	g.expect(t, "f1/bad")
-	g.quiet(t)
-	g.open("bad")
-	g.expect(t, "f1/after")
-	g.quiet(t)
-	g.open("after")
-	g.expect(t, "f1/last")
-	d.Wait()
-	g.quiet(t)
-	gone(t, j.Entry.Dir)
-	gone(t, filepath.Join(FailedDir(filepath.Dir(j.Entry.Dir)), "f1"))
 }
 
 func TestGroupConcurrencyAcrossUploads(t *testing.T) {

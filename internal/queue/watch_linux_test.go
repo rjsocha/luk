@@ -2,7 +2,6 @@ package queue
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -64,22 +63,6 @@ func TestWatchWakesOnCommit(t *testing.T) {
 	commitEntry(t, early)
 	if !woken(w, time.Second) {
 		t.Fatal("no wakeup on commit of an entry received before the watch")
-	}
-}
-
-func TestWatchWakesOnEntryMovedIn(t *testing.T) {
-	dir := t.TempDir()
-	parked := filepath.Join(dir, FailedName)
-	if err := os.Mkdir(parked, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	commitEntry(t, receive(t, parked, "id-1"))
-	w := startWatch(t, dir)
-	if err := os.Rename(filepath.Join(parked, "id-1"), filepath.Join(dir, "id-1")); err != nil {
-		t.Fatal(err)
-	}
-	if !woken(w, time.Second) {
-		t.Fatal("no wakeup on an entry moved into the queue")
 	}
 }
 

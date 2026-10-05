@@ -35,7 +35,7 @@ const (
 	// reconciles the content objects (see store.Local.MaintainObjects)
 	// and removes store crash leftovers and empty directories of every
 	// local storage, and work directories older than 7 days whose id has
-	// no queue entry (a failed entry keeps them).
+	// no queue entry.
 	Maintain
 )
 

@@ -11,13 +11,13 @@ import (
 )
 
 const (
-	dirMask   = syscall.IN_CREATE | syscall.IN_MOVED_TO | syscall.IN_ONLYDIR
+	dirMask   = syscall.IN_CREATE | syscall.IN_ONLYDIR
 	entryMask = syscall.IN_MOVED_TO | syscall.IN_MOVE_SELF | syscall.IN_ONLYDIR
 )
 
 // Watch signals a commit in any of dirs with inotify: meta.json renamed into
-// an entry directory, or an entry directory moved into the queue (retry).
-// Every queue directory must be watchable; it stops when ctx is done.
+// an entry directory. Every queue directory must be watchable; it stops
+// when ctx is done.
 func Watch(ctx context.Context, dirs []string) (*Watcher, error) {
 	fd, err := syscall.InotifyInit1(syscall.IN_CLOEXEC | syscall.IN_NONBLOCK)
 	if err != nil {
@@ -119,11 +119,7 @@ func (w *watch) event(wd int, mask uint32, name string) {
 		if name == FailedName || mask&syscall.IN_ISDIR == 0 {
 			return
 		}
-		if mask&syscall.IN_MOVED_TO != 0 {
-			w.wake()
-		} else {
-			w.addEntry(filepath.Join(w.queues[wd], name))
-		}
+		w.addEntry(filepath.Join(w.queues[wd], name))
 	case w.entries[wd] != "":
 		if mask&syscall.IN_MOVE_SELF != 0 {
 			w.rc.Control(func(fd uintptr) { syscall.InotifyRmWatch(int(fd), uint32(wd)) })

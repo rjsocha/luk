@@ -158,8 +158,8 @@ type Limits struct {
 	Failed FailedLimits `yaml:"failed"`
 }
 
-// FailedLimits: Age is how long a failed queue entry is kept; 0 keeps it
-// until it is removed or retried.
+// FailedLimits: Age is how long a failure record is kept; 0 keeps it
+// until it is removed.
 type FailedLimits struct {
 	Age *Duration `yaml:"age"`
 }

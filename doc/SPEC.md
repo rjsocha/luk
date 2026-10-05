@@ -860,8 +860,9 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   storages: the link keeps its old content and the other storages get
   nothing new. A failed replace fails every pipeline of the entry (the
   one that failed with its step and error, the others at step 0 with
-  `replace not published: pipeline <name> failed`) and the entry goes to
-  the failed queue; a retry runs them all again. A crash between the
+  `replace not published: pipeline <name> failed`) and the upload is
+  dropped with a failure record (see Failures); the sender sends the
+  replace again. A crash between the
   ordinary stores and the replace of the link, or during that replace
   (rolled back as above), leaves the entry in the queue; it runs again
   at the next start. A link that declares an alias
@@ -952,8 +953,8 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   names with a live version is 409 `limit of <max> permanent names of
   this pattern reached`. The store checks again under the base lock (an
   upload of a new name queued meanwhile, a reload): a version the
-  endpoint no longer allocates, or one over `max`, fails the store and
-  the entry goes to `failed/`. `luk send` refuses `--permanent` with
+  endpoint no longer allocates, or one over `max`, fails the store (see
+  Failures). `luk send` refuses `--permanent` with
   `--once`, `--secret`, `--portal`, `--private`, `--mutable`,
   `--pretty-url` or `--links` above 1 itself (usage error).
 - Versions: each upload is an ordinary stored file of the respond
@@ -986,8 +987,8 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
     once, logged as `permanent version superseded`. This holds also
     while the name is empty: the version published last is recorded
     beside it (`current.last`, see On disk) and outlives it;
-  - the version published last itself (a retry of its store): it stays
-    current.
+  - the version published last itself (its store run again after an
+    interruption): it stays current.
 - Gone: when the current version goes (`luk link --rm`, `lukd storage
   rm`, retention, a replace of its stored name) or expires, the name is
   empty and answers 404 until a later version is published. The expiry
@@ -1488,9 +1489,10 @@ expose:
   `--private` on a `reveal` upload stays invalid meta.
 - The process role stores a secret as a pipeline named `.secret` (a
   configured pipeline name never starts with a dot): one store step into
-  the secret storage. A failed store moves the entry to `failed/` of the
-  secret queue, shown by `lukd queue ls` and counted in `status.json`
-  under that name, retried with `lukd queue retry` like any entry.
+  the secret storage. A failed store deletes the secret like any failed
+  upload (see Failures): nothing of it stays, the failure record goes to
+  `failed/` of the secret queue, shown by `lukd queue ls` and counted in
+  `status.json` under that name; the sender sends the secret again.
 - Space: the queue reservation works per filesystem as for any queue
   (the tmpfs is a filesystem of its own), but the free space kept on the
   filesystem of `secret.path` is `secret.reserve` (a size, default
@@ -1600,7 +1602,7 @@ limits:                               # connection level, all listeners; optiona
   header:
     timeout: 10s                      # reading request headers, including the TLS handshake
   failed:
-    age: 3d                           # failed queue entries are removed after it; 0 keeps them
+    age: 3d                           # failure records are removed after it; 0 keeps them
 
 log:
   level: info                         # debug, info (the default), warn or error; both roles, live on reload
@@ -1884,13 +1886,13 @@ In-flight work keeps the configuration it started with:
   the reload removed it, its storage or its endpoint. Queue entries not
   started yet use the configuration current when their pipeline starts:
   a pipeline that no longer exists fails (`pipeline not in the config`,
-  entry to `failed/`, retryable with `lukd queue retry` once it is back);
-  a storage that no longer exists fails its store step the same way.
+  see Failures); a storage that no longer exists fails its store step
+  the same way.
 - Queue entries of an endpoint removed by a reload are still picked up
   by the running process (its queue directory stays watched until the
-  next restart). Their failed entries are listed by `lukd queue`, counted
-  in the status and expired only while an endpoint uses that queue
-  directory.
+  next restart). Their failure records are listed by `lukd queue`,
+  counted in the status and expired only while an endpoint uses that
+  queue directory.
 - `queue.concurrency` of a pipeline: a new limit applies to the
   pipelines started after the reload; running ones are neither stopped
   nor counted out (a lower limit lets new runs start once enough of them
@@ -1992,7 +1994,8 @@ directory path, and `lukd run` refuses any other name (see Jobs with
 other users).
 
 Failure: the steps already done stay done (a `store` before a failed
-`run` keeps its files). The upload is marked failed with the step number.
+`run` keeps its files). The upload is dropped with a failure record
+naming the step (see Failures).
 
 Queue: the body streams (never buffered in memory) into a temporary file
 in `<endpoint path>/<id>/`, hashed on the way; on a size or sha256
@@ -2004,20 +2007,85 @@ fallback (see Service). A
 stream without a signed size cannot be checked for space up front: the
 server stops it with 507 when the free space drops below the reserve
 while receiving. The queue entry is removed once all its pipelines
-finished; when at least one of them failed it moves to the failed queue
-instead (see Phase 5). When that removal or move fails (a full disk,
-an I/O error) the entry is parked in the running `lukd process`: its
-pipelines do not run again, only the removal or move is retried, after
+ended, whether they succeeded or not (see Failures). When that removal
+fails (an I/O error) the entry is parked in the running `lukd process`:
+its pipelines do not run again, only the removal is tried again, after
 a minute and then doubling up to an hour, with an ERROR log line
 `queue entry parked` per try; a restart forgets it and runs its
-pending pipelines again. The move to the failed queue is a rename and
-is tried even when its `meta.json` could not be rewritten; the entry
-then keeps the `meta.json` of its last update, logged as `queue entry
-moved to failed without its failures recorded`. A queued
-upload whose pipeline no longer exists (configuration reloaded in
-between) fails that pipeline (`pipeline not in the config`) and moves to
-the failed queue, from where `lukd queue retry` runs it once the pipeline
-is back (see Reload).
+pending pipelines again. A queued upload whose pipeline no longer
+exists (configuration reloaded in between) fails that pipeline
+(`pipeline not in the config`, see Reload).
+
+### Failures
+
+Simple ingest: failures are reported, the source resends. lukd keeps
+nothing of an upload whose processing failed and never runs it again;
+the sender (a backup job, CI) sees the failure in monitoring and sends
+the upload again, a new upload with its own id and acceptance order.
+
+- When the pipelines of an upload all ended and one or more of them
+  failed, lukd writes its failure record, then removes the work
+  directories of the upload and its queue entry (the payload and any
+  copy in the entry). The work directories go like on success, also
+  those of the failed steps, which may hold plaintext copies of the
+  input; the record keeps the output tail of the failed step in its
+  `error`.
+- Pipelines are independent: what a pipeline that succeeded stored, and
+  what the earlier steps of a failed pipeline stored, stays where it is
+  (an encrypted copy stored before a relay that failed stays; the
+  record says the relay failed). Queue groups keep their rule: the later
+  orders of a group are not run after a failure, and the record lists
+  them as not run.
+- The same holds for a secret upload (see Volatile secrets): nothing of
+  the secret is kept.
+- A record that cannot be written (a full disk) does not keep the
+  upload: the payload is removed all the same, with an ERROR log line
+  `failure record not written, the upload is removed all the same`;
+  `status.json` still has the failure (`last_failure`, `error`). The
+  record is written once: a parked entry (see Queue) only tries its
+  removal again.
+- The record is `<queue dir>/failed/<id>.json` (written to a temporary
+  file, synced and renamed into place): no payload, no plaintext, only
+  what the upload was and how each pipeline ended:
+
+```json
+{
+  "id": "20261005T101500Z-0a1b2c3d",
+  "endpoint": "backup",
+  "sender": "hosts:db1.example.net",
+  "origin": "db1",
+  "received": "2026-10-05T10:15:00Z",
+  "accepted": 1791195300123456789,
+  "size": 1027604480,
+  "sha256": "...",
+  "client": {"file": "db.sql.zst", "source": "file", "tags": ["prod"], "portal": "direct",
+             "backup": {"hostname": "db1", "path": "/var/backups/db.sql.zst"}},
+  "failed_at": "2026-10-05T10:16:02Z",
+  "pipelines": [
+    {"pipeline": "archive", "state": "failed", "step": 3, "error": "relay s3-upload: exit status 1\n...",
+     "at": "2026-10-05T10:16:01Z", "stored": ["archive:db1/db.sql.zst.gpg"]},
+    {"pipeline": "devdb", "state": "not_run", "step": 0, "error": "not run: archive failed",
+     "at": "2026-10-05T10:16:01Z"},
+    {"pipeline": "local", "state": "ok", "step": 0, "at": "2026-10-05T10:15:30Z",
+     "stored": ["local:db1/db.sql.zst"]}
+  ]
+}
+```
+
+  `origin` is the backup hostname, else the sender; `client` the client
+  meta of the upload (what the sender signed; the owner key is not part
+  of it); `secret` the
+  secret storage of a secret upload; `accepted_seq` as in the sidecar.
+  Per pipeline, sorted by name: `state` (`ok`, `failed`, `not_run`),
+  `step` (of a failure; 0 before the first step), `error` (up to 4 KiB,
+  with the output tail), `at` (when it ended) and `stored` (what it
+  stored, `<storage>:<path>`, ` (dedup)` appended to a deduplicated
+  store; also for a failed pipeline, from the steps before the failure).
+- An interrupted pipeline (shutdown) is no result: the entry stays in
+  the queue with the results so far and the pipeline runs again from its
+  first step at the next start.
+- `lukd queue ls / rm`, `limits.failed.age`, the `failed` counts of
+  `status.json` and monitoring work on the records (see Phase 5).
 
 ### Acceptance order
 
@@ -2101,18 +2169,13 @@ pipeline:
   of that group do not run for that upload: each is recorded as failed
   at step 0 with the error `not run: <pipeline> failed` (the first
   failed pipeline of the order by name), logged as `pipeline skipped`
-  with that `reason`, and shown as a failure in `status.json`. The entry
-  goes to the failed queue with all of them listed. Other groups and the
-  pipelines without a group are not affected.
-- `lukd queue retry` puts the failed pipelines back (the failed one and
-  those not run; the pipelines that succeeded are never rerun) and they
-  run in the same group order: the previously failed one first, then the
-  ones not run. With `--pipeline` only the named ones run, in their order
-  among themselves.
+  with that `reason`, and shown as a failure in `status.json`. The
+  failure record lists them as `not_run` (see Failures). Other groups
+  and the pipelines without a group are not affected.
 - The group and order of the matched pipelines are fixed when the upload
   is received (kept in the queue entry with the pipelines), so a reload
-  changes them for the uploads received after it; a queued, running or
-  retried upload keeps them. A queue entry written by a lukd without
+  changes them for the uploads received after it; a queued or running
+  upload keeps them. A queue entry written by a lukd without
   groups has none: its pipelines run concurrently.
 - A link replace ignores groups: its pipelines (store steps only) run as
   one publish (see Links).
@@ -2708,8 +2771,7 @@ pipeline:
     answers and in a dry run too; nothing is stored.
   - At store, for content whose hash was not known up front (a stream):
     a store step that would add one name more fails for that storage with
-    the same message, and the entry goes to `failed/` like any store
-    failure. A replace through the link into that content counts too; a
+    the same message, like any store failure (see Failures). A replace through the link into that content counts too; a
     store over the same name without versions (`conflict: replace`) does
     not add one.
   - Only storages with `hardlink` keep the index and enforce the limit;
@@ -3353,10 +3415,10 @@ systemctl enable --now lukd
 - `lukd process` (`deploy/lukd-process.service`): no listener. At start it
   submits the committed queue entries, then picks up new ones at once:
   inotify on every queue directory wakes it when `meta.json` is renamed
-  into an entry or an entry is moved back into the queue. A poll every 5
+  into an entry. A poll every 5
   seconds is the fallback (lost events, queue overflow, inotify not
   available); an entry already running is skipped. It runs the pipelines
-  (run and store steps), keeps `failed/` and `status.json` (loaded at
+  (run and store steps), keeps the failure records and `status.json` (loaded at
   start, results, failed counts, watch evaluations) and does the storage
   maintenance of the janitor (retention, aliases, catalog rebuild,
   content objects, crash leftovers, old work directories), followed by
@@ -4545,10 +4607,9 @@ disk. Test on lukd.vm / luk.vm.
   the sidecar's `size` and `sha256` are the file's own and `produced`
   holds its name (absent for the uploaded payload); downloads use it as
   the file name.
-- A finished pipeline removes its work directories; a failed one keeps
-  them for inspection as long as its entry stays in the failed queue
-  (Phase 5). The janitor removes work directories without a queue entry
-  after 7 days.
+- A pipeline removes its work directories when it ends, failed or not
+  (see Failures); the failure record keeps the output tail. The janitor
+  removes work directories without a queue entry after 7 days.
 
 ### Phase 4 - catalog and aliases
 
@@ -4642,32 +4703,28 @@ disk. Test on lukd.vm / luk.vm.
   A record evaluated more than 10 minutes ago is UNKNOWN (`evaluated
   2h 5m ago, is lukd process running? last: ...`): the process role
   evaluates every minute.
-- `failed` per entry is the number of uploads waiting in the failed
-  queue. `contrib/checkmk/luk_status` is the checkmk local check (installed
+- `failed` per entry is the number of failure records with that
+  pipeline failed or not run. `contrib/checkmk/luk_status` is the checkmk local check (installed
   to `/usr/lib/check_mk_agent/local/`); its thresholds live in
   `/etc/site/luk/check.conf`.
-- Failed queue. An entry that finished with at least one failed pipeline
-  is not removed: it moves atomically (rename) from `<queue dir>/<id>` to
-  `<queue dir>/failed/<id>`, and its `meta.json` holds only the failed
-  pipelines plus, per pipeline, `step` (0: before the first step),
-  `error` (up to 4 KiB, with the output tail) and `at` (failure time).
-  Pipelines that succeeded are never run again. An entry with successes
-  only is removed; an interrupted one (shutdown) stays in the queue as
-  before, keeping the failures seen so far. Resume and the pickup below
-  ignore `failed/`.
-- The work directories of the failed pipelines stay while the entry is in
-  `failed/` and are removed with it.
+- Failure records (see Failures). An upload whose pipelines all ended
+  with one or more failures is deleted (its queue entry with the payload
+  and its work directories) and leaves only its record in
+  `<queue dir>/failed/<id>.json`; nothing runs it again, the sender
+  sends it again. An upload with successes only is removed without a
+  record; an interrupted one (shutdown) stays in the queue as before,
+  keeping the results seen so far. Resume and the pickup ignore
+  `failed/`.
 - `limits.failed.age` (default `3d`, `0` never expires): the janitor
-  removes a failed entry whose newest failure is older, with its work
-  directories.
-- `failed` in status.json is the number of entries in `failed/` with that
-  pipeline failed and that sender. It is computed from the `failed/`
-  directories at start, after each move and on every janitor pass (every
+  removes a record written longer ago (`failed_at`), logged as `failure
+  record expired`.
+- `failed` in status.json is the number of records with that pipeline
+  failed or not run and that sender. It is computed from the records at
+  start, after each record written and on every janitor pass (every
   minute), so the commands below show up in status.json within a minute.
   `last_failure`, `failed_step` and `error` stay as history.
 - Monitoring: `failed` > 0 is CRIT (the checkmk check shows the last error
-  and points to `lukd queue`). Only `rm`, a successful `retry` or expiry
-  clears it.
+  and points to `lukd queue ls / rm`). Only `rm` or expiry clears it.
 - Commands (read the config given by `-c` for `root` and the queue
   directories, work on files and may run while lukd runs). The files must
   stay owned by the service user, so they run as the owner of the `root`
@@ -4678,16 +4735,13 @@ disk. Test on lukd.vm / luk.vm.
   (owner of <root>)` and exit status 1; a `root` that is a symlink is
   refused. `lukd status` and `lukd check`
   only read and run as anyone who can read the files.
-  - `lukd queue ls [--json]`: the failed entries: id, endpoint, sender,
-    and per failed pipeline the step, the error (first line, control
-    characters escaped, as `lukd status`), the failure time and the age.
-  - `lukd queue rm --id ID`: removes the failed entry and its work
-    directories.
-  - `lukd queue retry --id ID [--pipeline NAME]...`: moves the entry back
-    into the queue with the given (default: all) failed pipelines left to
-    run. Committed queue entries that are not running are picked up (by
-    `lukd process` at once; otherwise the next start does). Success removes the entry; a failure moves it to
-    `failed/` again.
+  - `lukd queue ls [--json]`: the records, oldest first, one row per
+    pipeline: id, endpoint, sender, pipeline, state (`ok`, `failed`,
+    `not_run`), step (of a failure, `-` otherwise), the time it ended
+    and its age, and the detail: the error of a failure (first line,
+    control characters escaped, as `lukd status`), the stored outputs of
+    a pipeline that succeeded. `--json` prints the records as stored.
+  - `lukd queue rm --id ID`: removes the record.
   - An unknown id exits with status 1.
 
 ### Phase 6 - portals

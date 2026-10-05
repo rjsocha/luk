@@ -32,14 +32,14 @@ var errNotSupported = errors.New("not supported yet")
 var hookRun = func(Job, string) {}
 
 // hookQueue runs before the dispatcher changes a queue entry whose
-// pipelines all ended: op is "commit" (meta.json of a failed entry),
-// "move" (to failed/) or "remove"; an error fails that change.
+// pipelines all ended: op is "record" (the failure record) or "remove";
+// an error fails that change.
 var hookQueue = func(op string, e queue.Entry) error { return nil }
 
 // QueueMeta is the meta.json of a queue entry: everything needed to rebuild
 // the Job after a restart. Expires holds the expiry of each storage the
 // upload is stored into (none: the sidecar expires for every storage).
-// Failed holds the pipelines that failed so far. Secret is the storage of
+// Results holds the pipelines that ended so far. Secret is the storage of
 // a secret upload, whose only pipeline is SecretPipeline. Stages holds the
 // queue group and order of the grouped pipelines as configured at receipt
 // (none: every pipeline runs concurrently).
@@ -49,7 +49,7 @@ type QueueMeta struct {
 	Vars      store.Vars        `json:"vars"`
 	Sidecar   store.Sidecar     `json:"sidecar"`
 	Expires   map[string]string `json:"expires,omitempty"`
-	Failed    []Failure         `json:"failed,omitempty"`
+	Results   []Outcome         `json:"results,omitempty"`
 	Replace   *Replace          `json:"replace,omitempty"`
 	Secret    string            `json:"secret,omitempty"`
 	// Accepted and AcceptedSeq are the acceptance order of the entry (a
@@ -138,14 +138,31 @@ type Replace struct {
 	Updated string `json:"updated"`
 }
 
-// Failure is one failed pipeline of an entry: the step (0 before the first
-// step), the error (at most status.MaxError bytes) and when it failed.
-type Failure struct {
-	Pipeline string `json:"pipeline"`
-	Step     int    `json:"step"`
-	Error    string `json:"error"`
-	At       string `json:"at"`
+// The states of an Outcome.
+const (
+	StateOK     = "ok"
+	StateFailed = "failed"
+	// StateNotRun is a pipeline of a later order of a queue group whose
+	// earlier order failed.
+	StateNotRun = "not_run"
+)
+
+// Outcome is how one pipeline of an entry ended: its State, for a failure
+// the step (0 before the first step) and the error (at most
+// status.MaxError bytes, with the output tail of the step), when it ended
+// and what it stored, as <storage>:<path> (" (dedup)" appended for a
+// deduplicated store), also when a later step failed.
+type Outcome struct {
+	Pipeline string   `json:"pipeline"`
+	State    string   `json:"state"`
+	Step     int      `json:"step"`
+	Error    string   `json:"error,omitempty"`
+	At       string   `json:"at"`
+	Stored   []string `json:"stored,omitempty"`
 }
+
+// Failed reports whether the pipeline did not end ok.
+func (o Outcome) Failed() bool { return o.State != StateOK }
 
 type Job struct {
 	Entry     queue.Entry
@@ -154,13 +171,13 @@ type Job struct {
 	Vars      store.Vars
 	Sidecar   store.Sidecar
 	Expires   map[string]string
-	Failed    []Failure
+	Results   []Outcome
 	Replace   *Replace
 	Secret    string
 }
 
 func (j Job) Meta() QueueMeta {
-	return QueueMeta{Pipelines: j.Pipelines, Stages: j.Stages, Vars: j.Vars, Sidecar: j.Sidecar, Expires: j.Expires, Failed: j.Failed, Replace: j.Replace, Secret: j.Secret,
+	return QueueMeta{Pipelines: j.Pipelines, Stages: j.Stages, Vars: j.Vars, Sidecar: j.Sidecar, Expires: j.Expires, Results: j.Results, Replace: j.Replace, Secret: j.Secret,
 		Accepted: j.Sidecar.Accepted, AcceptedSeq: j.Sidecar.AcceptedSeq}
 }
 
@@ -177,7 +194,7 @@ func LoadJob(e queue.Entry) (Job, error) {
 	if m.Sidecar.Accepted == 0 {
 		m.Sidecar.Accepted, m.Sidecar.AcceptedSeq = m.Accepted, m.AcceptedSeq
 	}
-	return Job{Entry: e, Pipelines: m.Pipelines, Stages: m.Stages, Vars: m.Vars, Sidecar: m.Sidecar, Expires: m.Expires, Failed: m.Failed, Replace: m.Replace, Secret: m.Secret}, nil
+	return Job{Entry: e, Pipelines: m.Pipelines, Stages: m.Stages, Vars: m.Vars, Sidecar: m.Sidecar, Expires: m.Expires, Results: m.Results, Replace: m.Replace, Secret: m.Secret}, nil
 }
 
 type Dispatcher struct {
@@ -201,7 +218,7 @@ type Dispatcher struct {
 	stop     chan struct{}
 	inflight map[string]struct{}
 	// parked holds the entries, by directory, whose pipelines all ended
-	// but that could not be moved to failed/ or removed (see settle).
+	// but that could not be removed (see settle).
 	parked map[string]*parked
 	now    func() time.Time
 	slots  map[string]*slots
@@ -382,36 +399,34 @@ func (d *Dispatcher) run(j Job) {
 		}
 	}
 	remaining := slices.Clone(names)
-	failed := slices.Clone(j.Failed)
+	results := slices.Clone(j.Results)
 	if j.Replace != nil {
-		stop, fails := d.runReplace(j, names)
+		stop, outs := d.runReplace(j, names)
 		if stop {
 			return
 		}
-		failed, names = fails, nil
+		results, names = append(results, outs...), nil
 	}
-	// done records the end of the pipeline name, f its failure.
-	done := func(name string, f *Failure) {
+	// done records the end of the pipeline o.Pipeline.
+	done := func(o Outcome) {
 		mu.Lock()
 		defer mu.Unlock()
-		remaining = slices.DeleteFunc(remaining, func(n string) bool { return n == name })
-		if f != nil {
-			failed = slices.DeleteFunc(failed, func(x Failure) bool { return x.Pipeline == name })
-			failed = append(failed, *f)
-		}
+		remaining = slices.DeleteFunc(remaining, func(n string) bool { return n == o.Pipeline })
+		results = slices.DeleteFunc(results, func(x Outcome) bool { return x.Pipeline == o.Pipeline })
+		results = append(results, o)
 		if len(remaining) > 0 {
-			d.finished(j, remaining, failed)
+			d.finished(j, remaining, results)
 		}
 	}
 	// runOne runs the pipeline name and reports whether it failed.
 	runOne := func(name string) bool {
-		stop, f := d.runPipeline(j, name)
+		stop, o := d.runPipeline(j, name)
 		if stop {
 			interrupted.Store(true)
 			return false
 		}
-		done(name, f)
-		return f != nil
+		done(o)
+		return o.Failed()
 	}
 	free, groups := schedule(names, j.Stages)
 	for _, name := range free {
@@ -447,7 +462,7 @@ func (d *Dispatcher) run(j Job) {
 					reason := fmt.Sprintf("not run: %s failed", slices.Min(bad))
 					for _, later := range levels[i+1:] {
 						for _, name := range later {
-							done(name, d.skip(j, name, reason))
+							done(d.skip(j, name, reason))
 						}
 					}
 					return
@@ -462,17 +477,18 @@ func (d *Dispatcher) run(j Job) {
 	if interrupted.Load() {
 		return
 	}
-	d.settle(j, failed)
+	d.settle(j, results)
 }
 
-// parked is an entry whose pipelines all ended (failed holds the failed
-// ones) but that could not be moved to failed/ or removed; it is retried
-// at next, the n-th time.
+// parked is an entry whose pipelines all ended with results but that could
+// not be removed; its removal is tried again at next, the n-th time.
+// recorded marks a failure record already written.
 type parked struct {
-	job    Job
-	failed []Failure
-	n      int
-	next   time.Time
+	job      Job
+	results  []Outcome
+	recorded bool
+	n        int
+	next     time.Time
 }
 
 // parkMax is the longest wait between two tries of a parked entry.
@@ -485,21 +501,30 @@ func (d *Dispatcher) busy(dir string) bool {
 	return run || park
 }
 
-// settle ends the entry of j whose pipelines all ended: it goes to
-// failed/ when a pipeline failed, else it is removed. When that fails
-// (a full disk, an I/O error) the entry stays in the queue and is parked:
-// its pipelines never run again in this process, Pickup only retries the
-// move or the removal, after a minute, doubling up to parkMax.
-func (d *Dispatcher) settle(j Job, failed []Failure) {
-	var ok bool
-	if len(failed) > 0 {
-		ok = d.moveFailed(j, failed)
-	} else {
-		if w := d.config().WorkDir(); w != "" {
-			os.Remove(filepath.Join(w, j.Entry.ID))
-		}
-		ok = d.remove(j.Entry)
+// settle ends the entry of j whose pipelines all ended with results. When
+// a pipeline did not end ok the failure record is written first; then the
+// work directories and the entry, its payload included, are removed
+// either way: nothing of the content is kept after a failure, also when
+// the record could not be written (logged as an error). When the removal
+// fails (an I/O error) the entry stays in the queue and is parked: its
+// pipelines never run again in this process, Pickup only tries the
+// removal again, after a minute, doubling up to parkMax.
+func (d *Dispatcher) settle(j Job, results []Outcome) {
+	d.mu.Lock()
+	recorded := false
+	if p := d.parked[j.Entry.Dir]; p != nil {
+		recorded = p.recorded
 	}
+	d.mu.Unlock()
+	if !recorded && slices.ContainsFunc(results, Outcome.Failed) {
+		recorded = d.record(j, results)
+	}
+	if w := d.config().WorkDir(); w != "" {
+		if err := os.RemoveAll(filepath.Join(w, j.Entry.ID)); err != nil {
+			d.log.Warn("work directory not removed", "id", j.Entry.ID, "error", err)
+		}
+	}
+	ok := d.remove(j.Entry)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if ok {
@@ -508,16 +533,38 @@ func (d *Dispatcher) settle(j Job, failed []Failure) {
 	}
 	p := d.parked[j.Entry.Dir]
 	if p == nil {
-		p = &parked{job: j, failed: failed}
+		p = &parked{job: j, results: results}
 		d.parked[j.Entry.Dir] = p
 	}
+	p.recorded = recorded
 	p.n++
 	wait := parkMax
 	if p.n <= 7 {
 		wait = min(time.Minute<<(p.n-1), parkMax)
 	}
 	p.next = d.now().Add(wait)
-	d.log.Error("queue entry parked: its pipelines are not run again, the entry is retried", "id", j.Entry.ID, "attempt", p.n, "retry", wait)
+	d.log.Error("queue entry parked: its pipelines are not run again, its removal is tried again", "id", j.Entry.ID, "attempt", p.n, "retry", wait)
+}
+
+// record writes the failure record of j; true when it is in place.
+func (d *Dispatcher) record(j Job, results []Outcome) bool {
+	r := newRecord(j, results, d.now())
+	names := strings.Join(failedNames(results), ",")
+	err := hookQueue("record", j.Entry)
+	if err == nil {
+		err = writeRecord(filepath.Dir(j.Entry.Dir), r)
+	}
+	if errors.Is(err, queue.ErrNotSynced) {
+		d.log.Warn("failure record written", "id", j.Entry.ID, "error", err)
+		err = nil
+	}
+	if err != nil {
+		d.log.Error("failure record not written, the upload is removed all the same", "id", j.Entry.ID, "pipelines", names, "error", err)
+		return false
+	}
+	d.log.Warn("queue entry failed", "id", j.Entry.ID, "pipelines", names)
+	d.RefreshFailed()
+	return true
 }
 
 // retryParked settles again the parked entries due now.
@@ -534,15 +581,16 @@ func (d *Dispatcher) retryParked() {
 	}
 	d.mu.Unlock()
 	for _, p := range due {
-		d.settle(p.job, p.failed)
+		d.settle(p.job, p.results)
 		d.mu.Lock()
 		delete(d.inflight, p.job.Entry.Dir)
 		d.mu.Unlock()
 	}
 }
 
-// remove deletes the entry e; true when it is gone or no longer pending
-// (meta.json removed, the start cleanup takes the rest).
+// remove deletes the entry e, its payload included; true when it is gone.
+// An entry removed only in part is no longer pending (meta.json goes
+// first), so its pipelines never run again.
 func (d *Dispatcher) remove(e queue.Entry) bool {
 	err := hookQueue("remove", e)
 	if err == nil {
@@ -551,56 +599,11 @@ func (d *Dispatcher) remove(e queue.Entry) bool {
 	if err == nil {
 		return true
 	}
-	if _, serr := os.Lstat(filepath.Join(e.Dir, "meta.json")); errors.Is(serr, fs.ErrNotExist) {
-		d.log.Warn("queue entry removed in part", "id", e.ID, "error", err)
+	if _, serr := os.Lstat(e.Dir); errors.Is(serr, fs.ErrNotExist) {
 		return true
 	}
 	d.log.Error("queue entry not removed", "id", e.ID, "error", err)
 	return false
-}
-
-// moveFailed keeps only the failed pipelines in meta.json and moves the
-// entry to failed/ of its queue directory; true when it is there. The
-// rename needs no free blocks, so it is done even when meta.json could not
-// be written: the entry then keeps the meta.json of its last update.
-func (d *Dispatcher) moveFailed(j Job, failed []Failure) bool {
-	slices.SortFunc(failed, func(a, b Failure) int { return strings.Compare(a.Pipeline, b.Pipeline) })
-	m := j.Meta()
-	m.Failed = failed
-	m.Pipelines = nil
-	for _, f := range failed {
-		m.Pipelines = append(m.Pipelines, f.Pipeline)
-	}
-	cerr := hookQueue("commit", j.Entry)
-	if cerr == nil {
-		cerr = d.q.Commit(j.Entry, m)
-	}
-	if errors.Is(cerr, queue.ErrNotSynced) {
-		d.log.Warn("queue entry updated", "id", j.Entry.ID, "error", cerr)
-		cerr = nil
-	}
-	err := hookQueue("move", j.Entry)
-	if err == nil {
-		err = moveEntry(j.Entry.Dir, filepath.Join(FailedDir(filepath.Dir(j.Entry.Dir)), j.Entry.ID))
-	}
-	if err != nil {
-		if _, serr := os.Lstat(j.Entry.Dir); errors.Is(serr, fs.ErrNotExist) {
-			// Renamed; only a directory sync failed.
-			d.log.Warn("queue entry moved to failed", "id", j.Entry.ID, "error", err)
-			err = nil
-		}
-	}
-	if err != nil {
-		d.log.Error("queue entry not moved to failed", "id", j.Entry.ID, "error", err, "meta_error", cerr)
-		return false
-	}
-	if cerr != nil {
-		d.log.Error("queue entry moved to failed without its failures recorded", "id", j.Entry.ID, "pipelines", strings.Join(m.Pipelines, ","), "error", cerr)
-	} else {
-		d.log.Warn("queue entry failed", "id", j.Entry.ID, "pipelines", strings.Join(m.Pipelines, ","))
-	}
-	d.RefreshFailed()
-	return true
 }
 
 // errorText is the error with as much of the output tail as fits in
@@ -630,30 +633,31 @@ func (d *Dispatcher) report(j Job, name string, step int, err error, output stri
 	}
 }
 
-// skip records the pipeline name as failed without running it (step 0)
-// for the reason.
-func (d *Dispatcher) skip(j Job, name, reason string) *Failure {
+// skip records the pipeline name as not run (step 0) for the reason, a
+// failure in the status.
+func (d *Dispatcher) skip(j Job, name, reason string) Outcome {
 	err := errors.New(reason)
 	d.report(j, name, 0, err, "")
 	d.log.Warn("pipeline skipped", "id", j.Entry.ID, "pipeline", name, "reason", reason)
-	return &Failure{Pipeline: name, Step: 0, Error: errorText(err, ""), At: time.Now().UTC().Format(time.RFC3339)}
+	return Outcome{Pipeline: name, State: StateNotRun, Error: errorText(err, ""), At: time.Now().UTC().Format(time.RFC3339)}
 }
 
 // finished records in the queue entry that only the remaining pipelines
 // still have to run, so Resume after an interruption skips the others, and
-// which failed so far.
-func (d *Dispatcher) finished(j Job, remaining []string, failed []Failure) {
+// how the others ended.
+func (d *Dispatcher) finished(j Job, remaining []string, results []Outcome) {
 	m := j.Meta()
 	m.Pipelines = slices.Clone(remaining)
-	m.Failed = slices.Clone(failed)
+	m.Results = slices.Clone(results)
 	if err := d.q.Commit(j.Entry, m); err != nil {
 		d.log.Warn("queue entry not updated", "id", j.Entry.ID, "remaining", remaining, "error", err)
 	}
 }
 
-// runPipeline reports whether the pipeline was interrupted by Close, or its
-// failure. It runs on the configuration current when it gets its slot.
-func (d *Dispatcher) runPipeline(j Job, name string) (bool, *Failure) {
+// runPipeline reports whether the pipeline was interrupted by Close, else
+// how it ended. It runs on the configuration current when it gets its
+// slot. Its work directories are removed when it ends, failed or not.
+func (d *Dispatcher) runPipeline(j Job, name string) (bool, Outcome) {
 	var stored, into []string
 	var output, logged string
 	cfg := d.config()
@@ -765,28 +769,27 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, *Failure) {
 	}()
 	if errors.Is(err, errInterrupted) {
 		d.log.Warn("pipeline interrupted", "id", j.Entry.ID, "pipeline", name, "step", step, "stored", stored)
-		return true, nil
+		return true, Outcome{}
 	}
 	d.report(j, name, step, err, output)
 	d.storedInto(into)
+	if used {
+		if rerr := os.RemoveAll(work); rerr != nil {
+			d.log.Warn("work directory not removed", "id", j.Entry.ID, "pipeline", name, "error", rerr)
+		}
+	}
+	o := Outcome{Pipeline: name, State: StateOK, At: time.Now().UTC().Format(time.RFC3339), Stored: stored}
 	if err != nil {
 		args := []any{"id", j.Entry.ID, "pipeline", name, "step", step, "error", err, "stored", stored}
-		if used {
-			args = append(args, "work", work)
-		}
 		if logged != "" {
 			args = append(args, "output", logged)
 		}
 		d.log.Error("pipeline failed", args...)
-		return false, &Failure{Pipeline: name, Step: step, Error: errorText(err, output), At: time.Now().UTC().Format(time.RFC3339)}
-	}
-	if used {
-		if err := os.RemoveAll(work); err != nil {
-			d.log.Warn("work directory not removed", "id", j.Entry.ID, "pipeline", name, "error", err)
-		}
+		o.State, o.Step, o.Error = StateFailed, step, errorText(err, output)
+		return false, o
 	}
 	d.log.Info("pipeline done", "id", j.Entry.ID, "pipeline", name, "stored", stored)
-	return false, nil
+	return false, o
 }
 
 // stepOutput logs the output tail of a run or relay step that succeeded at
@@ -804,15 +807,15 @@ func (d *Dispatcher) stepOutput(j Job, name string, step int, tail string) {
 // anywhere drops the staged copies and removes the names placed so far,
 // so the link keeps its old content, the other storages get nothing, and
 // every pipeline of the entry fails. It reports whether it was
-// interrupted by Close, else the failures.
-func (d *Dispatcher) runReplace(j Job, names []string) (bool, []Failure) {
+// interrupted by Close, else how the pipelines ended.
+func (d *Dispatcher) runReplace(j Job, names []string) (bool, []Outcome) {
 	names = slices.Sorted(slices.Values(names))
 	cfg := d.config()
-	fail := func(name string, step int, err error) []Failure {
+	fail := func(name string, step int, err error) []Outcome {
 		at := time.Now().UTC().Format(time.RFC3339)
-		var out []Failure
+		var out []Outcome
 		for _, n := range names {
-			f := Failure{Pipeline: n, Step: step, Error: errorText(err, ""), At: at}
+			f := Outcome{Pipeline: n, State: StateFailed, Step: step, Error: errorText(err, ""), At: at}
 			if n != name {
 				f.Step, f.Error = 0, fmt.Sprintf("replace not published: pipeline %s failed", name)
 			}
@@ -883,6 +886,7 @@ func (d *Dispatcher) runReplace(j Job, names []string) (bool, []Failure) {
 	}
 	var done []placed
 	var stored []string
+	byPipeline := map[string][]string{}
 	undo := func() {
 		for _, p := range done {
 			if err := p.l.RemoveIf(p.rel, p.id); err != nil {
@@ -906,18 +910,22 @@ func (d *Dispatcher) runReplace(j Job, names []string) (bool, []Failure) {
 				done = append(done, placed{l: store.FromConfig(st), rel: res.Rel, id: j.Sidecar.ID})
 			}
 			stored = append(stored, t.storage+":"+res.Rel)
+			byPipeline[t.pipeline] = append(byPipeline[t.pipeline], t.storage+":"+res.Rel)
 		}
 	}
+	at := time.Now().UTC().Format(time.RFC3339)
+	var outs []Outcome
 	for _, name := range names {
 		d.report(j, name, 0, nil, "")
 		d.log.Info("pipeline done", "id", j.Entry.ID, "pipeline", name, "stored", stored)
+		outs = append(outs, Outcome{Pipeline: name, State: StateOK, At: at, Stored: byPipeline[name]})
 	}
 	var into []string
 	for _, t := range targets {
 		into = append(into, t.storage)
 	}
 	d.storedInto(into)
-	return false, nil
+	return false, outs
 }
 
 // storedInto evaluates the watch rules again when one of the storages

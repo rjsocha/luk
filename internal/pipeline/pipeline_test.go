@@ -598,8 +598,8 @@ func TestReplaceWithRunStepKeepsOld(t *testing.T) {
 	defer d.Close()
 	e.replaceOf(t, d, "fail")
 	failed, err := ListFailed(e.cfg)
-	if err != nil || len(failed) != 1 || failed[0].Meta.Failed[0].Step != 2 ||
-		!strings.Contains(failed[0].Meta.Failed[0].Error, "store steps only") {
+	if err != nil || len(failed) != 1 || failed[0].Pipelines[0].Step != 2 ||
+		!strings.Contains(failed[0].Pipelines[0].Error, "store steps only") {
 		t.Fatalf("%+v %v", failed, err)
 	}
 	if got := e.read(t, "a/file/robert.socha/f.txt"); got != "data-first" {

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -16,20 +16,104 @@ import (
 	"luk/internal/config"
 	"luk/internal/queue"
 	"luk/internal/status"
+	"luk/internal/wire"
 )
 
-// ErrUnknownID is returned for an id with no failed entry.
-var ErrUnknownID = errors.New("no failed entry with this id")
+// ErrUnknownID is returned for an id with no failure record.
+var ErrUnknownID = errors.New("no failure record with this id")
 
-// FailedDir holds the failed entries of the queue directory qdir.
+// FailedDir holds the failure records of the queue directory qdir.
 func FailedDir(qdir string) string { return filepath.Join(qdir, queue.FailedName) }
 
-// FailedEntry is an entry in a failed/ directory.
-type FailedEntry struct {
-	ID, Dir string
-	Meta    QueueMeta
-	// At is the newest failure time; zero when none is readable.
-	At time.Time
+// recordExt is the extension of a failure record: failed/<id>.json.
+const recordExt = ".json"
+
+// Record is the failure record of an upload whose pipelines all ended,
+// one or more of them failed: what the upload was and how each pipeline
+// ended. It holds nothing of the content: the queue entry is deleted
+// once the record is written, and the sender has to send the upload
+// again. Origin is the backup hostname of the upload, else the sender;
+// Secret the secret storage of a secret upload; FailedAt when the record
+// was written.
+type Record struct {
+	ID          string    `json:"id"`
+	Endpoint    string    `json:"endpoint"`
+	Sender      string    `json:"sender"`
+	Origin      string    `json:"origin"`
+	Received    string    `json:"received"`
+	Accepted    int64     `json:"accepted,omitempty"`
+	AcceptedSeq int       `json:"accepted_seq,omitempty"`
+	Size        int64     `json:"size"`
+	SHA256      string    `json:"sha256"`
+	Client      wire.Meta `json:"client"`
+	Secret      string    `json:"secret,omitempty"`
+	FailedAt    string    `json:"failed_at"`
+	Pipelines   []Outcome `json:"pipelines"`
+
+	path string
+	at   time.Time
+}
+
+// newRecord is the failure record of j whose pipelines ended with results.
+func newRecord(j Job, results []Outcome, now time.Time) Record {
+	sc := j.Sidecar
+	out := Record{
+		ID: j.Entry.ID, Endpoint: sc.Endpoint, Sender: sc.Sender, Origin: cmp.Or(j.Vars.Hostname, j.Vars.Sender, sc.Sender),
+		Received: sc.Received, Accepted: sc.Accepted, AcceptedSeq: sc.AcceptedSeq, Size: sc.Size, SHA256: sc.SHA256,
+		Client: sc.Client, Secret: j.Secret, FailedAt: now.UTC().Format(time.RFC3339),
+		Pipelines: append([]Outcome(nil), results...),
+	}
+	sort.SliceStable(out.Pipelines, func(a, b int) bool { return out.Pipelines[a].Pipeline < out.Pipelines[b].Pipeline })
+	return out
+}
+
+// failedNames are the pipelines of results that did not end ok.
+func failedNames(results []Outcome) []string {
+	var out []string
+	for _, o := range results {
+		if o.Failed() {
+			out = append(out, o.Pipeline)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// writeRecord writes r as failed/<id>.json of the queue directory qdir
+// (temporary file, sync, rename). A failed sync of the directory after the
+// rename is returned wrapped in queue.ErrNotSynced: the record is in
+// place.
+func writeRecord(qdir string, r Record) error {
+	dir := FailedDir(qdir)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(dir, "."+r.ID+recordExt+".tmp")
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(append(b, '\n')); err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, filepath.Join(dir, r.ID+recordExt))
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("%w: %w", queue.ErrNotSynced, err)
+	}
+	return nil
 }
 
 // QueueDirs returns the queue directories of the endpoints, their secret
@@ -53,10 +137,10 @@ func QueueDirs(cfg *config.Config) []string {
 	return dirs
 }
 
-// ListFailed returns the failed entries of every queue directory, oldest
-// failure first. Entries with an unreadable meta.json are skipped.
-func ListFailed(cfg *config.Config) ([]FailedEntry, error) {
-	var out []FailedEntry
+// ListFailed returns the failure records of every queue directory, oldest
+// first. Records that cannot be read are skipped.
+func ListFailed(cfg *config.Config) ([]Record, error) {
+	var out []Record
 	var errs []error
 	for _, qdir := range QueueDirs(cfg) {
 		dir := FailedDir(qdir)
@@ -69,172 +153,119 @@ func ListFailed(cfg *config.Config) ([]FailedEntry, error) {
 			continue
 		}
 		for _, d := range ents {
-			if !d.IsDir() {
+			name := d.Name()
+			if !d.Type().IsRegular() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, recordExt) {
 				continue
 			}
-			if f, err := readFailed(filepath.Join(dir, d.Name())); err == nil {
-				out = append(out, f)
+			if r, err := readRecord(filepath.Join(dir, name)); err == nil {
+				out = append(out, r)
 			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if !out[i].At.Equal(out[j].At) {
-			return out[i].At.Before(out[j].At)
+		if !out[i].at.Equal(out[j].at) {
+			return out[i].at.Before(out[j].at)
 		}
 		return out[i].ID < out[j].ID
 	})
 	return out, errors.Join(errs...)
 }
 
-func readFailed(dir string) (FailedEntry, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+func readRecord(path string) (Record, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return FailedEntry{}, err
+		return Record{}, err
 	}
-	f := FailedEntry{ID: filepath.Base(dir), Dir: dir}
-	if err := json.Unmarshal(b, &f.Meta); err != nil {
-		return FailedEntry{}, err
+	var r Record
+	if err := json.Unmarshal(b, &r); err != nil {
+		return Record{}, fmt.Errorf("%s: %w", path, err)
 	}
-	for _, x := range f.Meta.Failed {
-		if at, err := time.Parse(time.RFC3339, x.At); err == nil && at.After(f.At) {
-			f.At = at
-		}
+	r.ID, r.path = strings.TrimSuffix(filepath.Base(path), recordExt), path
+	if at, err := time.Parse(time.RFC3339, r.FailedAt); err == nil {
+		r.at = at
 	}
-	return f, nil
+	return r, nil
 }
 
-func findFailed(cfg *config.Config, id string) (FailedEntry, error) {
-	if id == "" || id == "." || id == ".." || filepath.Base(id) != id {
-		return FailedEntry{}, fmt.Errorf("%q: %w", id, ErrUnknownID)
+// At is when the record was written; zero when unknown.
+func (r Record) At() time.Time { return r.at }
+
+func findFailed(cfg *config.Config, id string) (Record, error) {
+	if id == "" || strings.HasPrefix(id, ".") || filepath.Base(id) != id {
+		return Record{}, fmt.Errorf("%q: %w", id, ErrUnknownID)
 	}
 	for _, qdir := range QueueDirs(cfg) {
-		dir := filepath.Join(FailedDir(qdir), id)
-		if _, err := os.Stat(dir); err != nil {
+		p := filepath.Join(FailedDir(qdir), id+recordExt)
+		if _, err := os.Lstat(p); err != nil {
 			continue
 		}
-		return readFailed(dir)
+		return readRecord(p)
 	}
-	return FailedEntry{}, fmt.Errorf("%s: %w", id, ErrUnknownID)
+	return Record{}, fmt.Errorf("%s: %w", id, ErrUnknownID)
 }
 
-// FailedCounts counts the failed entries per failed pipeline and sender.
+// FailedCounts counts the failure records per pipeline that did not end
+// ok (failed or not run) and sender.
 func FailedCounts(cfg *config.Config) map[status.Key]int {
 	list, _ := ListFailed(cfg)
 	counts := map[status.Key]int{}
-	for _, f := range list {
-		for _, x := range f.Meta.Failed {
-			counts[status.Key{Pipeline: x.Pipeline, Sender: f.Meta.Sidecar.Sender}]++
+	for _, r := range list {
+		for _, o := range r.Pipelines {
+			if o.Failed() {
+				counts[status.Key{Pipeline: o.Pipeline, Sender: r.Sender}]++
+			}
 		}
 	}
 	return counts
 }
 
-// RemoveFailed deletes the failed entry id and its work directories.
+// RemoveFailed deletes the failure record id.
 func RemoveFailed(cfg *config.Config, id string) error {
-	f, err := findFailed(cfg, id)
+	r, err := findFailed(cfg, id)
 	if err != nil {
 		return err
 	}
-	return removeFailed(cfg, f)
+	return os.Remove(r.path)
 }
 
-func removeFailed(cfg *config.Config, f FailedEntry) error {
-	if err := os.RemoveAll(f.Dir); err != nil {
-		return err
-	}
-	if w := cfg.WorkDir(); w != "" {
-		return os.RemoveAll(filepath.Join(w, f.ID))
-	}
-	return nil
-}
-
-// RetryFailed moves the failed entry id back into its queue directory with
-// the given failed pipelines (all when none) left to run and returns them;
-// the work directories of the others are removed.
-func RetryFailed(cfg *config.Config, id string, pipelines []string) ([]string, error) {
-	f, err := findFailed(cfg, id)
-	if err != nil {
-		return nil, err
-	}
-	var failed []string
-	for _, x := range f.Meta.Failed {
-		failed = append(failed, x.Pipeline)
-	}
-	run := failed
-	if len(pipelines) > 0 {
-		run = nil
-		for _, p := range pipelines {
-			if !slices.Contains(failed, p) {
-				return nil, fmt.Errorf("%s: pipeline %q did not fail (failed: %s)", id, p, strings.Join(failed, ","))
-			}
-			if !slices.Contains(run, p) {
-				run = append(run, p)
-			}
-		}
-	}
-	if len(run) == 0 {
-		return nil, fmt.Errorf("%s: no failed pipeline", id)
-	}
-	if w := cfg.WorkDir(); w != "" {
-		for _, p := range failed {
-			if !slices.Contains(run, p) {
-				if err := os.RemoveAll(filepath.Join(w, id, p)); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-	m := f.Meta
-	m.Pipelines, m.Failed = run, nil
-	e := queue.Entry{Dir: f.Dir, ID: id}
-	if err := queue.New(0, nil).Commit(e, m); err != nil && !errors.Is(err, queue.ErrNotSynced) {
-		return nil, err
-	}
-	return run, moveEntry(f.Dir, filepath.Join(filepath.Dir(filepath.Dir(f.Dir)), id))
-}
-
-// ExpireFailed removes failed entries whose newest failure is older than
-// age, with their work directories; age 0 keeps them. An entry without a
-// readable failure time is kept.
+// ExpireFailed removes the failure records written longer than age ago;
+// age 0 keeps them. A record without a readable time is kept.
 func ExpireFailed(cfg *config.Config, age time.Duration, now time.Time, log *slog.Logger) {
 	if age <= 0 {
 		return
 	}
 	list, err := ListFailed(cfg)
 	if err != nil {
-		log.Warn("failed entries: listing", "error", err)
+		log.Warn("failure records: listing", "error", err)
 	}
-	for _, f := range list {
-		if f.At.IsZero() || now.Sub(f.At) <= age {
+	for _, r := range list {
+		if r.at.IsZero() || now.Sub(r.at) <= age {
 			continue
 		}
-		if err := removeFailed(cfg, f); err != nil {
-			log.Warn("failed entry not removed", "id", f.ID, "error", err)
+		if err := os.Remove(r.path); err != nil {
+			log.Warn("failure record not removed", "id", r.ID, "error", err)
 			continue
 		}
-		log.Info("failed entry expired", "id", f.ID, "pipelines", strings.Join(f.Meta.Pipelines, ","))
+		log.Info("failure record expired", "id", r.ID, "pipelines", strings.Join(failedNames(r.Pipelines), ","))
 	}
 }
 
-// EntryIDs returns the ids of the entries in every queue directory and its
-// failed/ directory.
+// EntryIDs returns the ids of the entries in every queue directory.
 func EntryIDs(cfg *config.Config) map[string]bool {
 	ids := map[string]bool{}
 	for _, qdir := range QueueDirs(cfg) {
-		for _, dir := range []string{qdir, FailedDir(qdir)} {
-			ents, _ := os.ReadDir(dir)
-			for _, d := range ents {
-				if d.IsDir() && !(dir == qdir && d.Name() == queue.FailedName) {
-					ids[d.Name()] = true
-				}
+		ents, _ := os.ReadDir(qdir)
+		for _, d := range ents {
+			if d.IsDir() && d.Name() != queue.FailedName {
+				ids[d.Name()] = true
 			}
 		}
 	}
 	return ids
 }
 
-// RefreshFailed recomputes the failed counts of the status from the failed/
-// directories.
+// RefreshFailed recomputes the failed counts of the status from the
+// failure records.
 func (d *Dispatcher) RefreshFailed() {
 	if d.status == nil {
 		return
@@ -247,9 +278,9 @@ func (d *Dispatcher) RefreshFailed() {
 }
 
 // Pickup submits the accepted entries of every queue directory that are not
-// in flight or parked, such as those put back by `lukd queue retry`. It
-// looks into the queue directories of every configuration since the
-// start. Parked entries due are settled again first.
+// in flight or parked: the fallback of the commit watch. It looks into the
+// queue directories of every configuration since the start. Parked entries
+// due are settled again first.
 func (d *Dispatcher) Pickup() {
 	d.retryParked()
 	for _, qdir := range d.queueDirs() {
@@ -278,31 +309,13 @@ func (d *Dispatcher) running(dir string) bool {
 	return d.busy(dir)
 }
 
-// Maintain is the janitor pass of the queue: expiry of failed entries,
-// failed counts and pickup of entries put back into the queue.
+// Maintain is the janitor pass of the queue: expiry of failure records,
+// failed counts and pickup of committed entries.
 func (d *Dispatcher) Maintain(now time.Time) {
 	cfg := d.config()
 	ExpireFailed(cfg, cfg.Limits.Failed.MaxAge(), now, d.log)
 	d.RefreshFailed()
 	d.Pickup()
-}
-
-func moveEntry(from, to string) error {
-	if err := os.MkdirAll(filepath.Dir(to), 0o750); err != nil {
-		return err
-	}
-	if _, err := os.Lstat(to); err == nil {
-		return fmt.Errorf("%s: already exists", to)
-	}
-	if err := os.Rename(from, to); err != nil {
-		return err
-	}
-	for _, dir := range []string{filepath.Dir(from), filepath.Dir(to)} {
-		if err := syncDir(dir); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func syncDir(dir string) error {
