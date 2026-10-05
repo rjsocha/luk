@@ -1008,6 +1008,9 @@ func (l Local) StoreStaged(s *Staged, rel string, sc Sidecar) (Stored, error) {
 	stored, old, dedup, err := l.put(r, src, tmp, staged, rel, sc)
 	if err != nil || dedup {
 		res := Stored{Rel: stored, Dedup: dedup}
+		if dedup && err == nil {
+			err = l.takeOrder(r, stored, sc)
+		}
 		if key := l.permanentKey(sc); dedup && err == nil && key != "" {
 			// A retry of a store whose publish failed finds its file,
 			// another upload of the content the version kept.
@@ -1038,6 +1041,30 @@ func (l Local) StoreStaged(s *Staged, rel string, sc Sidecar) (Stored, error) {
 	}
 	l.rebuild(r)
 	return res, err
+}
+
+// takeOrder gives the file kept at stored by Dedup the acceptance order
+// of sc when sc was accepted after it: the kept file stands for the
+// newest upload of its content, so an upload accepted in between that
+// finishes later goes to history instead of becoming current. The alias
+// the file declares follows the new order.
+func (l Local) takeOrder(r *os.Root, stored string, sc Sidecar) error {
+	p := l.phys(stored)
+	kept, err := readSidecar(r, p)
+	if err != nil {
+		return err
+	}
+	if sc.Accepted == 0 || sc.Order().Compare(kept.Order()) <= 0 {
+		return nil
+	}
+	kept.Accepted, kept.AcceptedSeq = sc.Accepted, sc.AcceptedSeq
+	if err := writeSidecar(r, p, kept); err != nil {
+		return err
+	}
+	if a := l.declares(r, stored, kept); a != "" {
+		return l.pointAlias(r, a, stored, kept)
+	}
+	return nil
 }
 
 func (l Local) versioning() bool { return l.Conflict != "replace" && l.Conflict != "reject" }

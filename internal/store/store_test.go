@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1529,5 +1530,49 @@ func TestVersionOlderToHistory(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Join(l.Base, DataDir))
 	if len(entries) != 2 {
 		t.Fatalf("data dir: %v", entries)
+	}
+}
+
+// A deduplicated upload takes over the acceptance order of the file it
+// keeps when it is newer: an upload accepted between the two that
+// finishes last goes to history, and the alias stays on the kept file.
+func TestDedupNewerKeepsOrder(t *testing.T) {
+	l := Local{Base: t.TempDir(), Conflict: "version", Dedup: true}
+	put := func(id, content string, ns int64, m int) Stored {
+		t.Helper()
+		sc := accepted(id, ns, time.Date(2026, 9, 30, 10, m, 0, 0, time.UTC).Format(time.RFC3339))
+		sc.SHA256, sc.Size = shaOf(content), int64(len(content))
+		sc.Meta = json.RawMessage(`{"alias":"latest"}`)
+		res, err := l.Store(srcFile(t, t.TempDir(), content), "x", sc)
+		if err != nil {
+			t.Fatalf("store %s: %v", id, err)
+		}
+		return res
+	}
+	put("t1", "XXXX", 1000, 1)
+	if res := put("t3", "XXXX", 3000, 3); !res.Dedup || res.Rel != "x" {
+		t.Fatalf("t3: %+v", res)
+	}
+	if _, sc := readAll(t, l, "x"); sc.ID != "t1" || sc.Accepted != 3000 {
+		t.Fatalf("kept after dedup: %+v", sc)
+	}
+	res := put("t2", "YYYY", 2000, 2)
+	if res.Rel == "x" {
+		t.Fatalf("t2 placed as current: %+v", res)
+	}
+	if body, sc := readAll(t, l, "x"); body != "XXXX" || sc.Accepted != 3000 {
+		t.Fatalf("current: body=%q id=%s accepted=%d", body, sc.ID, sc.Accepted)
+	}
+	if body, _ := readAll(t, l, res.Rel); body != "YYYY" {
+		t.Fatalf("history %s: %q", res.Rel, body)
+	}
+	checkAlias(t, l, "latest", "x", "XXXX")
+
+	// An older duplicate leaves the order of the kept file alone.
+	if res := put("t0", "XXXX", 500, 0); !res.Dedup {
+		t.Fatalf("t0: %+v", res)
+	}
+	if _, sc := readAll(t, l, "x"); sc.Accepted != 3000 {
+		t.Fatalf("older duplicate changed the order: %+v", sc)
 	}
 }
