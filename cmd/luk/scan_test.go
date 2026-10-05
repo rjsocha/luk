@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -383,5 +384,55 @@ func TestPrintEndpointsBackupHost(t *testing.T) {
 		"c     u    url      -    -\n"
 	if err != nil || b.String() != want {
 		t.Fatalf("%v\n%q\nwant %q", err, b.String(), want)
+	}
+}
+
+// An endpoint pinned with an old TLS pin must not stop the scan that tells
+// the pin to replace it with, and that scan's own output must fix it.
+func TestScanIgnoresStaleTLSPin(t *testing.T) {
+	e := newScanEnv(t)
+	stale := "sha256//" + e.pin
+	cfgPath := client.DefaultConfigPath()
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	text := "endpoint:\n  backup: {url: " + e.url + "/backup, pin: '" + stale + "', key: " + e.key + "}\n"
+	if err := os.WriteFile(cfgPath, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notice := "endpoint backup: pin " + stale + " is not a lukd key (old TLS pin?): replace it with the pin below\n"
+	for _, target := range []string{e.url + "/backup", "backup", e.url + "/drop"} {
+		code, out, errs := runLuk(t, "scan", "--pin", target)
+		if code != 0 || out != e.words+"\n" || !strings.Contains(errs, notice) {
+			t.Errorf("%s: exit %d out %q err %q", target, code, out, errs)
+		}
+	}
+	code, out, errs := runLuk(t, "scan", "-k", e.key, e.url+"/backup")
+	if code != 0 || !strings.HasPrefix(out, e.words+"\n") || !strings.Contains(errs, notice) {
+		t.Errorf("listing: exit %d out %q err %q", code, out, errs)
+	}
+	// The pin given on the command line is the user's input and fails.
+	if code, _, errs := runLuk(t, "scan", "--pin", e.url+"/backup#"+stale); code != 1 || !strings.Contains(errs, channel.ErrTLSPin.Error()) {
+		t.Errorf("fragment: exit %d %q", code, errs)
+	}
+	// Commands that need a real pin keep failing on the stored one.
+	if code, _, errs := runLuk(t, "send", "-e", "backup", "--file", cfgPath); code != 1 || !strings.Contains(errs, channel.ErrTLSPin.Error()) {
+		t.Errorf("send: exit %d %q", code, errs)
+	}
+	// The printed command replaces the stale pin of the same name.
+	out = mustRun(t, "scan", "--pin", "--print", e.url+"/backup")
+	if want := "luk config endpoint add -e backup --url '" + e.url + "/backup#" + e.words + "'\n"; out != want {
+		t.Fatalf("print %q, want %q", out, want)
+	}
+	mustRun(t, "config", "endpoint", "add", "-e", "backup", "--url", e.url+"/backup#"+e.words, "--key", e.key)
+	cfg, _, err := client.LoadMerged()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Endpoint["backup"].Pins; len(got) != 1 || got[0] != e.words {
+		t.Fatalf("pins %v", got)
+	}
+	if code, _, errs := runLuk(t, "scan", "--pin", "backup"); code != 0 || errs != "download pin: "+e.pin+"\n" {
+		t.Errorf("after fix: exit %d %q", code, errs)
 	}
 }

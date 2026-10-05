@@ -104,7 +104,7 @@ address). A key that matches no configured pin gets no commands.`,
 			if err != nil {
 				return usageError{err}
 			}
-			raw, given, err := cfg.Resolve(args[0])
+			raw, given, notices, err := cfg.ResolveLenient(args[0])
 			if err != nil {
 				return usageError{err}
 			}
@@ -112,9 +112,14 @@ address). A key that matches no configured pin gets no commands.`,
 			if err != nil {
 				return usageError{err}
 			}
-			pins, err := client.PinsFor(cfg, u, strings.Join(given, ","))
+			// A stored pin that is not a lukd key must not stop the scan
+			// that tells the new one: it is ignored and reported.
+			pins, more, err := client.PinsForLenient(cfg, u, strings.Join(given, ","))
 			if err != nil {
 				return usageError{err}
+			}
+			for _, n := range slices.Compact(slices.Sorted(slices.Values(append(notices, more...)))) {
+				fmt.Fprintln(stderr, n)
 			}
 			name := args[0]
 			if strings.Contains(name, "://") {

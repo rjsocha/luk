@@ -222,30 +222,61 @@ func UnmatchedError(userPath string, src Sources) error {
 // the default) into a URL and its channel pins. A URL may carry the pins
 // as its fragment, comma-separated: "#lusab-babad-...,<key>".
 func (c *Config) Resolve(arg string) (string, []string, error) {
+	u, pins, _, err := c.resolve(arg, false)
+	return u, pins, err
+}
+
+// ResolveLenient is Resolve for luk scan, the command that replaces a
+// stale pin: the stored pins of a named endpoint that are not lukd keys
+// (an old TLS pin) are left out instead of failing, and each is returned
+// as a notice for the user. Pins given in a URL fragment still fail.
+func (c *Config) ResolveLenient(arg string) (string, []string, []string, error) {
+	return c.resolve(arg, true)
+}
+
+func (c *Config) resolve(arg string, lenient bool) (string, []string, []string, error) {
 	if arg == "" {
 		arg = c.Default
 		if arg == "" {
-			return "", nil, errors.New("no endpoint: pass --endpoint or set default in the config")
+			return "", nil, nil, errors.New("no endpoint: pass --endpoint or set default in the config")
 		}
 	}
 	if !strings.Contains(arg, "://") {
 		e, ok := c.Endpoint[arg]
 		if !ok {
-			return "", nil, fmt.Errorf("unknown endpoint %q", arg)
+			return "", nil, nil, fmt.Errorf("unknown endpoint %q", arg)
 		}
 		u, pins, err := splitPins(e.URL)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
+		var notices []string
 		if len(e.Pins) > 0 {
-			if err := checkPins(e.Pins); err != nil {
-				return "", nil, fmt.Errorf("endpoint %q: %w", arg, err)
+			if lenient {
+				e.Pins, notices = usablePins(arg, e.Pins)
+			} else if err := checkPins(e.Pins); err != nil {
+				return "", nil, nil, fmt.Errorf("endpoint %q: %w", arg, err)
 			}
 			pins = e.Pins
 		}
-		return u, pins, nil
+		return u, pins, notices, nil
 	}
-	return splitPins(arg)
+	u, pins, err := splitPins(arg)
+	return u, pins, nil, err
+}
+
+// usablePins splits the stored pins of endpoint name into those that are
+// lukd keys and a notice for each that is not.
+func usablePins(name string, pins []string) ([]string, []string) {
+	var ok, notices []string
+	for _, p := range pins {
+		if _, err := channel.ParsePin(p); err != nil {
+			notices = append(notices, fmt.Sprintf("endpoint %s: pin %s is not a lukd key (old TLS pin?): replace it with the pin below", name, p))
+			continue
+		}
+		ok = append(ok, p)
+	}
+	return ok, notices
 }
 
 // KeyFor picks the signing key for an endpoint argument (as Resolve takes
@@ -317,6 +348,38 @@ func PinsFor(cfg *Config, u *url.URL, fragment string) ([]channel.Pin, error) {
 		return channel.ParsePins(strings.Join(e.Pins, ","))
 	}
 	return nil, nil
+}
+
+// PinsForLenient is PinsFor for luk scan: a stored pin that is not a lukd
+// key (an old TLS pin) is ignored, as if the endpoint had none, and
+// returned as a notice. A fragment is the user's own input and still fails.
+func PinsForLenient(cfg *Config, u *url.URL, fragment string) ([]channel.Pin, []string, error) {
+	if fragment != "" || cfg == nil {
+		pins, err := PinsFor(cfg, u, fragment)
+		return pins, nil, err
+	}
+	names := make([]string, 0, len(cfg.Endpoint))
+	for n := range cfg.Endpoint {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	want := origin(u)
+	var notices []string
+	for _, n := range names {
+		e := cfg.Endpoint[n]
+		eu, err := url.Parse(e.URL)
+		if err != nil || len(e.Pins) == 0 || origin(eu) != want {
+			continue
+		}
+		ok, bad := usablePins(n, e.Pins)
+		notices = append(notices, bad...)
+		if len(ok) == 0 {
+			continue
+		}
+		pins, err := channel.ParsePins(strings.Join(ok, ","))
+		return pins, notices, err
+	}
+	return nil, notices, nil
 }
 
 // origin is the scheme, lowercase host and port of u, the default port
