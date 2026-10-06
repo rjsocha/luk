@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -80,7 +81,12 @@ func openWork(j Job, p *config.Pipeline, step int, set []file, dir string) (out 
 	}
 	meta := filepath.Join(dir, "meta.json")
 	sc := j.Sidecar
-	b, err := json.Marshal(runstep.WorkMeta{
+	// Without HTML escaping a client meta within wire.MaxMetaHeader stays
+	// far below runstep.MaxWorkMeta, which ReadWork enforces.
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	err = enc.Encode(runstep.WorkMeta{
 		Server: runstep.WorkServer{ID: sc.ID, Sender: sc.Sender, Endpoint: sc.Endpoint, Received: sc.Received,
 			Size: sc.Size, SHA256: sc.SHA256, Expires: sc.Expires},
 		Client: sc.Client, Pipeline: p.Name, Step: step, Produced: len(set) > 0 && set[0].produced,
@@ -88,7 +94,7 @@ func openWork(j Job, p *config.Pipeline, step int, set []file, dir string) (out 
 	if err != nil {
 		return "", nil, err
 	}
-	if err := os.WriteFile(meta, b, 0o440); err != nil {
+	if err := os.WriteFile(meta, b.Bytes(), 0o440); err != nil {
 		return "", nil, err
 	}
 	logf, err = os.OpenFile(filepath.Join(dir, "log"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)

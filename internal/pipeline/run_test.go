@@ -803,3 +803,22 @@ func TestStoreRecordsSeries(t *testing.T) {
 		}
 	}
 }
+
+// A client meta within the header limit gives a meta.json within
+// runstep.MaxWorkMeta also when its strings are full of characters JSON
+// escapes for HTML.
+func TestRunStepMetaWithinCap(t *testing.T) {
+	s := script(t, `cp "$LUK_META" "$LUK_OUT/meta"
+`)
+	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - store: a\n", s))
+	d := e.dispatcher()
+	tags := []string{strings.Repeat("<", wire.MaxMetaHeader-100)}
+	j := e.enqueueWith(t, "id9", "up", func(j *Job) { j.Vars.Tags, j.Sidecar.Client.Tags = tags, tags }, "p")
+	if err := d.Submit(j); err != nil {
+		t.Fatal(err)
+	}
+	d.Wait()
+	if m := e.read(t, "a/file/robert.socha/meta"); !strings.Contains(m, tags[0]) {
+		t.Fatalf("meta.json of %d bytes without the raw tag", len(m))
+	}
+}
