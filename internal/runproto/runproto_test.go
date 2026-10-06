@@ -3,12 +3,21 @@ package runproto
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"maps"
+	"net"
+	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestFrameRoundTrip(t *testing.T) {
@@ -148,6 +157,240 @@ func TestLargestRequestFits(t *testing.T) {
 		t.Fatalf("%d bytes", len(b))
 	}
 	if r, err := ReadRequest(bufio.NewReaderSize(bytes.NewReader(b), MaxRequest)); err != nil || !maps.Equal(r.Env, env) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestDecodeStepRequest(t *testing.T) {
+	ok := map[string]StepRequest{
+		`{"pipeline":"p","step":2,"id":"20261006T100000Z-0a1b2c3d","env":{"LUK_NAME":"x"}}`: {Pipeline: "p", Step: 2, ID: "20261006T100000Z-0a1b2c3d", Env: map[string]string{"LUK_NAME": "x"}},
+		`{"pipeline":"p","step":1,"id":"i","job":"s3-upload"}`:                              {Pipeline: "p", Step: 1, ID: "i", Job: "s3-upload"},
+	}
+	for line, want := range ok {
+		got, err := decodeStepRequest([]byte(line + "\n"))
+		if err != nil || got.Pipeline != want.Pipeline || got.Step != want.Step || got.ID != want.ID || got.Job != want.Job || !maps.Equal(got.Env, want.Env) {
+			t.Errorf("%s: %+v %v", line, got, err)
+		}
+	}
+	for line, want := range map[string]string{
+		`{"pipeline":"p","step":"1","id":"i"}`:              "step: not a step number",
+		`{"pipeline":"p","step":1.5,"id":"i"}`:              "step: not a step number",
+		`{"pipeline":"p","step":0,"id":"i"}`:                "step: not a step number",
+		`{"pipeline":"p","step":-1,"id":"i"}`:               "step: not a step number",
+		`{"pipeline":"p","step":1e1,"id":"i"}`:              "step: not a step number",
+		`{"pipeline":"p","step":null,"id":"i"}`:             "step: not a step number",
+		`{"pipeline":"p","step":1}`:                         "pipeline, step and id required",
+		`{"pipeline":"p","step":1,"id":"i","work":"x"}`:     `unknown key "work"`,
+		`{"pipeline":"p","pipeline":"q","step":1,"id":"i"}`: `key "pipeline" repeated`,
+		`{"pipeline":"p","step":1,"id":"i","env":{"a":1}}`:  "env: a: not a string",
+		`{"pipeline":"p","step":1,"id":"i","job":null}`:     "job: not a string",
+		`{"pipeline":"p","step":1,"id":"i"} {}`:             "trailing data",
+		"{\"pipeline\":\"p\xff\",\"step\":1,\"id\":\"i\"}":  "not valid UTF-8",
+	} {
+		if _, err := decodeStepRequest([]byte(line + "\n")); err == nil || err.Error() != want {
+			t.Errorf("%s: want %q, got %v", line, want, err)
+		}
+	}
+}
+
+func TestStepRequestRoundTrip(t *testing.T) {
+	r := StepRequest{Pipeline: "p", Step: 3, ID: "i", Job: "j", Env: map[string]string{"LUK_TAGS": "a<b>&c"}}
+	b := r.Encode()
+	if !bytes.Contains(b, []byte("a<b>&c")) || b[len(b)-1] != '\n' {
+		t.Fatalf("%s", b)
+	}
+	got, err := decodeStepRequest(b)
+	if err != nil || got.Pipeline != r.Pipeline || got.Step != r.Step || got.ID != r.ID || got.Job != r.Job || !maps.Equal(got.Env, r.Env) {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if b := (StepRequest{Pipeline: "p", Step: 1, ID: "i"}).Encode(); bytes.Contains(b, []byte("job")) {
+		t.Fatalf("empty job encoded: %s", b)
+	}
+}
+
+func TestStartedFrame(t *testing.T) {
+	var b bytes.Buffer
+	NewFrameWriter(&b).Started()
+	typ, p, err := ReadFrame(&b)
+	if err != nil || typ != Started || len(p) != 0 {
+		t.Fatalf("%q %q %v", typ, p, err)
+	}
+	b.Reset()
+	WriteFrame(&b, Started, []byte("x"))
+	if _, _, err := ReadFrame(&b); err == nil || err.Error() != "frame 's' of 1 bytes" {
+		t.Fatalf("s frame with a payload: %v", err)
+	}
+}
+
+// unixPair is a connected SOCK_STREAM pair as *net.UnixConn.
+func unixPair(t *testing.T) (*net.UnixConn, *net.UnixConn) {
+	t.Helper()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c [2]*net.UnixConn
+	for i, fd := range fds {
+		f := os.NewFile(uintptr(fd), "pair")
+		fc, err := net.FileConn(f)
+		f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c[i] = fc.(*net.UnixConn)
+		t.Cleanup(func() { c[i].Close() })
+	}
+	return c[0], c[1]
+}
+
+// filePair is a connected SOCK_STREAM pair as *os.File.
+func filePair(t *testing.T) (*os.File, *os.File) {
+	t.Helper()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := os.NewFile(uintptr(fds[0]), "a"), os.NewFile(uintptr(fds[1]), "b")
+	t.Cleanup(func() { a.Close(); b.Close() })
+	return a, b
+}
+
+func TestReadStepRequest(t *testing.T) {
+	srv, cli := unixPair(t)
+	ch, peer := filePair(t)
+	req := StepRequest{Pipeline: "p", Step: 1, ID: "i", Env: map[string]string{"LUK_NAME": "x"}}
+	line := req.Encode()
+	// The line in two writes, the descriptor with the second one.
+	cli.Write(line[:5])
+	rights := unix.UnixRights(int(ch.Fd()))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(10 * time.Millisecond)
+		cli.WriteMsgUnix(line[5:], rights, nil)
+	}()
+	r, f, err := ReadStepRequest(srv)
+	<-done
+	if err != nil || r.Pipeline != "p" || r.Step != 1 || r.ID != "i" || r.Env["LUK_NAME"] != "x" {
+		t.Fatalf("%+v %v", r, err)
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte("z")); err != nil {
+		t.Fatal(err)
+	}
+	var b [1]byte
+	if _, err := peer.Read(b[:]); err != nil || b[0] != 'z' {
+		t.Fatalf("%q %v", b, err)
+	}
+}
+
+func TestReadStepRequestNeedsSocket(t *testing.T) {
+	srv, cli := unixPair(t)
+	f, _ := os.Open(os.DevNull)
+	defer f.Close()
+	cli.WriteMsgUnix(StepRequest{Pipeline: "p", Step: 1, ID: "i"}.Encode(), unix.UnixRights(int(f.Fd())), nil)
+	if _, _, err := ReadStepRequest(srv); err == nil || err.Error() != "request: descriptor is not a unix socket" {
+		t.Fatalf("got %v", err)
+	}
+	srv2, cli2 := unixPair(t)
+	cli2.Write(StepRequest{Pipeline: "p", Step: 1, ID: "i"}.Encode())
+	if _, _, err := ReadStepRequest(srv2); err == nil || err.Error() != "request: without its descriptor" {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestReadStepRequestRefuses(t *testing.T) {
+	ch, ch2 := filePair(t)
+	line := StepRequest{Pipeline: "p", Step: 1, ID: "i"}.Encode()
+	for name, c := range map[string]struct {
+		data   []byte
+		rights []byte
+		want   string
+	}{
+		"two descriptors": {line, unix.UnixRights(int(ch.Fd()), int(ch2.Fd())), "request: more than one descriptor"},
+		"after the line":  {append(slices.Clone(line), 'x'), unix.UnixRights(int(ch.Fd())), "request: data after the request line"},
+		"malformed":       {[]byte("{}\n"), unix.UnixRights(int(ch.Fd())), "request: pipeline, step and id required"},
+		"too large":       {bytes.Repeat([]byte(" "), MaxRequest+1), unix.UnixRights(int(ch.Fd())), "request larger than 32768 bytes"},
+		"no newline":      {line[:len(line)-1], unix.UnixRights(int(ch.Fd())), "read request: unexpected EOF"},
+	} {
+		srv, cli := unixPair(t)
+		go func() {
+			cli.WriteMsgUnix(c.data, c.rights, nil)
+			cli.CloseWrite()
+		}()
+		if _, f, err := ReadStepRequest(srv); err == nil || err.Error() != c.want || f != nil {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
+func TestAskStep(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "run.sock")
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	got := make(chan StepRequest, 1)
+	go func() {
+		c, err := l.AcceptUnix()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		r, f, err := ReadStepRequest(c)
+		if err != nil {
+			NewFrameWriter(c).Stream(Stderr).Write([]byte(err.Error()))
+			return
+		}
+		f.Close()
+		got <- r
+		w := NewFrameWriter(c)
+		w.Started()
+		w.Stream(Stdout).Write([]byte("out"))
+		w.Stream(Stderr).Write([]byte("err"))
+		w.Exit(3)
+	}()
+	ch, _ := filePair(t)
+	var stdout, stderr bytes.Buffer
+	started := 0
+	req := StepRequest{Pipeline: "p", Step: 2, ID: "i", Job: "j"}
+	err = AskStep(context.Background(), sock, req, ch, func() { started++ }, &stdout, &stderr)
+	var ee ExitError
+	if !errors.As(err, &ee) || ee != 3 || started != 1 || stdout.String() != "out" || stderr.String() != "err" {
+		t.Fatalf("%v started %d %q %q", err, started, stdout.String(), stderr.String())
+	}
+	if r := <-got; r.Pipeline != "p" || r.Step != 2 || r.ID != "i" || r.Job != "j" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestAskStepCancelled(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "run.sock")
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	closed := make(chan bool, 1)
+	go func() {
+		c, err := l.AcceptUnix()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, f, err := ReadStepRequest(c)
+		if err == nil {
+			f.Close()
+		}
+		NewFrameWriter(c).Started()
+		_, err = c.Read(make([]byte, 1))
+		closed <- err == io.EOF
+	}()
+	ch, _ := filePair(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	err = AskStep(ctx, sock, StepRequest{Pipeline: "p", Step: 1, ID: "i"}, ch, cancel, io.Discard, io.Discard)
+	if err == nil || err.Error() != "interrupted, job stopped" || !<-closed {
 		t.Fatalf("%v", err)
 	}
 }

@@ -13,9 +13,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -32,9 +35,10 @@ const (
 	MaxFrame = 1 << 20
 	maxExit  = 16
 
-	Stdout byte = 'o'
-	Stderr byte = 'e'
-	Exit   byte = 'x'
+	Stdout  byte = 'o'
+	Stderr  byte = 'e'
+	Exit    byte = 'x'
+	Started byte = 's'
 )
 
 // Request asks for one job on a work directory. Env is the free-form
@@ -124,6 +128,185 @@ func decodeRequest(b []byte) (Request, error) {
 	return r, nil
 }
 
+// StepRequest asks for the unit of a step, or of a nested job of that
+// step, on the workspace whose channel goes with the request. Env is the
+// free-form metadata environment lukd process passes on; lukd run keeps
+// only what runstep.CleanStepMeta allows of it.
+type StepRequest struct {
+	Pipeline string            `json:"pipeline"`
+	Step     int               `json:"step"`
+	ID       string            `json:"id"`
+	Job      string            `json:"job,omitempty"` // a nested job of the step; empty for the step itself
+	Env      map[string]string `json:"env"`
+}
+
+// Encode is the request line.
+func (r StepRequest) Encode() []byte {
+	if r.Env == nil {
+		r.Env = map[string]string{}
+	}
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.Encode(r)
+	return b.Bytes()
+}
+
+// maxRights is room for more descriptors than a request may carry, so
+// that a second one is seen and closed rather than truncated away.
+var maxRights = unix.CmsgSpace(4 * 4)
+
+// ReadStepRequest reads the request line and its one descriptor, which
+// must be an AF_UNIX socket; extra bytes after the line are malformed.
+func ReadStepRequest(c *net.UnixConn) (StepRequest, *os.File, error) {
+	buf := make([]byte, MaxRequest+1)
+	oob := make([]byte, maxRights)
+	var fds []int
+	closeAll := func() {
+		for _, fd := range fds {
+			unix.Close(fd)
+		}
+	}
+	fail := func(err error) (StepRequest, *os.File, error) {
+		closeAll()
+		return StepRequest{}, nil, err
+	}
+	n, end := 0, -1
+	for end < 0 && n < len(buf) {
+		m, oobn, flags, _, err := c.ReadMsgUnix(buf[n:], oob)
+		got, perr := rights(oob[:oobn])
+		fds = append(fds, got...)
+		switch {
+		case perr != nil:
+			return fail(fmt.Errorf("request: %w", perr))
+		case flags&unix.MSG_CTRUNC != 0:
+			return fail(errors.New("request: more than one descriptor"))
+		case err != nil && err != io.EOF:
+			return fail(fmt.Errorf("read request: %w", err))
+		case m == 0:
+			return fail(fmt.Errorf("read request: %w", io.ErrUnexpectedEOF))
+		}
+		end = bytes.IndexByte(buf[n:n+m], '\n')
+		if end >= 0 {
+			end += n
+		}
+		n += m
+	}
+	switch {
+	case end < 0 || end >= MaxRequest:
+		return fail(fmt.Errorf("request larger than %d bytes", MaxRequest))
+	case end+1 < n:
+		return fail(errors.New("request: data after the request line"))
+	case len(fds) == 0:
+		return fail(errors.New("request: without its descriptor"))
+	case len(fds) > 1:
+		return fail(errors.New("request: more than one descriptor"))
+	}
+	r, err := decodeStepRequest(buf[:n])
+	if err != nil {
+		return fail(fmt.Errorf("request: %w", err))
+	}
+	if d, err := unix.GetsockoptInt(fds[0], unix.SOL_SOCKET, unix.SO_DOMAIN); err != nil || d != unix.AF_UNIX {
+		return fail(errors.New("request: descriptor is not a unix socket"))
+	}
+	return r, os.NewFile(uintptr(fds[0]), "channel"), nil
+}
+
+// rights is the descriptors of the SCM_RIGHTS messages of oob.
+func rights(oob []byte) ([]int, error) {
+	if len(oob) == 0 {
+		return nil, nil
+	}
+	msgs, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return nil, err
+	}
+	var fds []int
+	for _, m := range msgs {
+		if m.Header.Level != unix.SOL_SOCKET || m.Header.Type != unix.SCM_RIGHTS {
+			continue
+		}
+		got, err := unix.ParseUnixRights(&m)
+		if err != nil {
+			return fds, err
+		}
+		fds = append(fds, got...)
+	}
+	return fds, nil
+}
+
+// decodeStepRequest decodes b, valid UTF-8 holding exactly one flat JSON
+// object: "pipeline" and "id" strings and "step" a number from 1, an
+// optional "job" string and an optional "env" object of strings, at most
+// MaxEnv of them. An unknown or repeated key, any other value and data
+// after the object are refused.
+func decodeStepRequest(b []byte) (StepRequest, error) {
+	var r StepRequest
+	if !utf8.Valid(b) {
+		return r, errors.New("not valid UTF-8")
+	}
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
+	if err := delim(d, '{'); err != nil {
+		return r, err
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		k, err := str(d)
+		if err != nil {
+			return r, err
+		}
+		if seen[k] {
+			return r, fmt.Errorf("key %q repeated", k)
+		}
+		seen[k] = true
+		switch k {
+		case "pipeline":
+			r.Pipeline, err = str(d)
+		case "step":
+			r.Step, err = stepNumber(d)
+		case "id":
+			r.ID, err = str(d)
+		case "job":
+			r.Job, err = str(d)
+		case "env":
+			r.Env, err = strMap(d)
+		default:
+			return r, fmt.Errorf("unknown key %q", k)
+		}
+		if err != nil {
+			return r, fmt.Errorf("%s: %w", k, err)
+		}
+	}
+	if err := delim(d, '}'); err != nil {
+		return r, err
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return r, errors.New("trailing data")
+	}
+	if !seen["pipeline"] || !seen["step"] || !seen["id"] {
+		return r, errors.New("pipeline, step and id required")
+	}
+	return r, nil
+}
+
+// stepNumber reads a JSON number that is an integer from 1.
+func stepNumber(d *json.Decoder) (int, error) {
+	t, err := d.Token()
+	if err != nil {
+		return 0, err
+	}
+	n, ok := t.(json.Number)
+	if !ok {
+		return 0, errors.New("not a step number")
+	}
+	i, err := strconv.Atoi(string(n))
+	if err != nil || i < 1 {
+		return 0, errors.New("not a step number")
+	}
+	return i, nil
+}
+
 // strMap reads an object of strings, without a repeated key, of at most
 // MaxEnv entries.
 func strMap(d *json.Decoder) (map[string]string, error) {
@@ -196,9 +379,9 @@ func ReadFrame(r io.Reader) (byte, []byte, error) {
 	}
 	n := binary.BigEndian.Uint32(h[1:])
 	switch {
-	case h[0] != Stdout && h[0] != Stderr && h[0] != Exit:
+	case h[0] != Stdout && h[0] != Stderr && h[0] != Exit && h[0] != Started:
 		return 0, nil, fmt.Errorf("unknown frame type %q", h[0])
-	case n > MaxFrame, h[0] == Exit && n > maxExit:
+	case n > MaxFrame, h[0] == Exit && n > maxExit, h[0] == Started && n != 0:
 		return 0, nil, fmt.Errorf("frame %q of %d bytes", h[0], n)
 	}
 	p := make([]byte, n)
@@ -239,6 +422,9 @@ func (f *FrameWriter) Exit(code int) error {
 	return f.write(Exit, []byte(strconv.Itoa(code)))
 }
 
+// Started writes the empty started frame.
+func (f *FrameWriter) Started() error { return f.write(Started, nil) }
+
 type stream struct {
 	f   *FrameWriter
 	typ byte
@@ -277,6 +463,40 @@ func Ask(ctx context.Context, socket string, req Request, stdout, stderr io.Writ
 	if _, err := conn.Write(req.Encode()); err != nil {
 		return err
 	}
+	return relay(ctx, conn, nil, stdout, stderr)
+}
+
+// AskStep connects to socket, sends req with ch attached and relays the
+// frames: started is called once on 's'; stdout and stderr get 'o' and
+// 'e'. A non-zero exit is an ExitError. A cancelled ctx closes the
+// connection.
+func AskStep(ctx context.Context, socket string, req StepRequest, ch *os.File, started func(), stdout, stderr io.Writer) error {
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "unix", socket)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	conn := c.(*net.UnixConn)
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	line := req.Encode()
+	n, _, err := conn.WriteMsgUnix(line, unix.UnixRights(int(ch.Fd())), nil)
+	if err == nil && n < len(line) {
+		_, err = conn.Write(line[n:])
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return errors.New("interrupted, job stopped")
+		}
+		return err
+	}
+	return relay(ctx, conn, started, stdout, stderr)
+}
+
+// relay reads the frames of conn up to the exit frame. A started frame is
+// refused when started is nil and when it comes twice.
+func relay(ctx context.Context, conn net.Conn, started func(), stdout, stderr io.Writer) error {
 	for {
 		typ, p, err := ReadFrame(conn)
 		if ctx.Err() != nil {
@@ -289,6 +509,12 @@ func Ask(ctx context.Context, socket string, req Request, stdout, stderr io.Writ
 			return err
 		}
 		switch typ {
+		case Started:
+			if started == nil {
+				return fmt.Errorf("unexpected frame %q", typ)
+			}
+			started()
+			started = nil
 		case Stdout:
 			_, err = stdout.Write(p)
 		case Stderr:

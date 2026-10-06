@@ -273,3 +273,57 @@ func TestMetaOfEnv(t *testing.T) {
 		t.Fatalf("\n got %q\nwant %q", got, env)
 	}
 }
+
+func TestUnitVars(t *testing.T) {
+	ws := "/var/lib/luk/root/job/lukd-step-offsite-2-0123456789ab"
+	meta := StepMeta(upload("db.sql", "web1", "prod", "daily"), []string{"db.sql"})
+	got := UnitVars(ws, "20261006T100000Z-0a1b2c3d", "offsite", 2, meta)
+	want := []string{
+		"LUK_WORK=" + ws, "LUK_IN=" + ws + "/in", "LUK_OUT=" + ws + "/out", "LUK_META=" + ws + "/meta.json",
+		"LUK_TMP=" + ws + "/tmp", "LUK_ID=20261006T100000Z-0a1b2c3d", "LUK_SENDER=robert.socha",
+		"LUK_ENDPOINT=up", "LUK_PIPELINE=offsite", "LUK_FILE=" + ws + "/in/db.sql", "LUK_NAME=db.sql",
+		"LUK_STEP=2", "LUK_TAGS=prod,daily", "LUK_HOSTNAME=web1", "LUK_ORIGIN=web1", "TMPDIR=" + ws + "/tmp",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestUnitVarsFilter(t *testing.T) {
+	ws := "/ws"
+	got := UnitVars(ws, "i", "p", 1, map[string]string{
+		"LUK_FILE": "/etc/passwd", "LUK_NAME": "a\nb", "LUK_TAGS": strings.Repeat("t", 1025),
+		"LUK_WORK": "/elsewhere", "LUK_ROOT": "/x", "OTHER": "y", "LUK_SENDER": "ok", "TMPDIR": "/x",
+	})
+	want := []string{
+		"LUK_WORK=/ws", "LUK_IN=/ws/in", "LUK_OUT=/ws/out", "LUK_META=/ws/meta.json", "LUK_TMP=/ws/tmp",
+		"LUK_ID=i", "LUK_SENDER=ok", "LUK_PIPELINE=p", "LUK_STEP=1", "TMPDIR=/ws/tmp",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestStepMetaSeveralFiles(t *testing.T) {
+	m := StepMeta(upload("db.sql", ""), []string{"a", "b"})
+	if _, ok := m["LUK_FILE"]; ok || m["LUK_NAME"] != "" || m["LUK_ORIGIN"] != "robert.socha" {
+		t.Fatalf("%v", m)
+	}
+}
+
+func TestCleanStepMeta(t *testing.T) {
+	for _, f := range []string{"db.sql", "a b", strings.Repeat("x", 255)} {
+		if got := CleanStepMeta(map[string]string{"LUK_FILE": f}); got["LUK_FILE"] != f {
+			t.Errorf("LUK_FILE %q dropped", f)
+		}
+	}
+	for _, f := range []string{"", ".x", "..", "a/b", "/ws/in/db.sql", "a\nb", strings.Repeat("x", 256)} {
+		if got := CleanStepMeta(map[string]string{"LUK_FILE": f}); len(got) != 0 {
+			t.Errorf("LUK_FILE %q kept", f)
+		}
+	}
+	got := CleanStepMeta(map[string]string{"LUK_SENDER": "s", "LUK_NAME": "", "LUK_TMP": "/", "LUK_ID": "x", "PATH": "/tmp"})
+	if want := map[string]string{"LUK_SENDER": "s", "LUK_NAME": ""}; !maps.Equal(got, want) {
+		t.Fatalf("%q", got)
+	}
+}

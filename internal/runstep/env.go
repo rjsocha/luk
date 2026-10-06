@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -17,6 +19,16 @@ import (
 
 // MaxWorkMeta caps meta.json of a work directory.
 const MaxWorkMeta = 64 << 10
+
+// Names in a workspace besides in/, out/ and meta.json.
+const (
+	// TmpDir is the scratch directory of the unit, LUK_TMP and TMPDIR.
+	TmpDir = "tmp"
+	// LukDir is the directory of the channel socket of a unit.
+	LukDir = ".luk"
+	// SocketName is the channel socket in LukDir.
+	SocketName = "run.sock"
+)
 
 // WorkServer is what lukd knows of the upload, the server part of
 // meta.json.
@@ -72,6 +84,21 @@ func safeValue(v string) bool {
 // MaxMetaValue bytes. Everything else is dropped. lukd and the clients of
 // lukd run apply it to what they derive, lukd run to what it receives.
 func CleanMeta(work string, env map[string]string) map[string]string {
+	return cleanMeta(env, func(v string) bool {
+		n := filepath.Base(v)
+		return ValidName(n) && v == filepath.Join(work, "in", n)
+	})
+}
+
+// CleanStepMeta is CleanMeta of a step request: LUK_FILE is a valid bare
+// file name, which UnitVars places under the workspace.
+func CleanStepMeta(env map[string]string) map[string]string {
+	return cleanMeta(env, ValidName)
+}
+
+// cleanMeta is the filter of CleanMeta and CleanStepMeta; file decides
+// on LUK_FILE.
+func cleanMeta(env map[string]string, file func(string) bool) map[string]string {
 	m := map[string]string{}
 	for _, k := range MetaNames {
 		v, ok := env[k]
@@ -84,7 +111,7 @@ func CleanMeta(work string, env map[string]string) map[string]string {
 				continue
 			}
 		case "LUK_FILE":
-			if n := filepath.Base(v); !ValidName(n) || v != filepath.Join(work, "in", n) {
+			if !file(v) {
 				continue
 			}
 		}
@@ -135,13 +162,64 @@ func Meta(work string, lookup func(string) (string, bool)) map[string]string {
 // set has the file names names; root is LUK_ROOT. LUK_FILE is there only
 // for a set of exactly one file.
 func Env(work, root string, m WorkMeta, names []string) []string {
+	meta := uploadMeta(m, names)
+	if n, ok := meta["LUK_FILE"]; ok {
+		meta["LUK_FILE"] = filepath.Join(work, "in", n)
+	}
+	return Vars(work, root, meta)
+}
+
+// StepMeta is the free-form metadata lukd process passes on in a step
+// request for a set with meta.json m and the file names names, after
+// CleanStepMeta: LUK_FILE the bare name, only for a set of exactly one
+// file.
+func StepMeta(m WorkMeta, names []string) map[string]string {
+	return CleanStepMeta(uploadMeta(m, names))
+}
+
+// unitOrder is the order of the variables of a unit: the metadata
+// variables of the Step environment, then TMPDIR.
+var unitOrder = []string{
+	"LUK_WORK", "LUK_IN", "LUK_OUT", "LUK_META", "LUK_TMP", "LUK_ID", "LUK_SENDER", "LUK_ENDPOINT",
+	"LUK_PIPELINE", "LUK_FILE", "LUK_NAME", "LUK_STEP", "LUK_TAGS", "LUK_HOSTNAME", "LUK_ORIGIN", "TMPDIR",
+}
+
+// UnitVars is the environment lukd run gives the unit of a step on
+// workspace ws: the workspace-bound variables from ws, the step-bound
+// ones from the checked request, the free-form ones from meta after
+// CleanStepMeta, LUK_FILE as ws/in/<name>. A variable without a safe
+// value is left out.
+func UnitVars(ws, id, pipeline string, step int, meta map[string]string) []string {
+	v := CleanStepMeta(meta)
+	if n, ok := v["LUK_FILE"]; ok {
+		v["LUK_FILE"] = filepath.Join(ws, "in", n)
+	}
+	tmp := filepath.Join(ws, TmpDir)
+	maps.Copy(v, map[string]string{
+		"LUK_WORK": ws, "LUK_IN": filepath.Join(ws, "in"), "LUK_OUT": filepath.Join(ws, "out"),
+		"LUK_META": filepath.Join(ws, "meta.json"), "LUK_TMP": tmp, "TMPDIR": tmp,
+		"LUK_ID": id, "LUK_PIPELINE": pipeline, "LUK_STEP": strconv.Itoa(step),
+	})
+	var env []string
+	for _, k := range unitOrder {
+		if x, ok := v[k]; ok && safeValue(x) {
+			env = append(env, k+"="+x)
+		}
+	}
+	return env
+}
+
+// uploadMeta is the free-form metadata of a set with meta.json m and the
+// file names names, unfiltered; LUK_FILE is the bare name, only for a set
+// of exactly one file.
+func uploadMeta(m WorkMeta, names []string) map[string]string {
 	meta := map[string]string{
 		"LUK_SENDER":   m.Server.Sender,
 		"LUK_ENDPOINT": m.Server.Endpoint,
 	}
 	name := ""
 	if len(names) == 1 {
-		meta["LUK_FILE"] = filepath.Join(work, "in", names[0])
+		meta["LUK_FILE"] = names[0]
 		name = names[0]
 		if !m.Produced {
 			name = ""
@@ -162,7 +240,7 @@ func Env(work, root string, m WorkMeta, names []string) []string {
 	meta["LUK_TAGS"] = strings.Join(m.Client.Tags, ",")
 	meta["LUK_HOSTNAME"] = host
 	meta["LUK_ORIGIN"] = origin
-	return Vars(work, root, meta)
+	return meta
 }
 
 // WorkEnv is Env of the work directory work, read with ReadWork.
