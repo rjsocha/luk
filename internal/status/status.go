@@ -1,7 +1,8 @@
-// Package status keeps the status directory <root>/status: the liveness
-// file of each role (see Alive) and process/status.json, the last
-// pipeline result per (pipeline, sender) and the evaluation of the watch
-// rules of the storages. For the pipelines lukd reports facts only; their
+// Package status keeps the status directory <root>/data/status: the
+// liveness file of each role (see Alive) and process/status.json, the last
+// pipeline result per (pipeline, sender), the evaluation of the watch
+// rules of the storages, the units of lukd run, the queue and the
+// leftover workspaces. For the pipelines lukd reports facts only; their
 // thresholds live in the monitoring check that reads the file. The watch
 // rules hold their thresholds in the lukd configuration.
 package status
@@ -85,10 +86,39 @@ type Watch struct {
 	Evaluated      string `json:"evaluated"`
 }
 
+// Units is the gauge of the units of the run steps: running, waiting for a
+// slot and the seconds the longest wait has lasted (0 without one).
+type Units struct {
+	Running    int   `json:"running"`
+	Waiting    int   `json:"waiting"`
+	OldestWait int64 `json:"oldest_wait"`
+}
+
+// Queue describes the uploads not processed yet. The oldest by acceptance
+// order is named by OldestID, OldestReceived and OldestAge (seconds since
+// it was received); all three are omitted without one.
+type Queue struct {
+	Entries        int    `json:"entries"`
+	OldestID       string `json:"oldest_id,omitempty"`
+	OldestReceived string `json:"oldest_received,omitempty"`
+	OldestAge      *int64 `json:"oldest_age,omitempty"`
+}
+
+// Workspaces repeats the count of leftover workspaces of lukd run. Error
+// is set instead of a count when the count file cannot be read.
+type Workspaces struct {
+	Leftover int    `json:"leftover"`
+	Updated  string `json:"updated"`
+	Error    string `json:"error,omitempty"`
+}
+
 // file is the content of status.json.
 type file struct {
-	Pipelines []Entry `json:"pipelines"`
-	Watch     []Watch `json:"watch"`
+	Pipelines  []Entry     `json:"pipelines"`
+	Watch      []Watch     `json:"watch"`
+	Units      Units       `json:"units"`
+	Queue      Queue       `json:"queue"`
+	Workspaces *Workspaces `json:"workspaces,omitempty"`
 }
 
 // Result is one finished pipeline run; a non-empty Error marks a failure
@@ -113,6 +143,9 @@ type Store struct {
 	mu      sync.Mutex
 	entries map[Key]Entry
 	watch   []Watch
+	units   Units
+	queue   Queue
+	ws      *Workspaces
 	// dirty marks entries the file does not hold yet: the last write failed.
 	dirty bool
 }
@@ -288,6 +321,20 @@ func (s *Store) SetWatch(ws []Watch) error {
 	return s.persist()
 }
 
+// SetRuntime replaces the units, the queue and the workspaces (nil: the
+// count file does not exist) and rewrites the file.
+func (s *Store) SetRuntime(u Units, q Queue, w *Workspaces) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.units, s.queue = u, q
+	s.ws = nil
+	if w != nil {
+		c := *w
+		s.ws = &c
+	}
+	return s.persist()
+}
+
 // Watch returns the watch evaluations.
 func (s *Store) Watch() []Watch {
 	s.mu.Lock()
@@ -341,7 +388,7 @@ func (s *Store) write() error {
 	if w == nil {
 		w = []Watch{}
 	}
-	b, err := json.MarshalIndent(file{Pipelines: s.sorted(), Watch: w}, "", "  ")
+	b, err := json.MarshalIndent(file{Pipelines: s.sorted(), Watch: w, Units: s.units, Queue: s.queue, Workspaces: s.ws}, "", "  ")
 	if err != nil {
 		return err
 	}

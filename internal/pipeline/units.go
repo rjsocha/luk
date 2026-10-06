@@ -3,15 +3,9 @@ package pipeline
 import (
 	"sync"
 	"time"
-)
 
-// Units is the gauge of the units of the run steps in status.json.
-// OldestWait is the age in seconds of the oldest wait, 0 without one.
-type Units struct {
-	Running    int
-	Waiting    int
-	OldestWait int64
-}
+	"luk/internal/status"
+)
 
 // unitGauge counts the units of the run steps for status.json: running
 // from the s frame to the end of the step, waiting from the connection to
@@ -64,7 +58,7 @@ func (g *unitGauge) snapshot(now time.Time) (running, waiting int, oldestWait in
 }
 
 // Units is the gauge of the units of the run steps at now.
-func (d *Dispatcher) Units(now time.Time) Units {
+func (d *Dispatcher) Units(now time.Time) status.Units {
 	r, w, o := d.units.snapshot(now)
-	return Units{Running: r, Waiting: w, OldestWait: o}
+	return status.Units{Running: r, Waiting: w, OldestWait: o}
 }

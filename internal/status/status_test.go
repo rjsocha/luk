@@ -522,3 +522,45 @@ func TestSkippedOlder(t *testing.T) {
 		t.Fatalf("reopened %+v", es)
 	}
 }
+
+func TestRuntimeInStatus(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "status.json")
+	s := New(p)
+	age := int64(300)
+	q := Queue{Entries: 7, OldestID: "20261004T115500Z-0a1b2c3d", OldestReceived: "2026-10-04T11:55:00Z", OldestAge: &age}
+	if err := s.SetRuntime(Units{Running: 3, Waiting: 2, OldestWait: 140}, q, &Workspaces{Leftover: 0, Updated: "2026-10-04T12:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	compact := func(k string) string {
+		var got map[string]json.RawMessage
+		b, _ := os.ReadFile(p)
+		json.Unmarshal(b, &got)
+		var c bytes.Buffer
+		json.Compact(&c, got[k])
+		return c.String()
+	}
+	for k, want := range map[string]string{
+		"units":      `{"running":3,"waiting":2,"oldest_wait":140}`,
+		"queue":      `{"entries":7,"oldest_id":"20261004T115500Z-0a1b2c3d","oldest_received":"2026-10-04T11:55:00Z","oldest_age":300}`,
+		"workspaces": `{"leftover":0,"updated":"2026-10-04T12:00:00Z"}`,
+	} {
+		if got := compact(k); got != want {
+			t.Errorf("%s: %s", k, got)
+		}
+	}
+	zero := int64(0)
+	s.SetRuntime(Units{}, Queue{Entries: 1, OldestID: "x", OldestAge: &zero}, &Workspaces{Error: "corrupt"})
+	if got := compact("queue"); got != `{"entries":1,"oldest_id":"x","oldest_age":0}` {
+		t.Errorf("queue: %s", got)
+	}
+	if got := compact("workspaces"); got != `{"leftover":0,"updated":"","error":"corrupt"}` {
+		t.Errorf("workspaces: %s", got)
+	}
+	// A record keeps the runtime parts; no workspaces file leaves the key out.
+	s.SetRuntime(Units{}, Queue{}, nil)
+	s.Record(Result{Pipeline: "p", Sender: "s", ID: "i", Received: "2026-10-04T12:00:00Z"})
+	b, _ := os.ReadFile(p)
+	if got := compact("queue"); got != `{"entries":0}` || bytes.Contains(b, []byte("workspaces")) {
+		t.Fatalf("%s", b)
+	}
+}

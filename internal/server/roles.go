@@ -220,7 +220,7 @@ func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	expose.StartJanitor(ctx, cur.Load, log, time.Minute, expose.Maintain, d.Maintain, d.RefreshWatch, beat)
+	expose.StartJanitor(ctx, cur.Load, log, time.Minute, expose.Maintain, d.Maintain, func(now time.Time) { d.RefreshWatch(now); d.RefreshRuntime(now) }, beat)
 	wake := make(chan struct{}, 1)
 	watch := watchQueues(ctx, wake, log)
 	watch(pipeline.QueueDirs(cfg))
