@@ -123,10 +123,10 @@ func (s *Server) serve(g *Global, peer uint32, br *bufio.Reader, fw *runproto.Fr
 	if err != nil {
 		return refusal{err}
 	}
-	vars, err := JobEnv(g.Root, work, peer)
-	if err != nil {
-		return refusal{err}
-	}
+	// The path-bound variables come from the checked path and run.yaml,
+	// the free-form metadata from the request: lukd run never reads the
+	// work directory.
+	vars := runstep.Vars(work, g.Root, req.Env)
 	unit := UnitName(req.Job)
 	argv := job.Argv(unit, req.Job, pipeline, work, GroupName(gid), vars)
 	who := job.User
@@ -289,37 +289,6 @@ func CheckWork(root, work string, uid uint32) (string, string, uint32, error) {
 		return "", "", 0, fmt.Errorf("work %q: owned by uid %d, not the peer", work, st.Uid)
 	}
 	return real, parts[1], st.Gid, nil
-}
-
-// JobEnv is the LUK_* metadata environment (runstep.Env) of work, a step
-// work directory accepted by CheckWork, with root as LUK_ROOT. The
-// directory must still be owned by uid when opened; its meta.json is read
-// with runstep.ReadWork and must name the id, the pipeline and the step of
-// the path.
-func JobEnv(root, work string, uid uint32) ([]string, error) {
-	r, err := os.OpenRoot(work)
-	if err != nil {
-		return nil, fmt.Errorf("work %q: %w", work, err)
-	}
-	defer r.Close()
-	fi, err := r.Stat(".")
-	if err != nil {
-		return nil, fmt.Errorf("work %q: %w", work, err)
-	}
-	if st := fi.Sys().(*syscall.Stat_t); !fi.IsDir() || st.Uid != uid {
-		return nil, fmt.Errorf("work %q: not a directory owned by the peer", work)
-	}
-	m, names, err := runstep.ReadWork(r)
-	if err != nil {
-		return nil, fmt.Errorf("work %q: %w", work, err)
-	}
-	step := filepath.Base(work)
-	pipeline := filepath.Base(filepath.Dir(work))
-	id := filepath.Base(filepath.Dir(filepath.Dir(work)))
-	if m.Server.ID != id || m.Pipeline != pipeline || strconv.Itoa(m.Step) != step {
-		return nil, fmt.Errorf("work %q: meta.json names id %q, pipeline %q, step %d, not those of the path", work, m.Server.ID, m.Pipeline, m.Step)
-	}
-	return runstep.Env(work, root, m, names), nil
 }
 
 // unsafePathRune reports a rune refused in a work path: systemd-run and

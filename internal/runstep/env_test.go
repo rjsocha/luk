@@ -2,6 +2,7 @@ package runstep
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,8 +16,8 @@ import (
 // bytes) and the files of in/.
 func newWork(t *testing.T, m any, in ...string) string {
 	t.Helper()
-	w := t.TempDir()
-	if err := os.Mkdir(filepath.Join(w, "in"), 0o750); err != nil {
+	w := filepath.Join(t.TempDir(), "work", "20261006T100000Z-0a1b2c3d", "offsite", "2")
+	if err := os.MkdirAll(filepath.Join(w, "in"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(w, "out"), 0o750); err != nil {
@@ -184,5 +185,75 @@ func TestWorkEnvSkipsNonRegular(t *testing.T) {
 	os.Symlink("db.sql", filepath.Join(w, "in", "l"))
 	if m := envMap(workEnv(t, w)); m["LUK_FILE"] != filepath.Join(w, "in", "db.sql") {
 		t.Errorf("%v", m)
+	}
+}
+
+func TestCleanMeta(t *testing.T) {
+	const w = "/var/lib/luk/work/20261006T100000Z-0a1b2c3d/offsite/2"
+	kib := strings.Repeat("é", 512)
+	got := CleanMeta(w, map[string]string{
+		"LUK_SENDER": "robert.socha", "LUK_ENDPOINT": "", "LUK_TAGS": kib, "LUK_HOSTNAME": kib + "x",
+		"LUK_ORIGIN": "db1\n", "LUK_NAME": "db.sql", "LUK_FILE": w + "/in/db.sql",
+		"LUK_WORK": "/etc", "LUK_IN": "/etc", "LUK_OUT": "/etc", "LUK_META": "/etc/shadow", "LUK_ROOT": "/",
+		"LUK_ID": "x", "LUK_PIPELINE": "x", "LUK_STEP": "9", "LUK_JOB": "x", "LUK_TMP": "/", "LUK_STATE": "/",
+		"LD_PRELOAD": "/tmp/x.so", "PATH": "/tmp", "luk_tags": "x",
+	})
+	want := map[string]string{
+		"LUK_SENDER": "robert.socha", "LUK_ENDPOINT": "", "LUK_TAGS": kib, "LUK_NAME": "db.sql", "LUK_FILE": w + "/in/db.sql",
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("\n got %q\nwant %q", got, want)
+	}
+	for name, v := range map[string]string{
+		"nul": "a\x00b", "newline": "a\nb", "escape": "a\x1b[2J", "del": "a\x7f", "c1": "a\u0085", "invalid utf-8": "a\xffb",
+		"long": strings.Repeat("a", MaxMetaValue+1),
+	} {
+		if got := CleanMeta(w, map[string]string{"LUK_TAGS": v}); len(got) != 0 {
+			t.Errorf("%s kept: %q", name, got)
+		}
+	}
+	for _, n := range []string{"", ".hidden", "a/b", "..", strings.Repeat("x", 256)} {
+		if got := CleanMeta(w, map[string]string{"LUK_NAME": n}); n != "" && len(got) != 0 || n == "" && got["LUK_NAME"] != "" {
+			t.Errorf("LUK_NAME %q: %q", n, got)
+		}
+	}
+	for _, f := range []string{"", "db.sql", "/etc/passwd", w + "/in", w + "/in/", w + "/in/.x", w + "/in/a/b", w + "/in/../meta.json",
+		w + "/out/x", w + "/in//x", "/var/lib/luk/work/20261006T100000Z-0a1b2c3d/offsite/3/in/x"} {
+		if got := CleanMeta(w, map[string]string{"LUK_FILE": f}); len(got) != 0 {
+			t.Errorf("LUK_FILE %q kept", f)
+		}
+	}
+}
+
+func TestVarsPathBound(t *testing.T) {
+	const w = "/var/lib/luk/work/20261006T100000Z-0a1b2c3d/offsite/2"
+	sent := map[string]string{
+		"LUK_WORK": "/etc", "LUK_IN": "/etc", "LUK_OUT": "/etc", "LUK_META": "/etc/shadow", "LUK_ROOT": "/",
+		"LUK_ID": "x", "LUK_PIPELINE": "x", "LUK_STEP": "9", "LUK_SENDER": "robert.socha", "LUK_TAGS": "a,b",
+	}
+	want := []string{
+		"LUK_WORK=" + w, "LUK_IN=" + w + "/in", "LUK_OUT=" + w + "/out", "LUK_META=" + w + "/meta.json",
+		"LUK_ID=20261006T100000Z-0a1b2c3d", "LUK_SENDER=robert.socha", "LUK_PIPELINE=offsite",
+		"LUK_ROOT=/srv/luk", "LUK_STEP=2", "LUK_TAGS=a,b",
+	}
+	if got := Vars(w, "/srv/luk", sent); !slices.Equal(got, want) {
+		t.Fatalf("\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestMetaOfEnv(t *testing.T) {
+	w := newWork(t, upload("db.sql", "db1", "daily"), "db.sql")
+	env := workEnv(t, w)
+	lookup := func(k string) (string, bool) {
+		v, ok := envMap(env)[k]
+		return v, ok
+	}
+	sent := Meta(w, lookup)
+	if len(sent) != len(MetaNames) || sent["LUK_FILE"] != w+"/in/db.sql" || sent["LUK_WORK"] != "" {
+		t.Fatalf("%q", sent)
+	}
+	// What a client sends gives lukd run the environment the run step had.
+	if got := Vars(w, "/var/lib/luk", sent); !slices.Equal(got, env) {
+		t.Fatalf("\n got %q\nwant %q", got, env)
 	}
 }

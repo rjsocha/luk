@@ -744,7 +744,7 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, Outcome) {
 				continue
 			}
 			if s.Relay != "" {
-				tail, err := relayStep(j, p, i+1, s, set, stepDir(work, i+1), d.stop)
+				tail, err := relayStep(j, p, i+1, s, set, stepDir(work, i+1), cfg.Root, d.stop)
 				if err != nil {
 					logged, output = tail, tail
 					return i + 1, fmt.Errorf("relay %s: %w", s.Relay, err)

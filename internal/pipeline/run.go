@@ -165,14 +165,28 @@ func runStep(j Job, p *config.Pipeline, step int, s config.Step, set []file, dir
 }
 
 // relayStep asks lukd run to run the job s.Relay on the work directory dir
-// prepared as for a run step, under the pipeline timeout. The job only
+// prepared as for a run step, under the pipeline timeout, passing on the
+// metadata of the run step environment (root is LUK_ROOT). The job only
 // reads the set, which passes on unchanged. It returns the tail of the
 // job's output, with the error on failure.
-func relayStep(j Job, p *config.Pipeline, step int, s config.Step, set []file, dir string, stop <-chan struct{}) (string, error) {
+func relayStep(j Job, p *config.Pipeline, step int, s config.Step, set []file, dir, root string, stop <-chan struct{}) (string, error) {
 	out, logf, err := openWork(j, p, step, set, dir)
 	if err != nil {
 		return "", err
 	}
+	vars, err := runstep.WorkEnv(dir, root)
+	if err != nil {
+		logf.Close()
+		return "", err
+	}
+	meta := runstep.Meta(dir, func(k string) (string, bool) {
+		for _, kv := range vars {
+			if n, v, _ := strings.Cut(kv, "="); n == k {
+				return v, true
+			}
+		}
+		return "", false
+	})
 	w := &capWriter{f: logf, left: logCap}
 	timeout := stepTimeout(p)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -186,7 +200,7 @@ func relayStep(j Job, p *config.Pipeline, step int, s config.Step, set []file, d
 		case <-ctx.Done():
 		}
 	}()
-	err = runproto.Ask(ctx, runSocket, runproto.Request{Job: s.Relay, Work: dir}, w, w)
+	err = runproto.Ask(ctx, runSocket, runproto.Request{Job: s.Relay, Work: dir, Env: meta}, w, w)
 	if err != nil {
 		select {
 		case <-interrupted:

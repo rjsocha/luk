@@ -17,7 +17,7 @@ import (
 
 	"luk/internal/config"
 	"luk/internal/queue"
-	"luk/internal/rund"
+	"luk/internal/runstep"
 	"luk/internal/status"
 	"luk/internal/store"
 	"luk/internal/wire"
@@ -578,16 +578,13 @@ func TestRunEnvOriginWithoutHostname(t *testing.T) {
 	}
 }
 
-// A run step and a job of lukd run on the same work directory see the
-// same LUK_* metadata: each step keeps a copy of its meta.json and in/ at
-// the same place under another root, and rund.JobEnv of the copy matches
-// the environment of the step, the roots swapped.
+// A run step and a job it starts with luk-job run see the same LUK_*
+// metadata: what luk-job passes on from its environment (runstep.Meta)
+// and what lukd run derives from the path give the environment of the
+// step.
 func TestRunStepAndJobSeeSameEnv(t *testing.T) {
 	keep := t.TempDir()
 	s := script(t, `set -e
-k="$KEEP/work/$LUK_ID/$LUK_PIPELINE/$LUK_STEP"
-mkdir -p "$k"
-cp -a "$LUK_META" "$LUK_IN" "$LUK_OUT" "$k/"
 env | grep '^LUK_' | sort > "$KEEP/env$LUK_STEP"
 if [ "$LUK_STEP" = 1 ]; then printf x > "$LUK_OUT/a.bin"; printf y > "$LUK_OUT/b.bin"; fi
 if [ "$LUK_STEP" = 2 ]; then cat "$LUK_IN"/* > "$LUK_OUT/all.bin"; fi
@@ -609,17 +606,10 @@ if [ "$LUK_STEP" = 2 ]; then cat "$LUK_IN"/* > "$LUK_OUT/all.bin"; fi
 			t.Fatal(err)
 		}
 		want := strings.Split(strings.TrimSpace(string(b)), "\n")
-		got, err := rund.JobEnv(keep, filepath.Join(keep, "work", "id11", "p", strconv.Itoa(step)), uint32(os.Getuid()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for i, kv := range got {
-			k, v, _ := strings.Cut(kv, "=")
-			if v == keep || strings.HasPrefix(v, keep+"/") {
-				v = e.root + strings.TrimPrefix(v, keep)
-			}
-			got[i] = k + "=" + v
-		}
+		m := envLines(string(b))
+		work := filepath.Join(e.root, "work", "id11", "p", strconv.Itoa(step))
+		sent := runstep.Meta(work, func(k string) (string, bool) { v, ok := m[k]; return v, ok })
+		got := runstep.Vars(work, e.root, sent)
 		sort.Strings(got)
 		if !slices.Equal(got, want) {
 			t.Errorf("step %d:\n job %q\n run %q", step, got, want)

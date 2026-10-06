@@ -8,12 +8,15 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"luk/internal/runproto"
+	"luk/internal/runstep"
 	"luk/internal/status"
+	"luk/internal/wire"
 )
 
 // fakeRund makes relay steps connect to a socket served by handle, one
@@ -278,5 +281,36 @@ func TestCloseInterruptsRelay(t *testing.T) {
 	recs := e.logs.records(t)
 	if find(recs, "pipeline failed", "p") != nil || find(recs, "pipeline interrupted", "p") == nil {
 		t.Fatalf("logs %v", recs)
+	}
+}
+
+// A relay step passes on the metadata of its work directory: lukd run
+// derives from it and the path the environment a run step there has.
+func TestRelaySendsMetadata(t *testing.T) {
+	type seen struct{ job, run []string }
+	got := make(chan seen, 1)
+	var root string
+	fakeRund(t, func(r runproto.Request, _ net.Conn, fw *runproto.FrameWriter) {
+		run, err := runstep.WorkEnv(r.Work, root)
+		if err != nil {
+			t.Error(err)
+		}
+		got <- seen{runstep.Vars(r.Work, root, r.Env), run}
+		fw.Exit(0)
+	})
+	e := newRunEnv(t, "    steps:\n      - relay: s3-upload\n      - store: a\n")
+	root = e.root
+	d := e.dispatcher()
+	j := e.enqueueWith(t, "id1", "up", func(j *Job) {
+		j.Vars.Tags, j.Vars.Hostname = []string{"daily"}, "db1"
+		j.Sidecar.Client.Tags, j.Sidecar.Client.Backup = j.Vars.Tags, &wire.Backup{Hostname: "db1"}
+	}, "p")
+	if err := d.Submit(j); err != nil {
+		t.Fatal(err)
+	}
+	d.Wait()
+	sn := <-got
+	if !slices.Equal(sn.job, sn.run) || !slices.Contains(sn.job, "LUK_TAGS=daily") {
+		t.Fatalf("\n job %q\n run %q", sn.job, sn.run)
 	}
 }

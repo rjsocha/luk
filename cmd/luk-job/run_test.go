@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"maps"
 	"net"
 	"path/filepath"
 	"strings"
@@ -97,5 +98,25 @@ func TestRunCancelClosesConnection(t *testing.T) {
 	}
 	if err := <-errc; err == nil || !strings.Contains(err.Error(), "interrupted") {
 		t.Fatalf("%v", err)
+	}
+}
+
+// luk-job run passes on the metadata of its environment, cleaned, and
+// nothing else.
+func TestRunSendsMetadata(t *testing.T) {
+	w := newWork(t, map[string]string{"x": "1"})
+	for k, v := range map[string]string{
+		"LUK_SENDER": "robert.socha", "LUK_TAGS": "a,b", "LUK_FILE": w + "/in/x", "LUK_NAME": "x",
+		"LUK_HOSTNAME": "db1\nLUK_ROOT=/", "LUK_ROOT": "/evil", "LUK_STEP": "9", "LUK_JOB": "x", "LD_PRELOAD": "/x.so",
+	} {
+		t.Setenv(k, v)
+	}
+	sock, reqs := fakeRund(t, func(_ net.Conn, fw *runproto.FrameWriter) { fw.Exit(0) })
+	if code, _, errs := runJob(t, "run", "--job", "s3-upload", "--socket", sock); code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	want := map[string]string{"LUK_SENDER": "robert.socha", "LUK_TAGS": "a,b", "LUK_FILE": w + "/in/x", "LUK_NAME": "x"}
+	if r := <-reqs; !maps.Equal(r.Env, want) {
+		t.Fatalf("%q", r.Env)
 	}
 }

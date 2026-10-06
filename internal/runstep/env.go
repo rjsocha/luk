@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -41,31 +40,107 @@ type WorkMeta struct {
 	Produced bool       `json:"produced,omitempty"`
 }
 
-// Env is the LUK_* metadata environment of the work directory work, whose
-// meta.json is m and whose set has the file names names, as NAME=value
-// entries in a fixed order; root is LUK_ROOT. LUK_FILE is there only for a
-// set of exactly one file. A variable whose value would hold a control
-// character (NUL, newline, ...) or invalid UTF-8 is left out: neither an
-// exec environment nor a systemd-run --setenv carries it safely.
-func Env(work, root string, m WorkMeta, names []string) []string {
-	in := filepath.Join(work, "in")
+// MetaNames are the metadata variables whose values come from the upload
+// (meta.json and the set) rather than from the path of the work
+// directory. They are the only ones a client passes on to lukd run, which
+// derives every other LUK_* variable itself.
+var MetaNames = []string{"LUK_SENDER", "LUK_ENDPOINT", "LUK_FILE", "LUK_NAME", "LUK_TAGS", "LUK_HOSTNAME", "LUK_ORIGIN"}
+
+// MaxMetaValue caps the value of a metadata variable.
+const MaxMetaValue = 1 << 10
+
+// varOrder is the order of the LUK_* metadata variables; the names not in
+// MetaNames are derived from the work directory path and the root.
+var varOrder = []string{
+	"LUK_WORK", "LUK_IN", "LUK_OUT", "LUK_META", "LUK_ID", "LUK_SENDER", "LUK_ENDPOINT", "LUK_PIPELINE",
+	"LUK_FILE", "LUK_NAME", "LUK_ROOT", "LUK_STEP", "LUK_TAGS", "LUK_HOSTNAME", "LUK_ORIGIN",
+}
+
+// safeValue reports whether v can be the value of a variable: valid UTF-8
+// without a control character, at most MaxMetaValue bytes. Neither an
+// exec environment nor a systemd-run --setenv carries a NUL, and a newline
+// or another control character would reach the job's environment raw.
+func safeValue(v string) bool {
+	return len(v) <= MaxMetaValue && utf8.ValidString(v) && !wire.HasControl(v)
+}
+
+// CleanMeta is what of env may reach a step or a job of the work
+// directory work as metadata: only the names of MetaNames with a safe
+// value (see safeValue), LUK_NAME a valid file name or empty, LUK_FILE
+// <work>/in/<a valid file name>. Everything else is dropped. lukd and the
+// clients of lukd run apply it to what they derive, lukd run to what it
+// receives.
+func CleanMeta(work string, env map[string]string) map[string]string {
+	m := map[string]string{}
+	for _, k := range MetaNames {
+		v, ok := env[k]
+		if !ok || !safeValue(v) {
+			continue
+		}
+		switch k {
+		case "LUK_NAME":
+			if v != "" && !ValidName(v) {
+				continue
+			}
+		case "LUK_FILE":
+			if n := filepath.Base(v); !ValidName(n) || v != filepath.Join(work, "in", n) {
+				continue
+			}
+		}
+		m[k] = v
+	}
+	return m
+}
+
+// Vars is the LUK_* metadata environment of the work directory work
+// (<root>/work/<id>/<pipeline>/<step>) as NAME=value entries in a fixed
+// order: LUK_WORK, LUK_IN, LUK_OUT, LUK_META, LUK_ID, LUK_PIPELINE and
+// LUK_STEP from work, LUK_ROOT root, the others from meta after
+// CleanMeta. A variable without a safe value is left out.
+func Vars(work, root string, meta map[string]string) []string {
+	step := filepath.Dir(work)
+	v := CleanMeta(work, meta)
+	v["LUK_WORK"] = work
+	v["LUK_IN"] = filepath.Join(work, "in")
+	v["LUK_OUT"] = filepath.Join(work, "out")
+	v["LUK_META"] = filepath.Join(work, "meta.json")
+	v["LUK_ID"] = filepath.Base(filepath.Dir(step))
+	v["LUK_PIPELINE"] = filepath.Base(step)
+	v["LUK_STEP"] = filepath.Base(work)
+	v["LUK_ROOT"] = root
 	var env []string
-	add := func(k, v string) {
-		if utf8.ValidString(v) && !wire.HasControl(v) {
-			env = append(env, k+"="+v)
+	for _, k := range varOrder {
+		if x, ok := v[k]; ok && safeValue(x) {
+			env = append(env, k+"="+x)
 		}
 	}
-	add("LUK_WORK", work)
-	add("LUK_IN", in)
-	add("LUK_OUT", filepath.Join(work, "out"))
-	add("LUK_META", filepath.Join(work, "meta.json"))
-	add("LUK_ID", m.Server.ID)
-	add("LUK_SENDER", m.Server.Sender)
-	add("LUK_ENDPOINT", m.Server.Endpoint)
-	add("LUK_PIPELINE", m.Pipeline)
+	return env
+}
+
+// Meta is the metadata a client of lukd run passes on for the work
+// directory work: the names of MetaNames that lookup finds, after
+// CleanMeta.
+func Meta(work string, lookup func(string) (string, bool)) map[string]string {
+	env := map[string]string{}
+	for _, k := range MetaNames {
+		if v, ok := lookup(k); ok {
+			env[k] = v
+		}
+	}
+	return CleanMeta(work, env)
+}
+
+// Env is Vars of the work directory work, whose meta.json is m and whose
+// set has the file names names; root is LUK_ROOT. LUK_FILE is there only
+// for a set of exactly one file.
+func Env(work, root string, m WorkMeta, names []string) []string {
+	meta := map[string]string{
+		"LUK_SENDER":   m.Server.Sender,
+		"LUK_ENDPOINT": m.Server.Endpoint,
+	}
 	name := ""
 	if len(names) == 1 {
-		add("LUK_FILE", filepath.Join(in, names[0]))
+		meta["LUK_FILE"] = filepath.Join(work, "in", names[0])
 		name = names[0]
 		if !m.Produced {
 			name = ""
@@ -82,13 +157,11 @@ func Env(work, root string, m WorkMeta, names []string) []string {
 	if origin == "" {
 		origin = m.Server.Sender
 	}
-	add("LUK_NAME", name)
-	add("LUK_ROOT", root)
-	add("LUK_STEP", strconv.Itoa(m.Step))
-	add("LUK_TAGS", strings.Join(m.Client.Tags, ","))
-	add("LUK_HOSTNAME", host)
-	add("LUK_ORIGIN", origin)
-	return env
+	meta["LUK_NAME"] = name
+	meta["LUK_TAGS"] = strings.Join(m.Client.Tags, ",")
+	meta["LUK_HOSTNAME"] = host
+	meta["LUK_ORIGIN"] = origin
+	return Vars(work, root, meta)
 }
 
 // WorkEnv is Env of the work directory work, read with ReadWork.

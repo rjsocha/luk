@@ -312,7 +312,7 @@ func DynamicUser(job, pipeline string) string {
 // Argv is the systemd-run command line of job name on work (a step of
 // pipeline) as unit. workGroup (a name or a numeric gid) is the group of
 // work; without a user the job gets a dynamic user per job and pipeline.
-// vars is the LUK_* metadata of work (JobEnv), set after the job's env and
+// vars is the LUK_* metadata of work (runstep.Vars), set after the job's env and
 // before LUK_JOB, LUK_TMP and LUK_STATE, one --setenv argument each.
 func (j *Job) Argv(unit, name, pipeline, work, workGroup string, vars []string) []string {
 	a := []string{"systemd-run", "--wait", "--collect", "--pipe", "--quiet", "--expand-environment=no", "--unit=" + unit}
