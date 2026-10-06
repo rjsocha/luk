@@ -3,7 +3,7 @@ GOFLAGS = -trimpath
 LDFLAGS = -s -w -X main.buildVersion=$(VERSION)
 BINS    = luk lukd luk-job
 
-.PHONY: all build $(BINS) test checkmk vet vuln marketing clean
+.PHONY: all build $(BINS) test checkmk vet vuln marketing thumbnail clean
 
 all: vet test checkmk build
 
@@ -37,6 +37,14 @@ ASCINEMA_VHS ?= asciinema-vhs
 
 marketing:
 	$(ASCINEMA_VHS) record contrib/demo/luk.vhs -o contrib/demo/luk.cast --cols 120 --rows 30 --title "luk"
+
+# The README shows doc/demo.svg, the thumbnail asciinema.org makes of the
+# uploaded recording (DEMO_ID): GitHub's image proxy cannot fetch it from
+# asciinema.org, so it is kept in the repository. Refresh after an upload.
+DEMO_ID ?= 1267589
+
+thumbnail:
+	curl -fsS https://asciinema.org/a/$(DEMO_ID).svg -o doc/demo.svg
 
 clean:
 	rm -f $(BINS)

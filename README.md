@@ -6,7 +6,7 @@ server decides by who signed it, not by a shared token. Uploads go through
 pipelines that process them and store the results; stored files can be
 served over HTTP.
 
-[![asciicast](https://asciinema.org/a/1267589.svg)](https://asciinema.org/a/1267589)
+[![luk demo](doc/demo.svg)](https://asciinema.org/a/1267589)
 
 *Powered by [asciinema-vhs](https://asciinema.org/a/1267587).*
 
