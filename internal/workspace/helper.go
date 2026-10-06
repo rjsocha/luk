@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -449,15 +450,21 @@ var helperProperties = []string{
 	"UMask=0077",
 }
 
+// HelperTimeout is RuntimeMaxSec of a create or remove helper unit: a
+// helper that hangs (btrfs I/O stuck) is killed then, so it cannot hold
+// the slot of a step.
+const HelperTimeout = 5 * time.Minute
+
 // HelperArgv is the systemd-run command of the helper unit that runs
 // `<lukd> run workspace <action> <unit>`, action create or remove: the
-// fixed sandbox, write access to <root>/root for create and to
-// <root>/root/job and the count for remove.
+// fixed sandbox, RuntimeMaxSec=HelperTimeout, write access to
+// <root>/root for create and to <root>/root/job and the count for remove.
 func HelperArgv(lukd, root, action, unit string) []string {
 	argv := []string{"systemd-run", "--wait", "--collect", "--quiet", "--unit=" + HelperUnit()}
 	for _, p := range helperProperties {
 		argv = append(argv, "-p", p)
 	}
+	argv = append(argv, "-p", "RuntimeMaxSec="+strconv.Itoa(int(HelperTimeout/time.Second)))
 	if action == "create" {
 		argv = append(argv, "-p", "ReadWritePaths="+filepath.Join(root, "root"))
 	} else {

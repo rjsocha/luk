@@ -4904,7 +4904,11 @@ sudo are involved.
     `RestrictNamespaces=yes`, `RestrictSUIDSGID=yes`,
     `LockPersonality=yes`, `MemoryDenyWriteExecute=yes`,
     `SystemCallArchitectures=native`, `UMask=0077`. lukd run passes this
-    fixed set; nothing of it comes from a request.
+    fixed set; nothing of it comes from a request. The create and remove
+    helpers also get `RuntimeMaxSec=5min`, and lukd run gives up on one
+    a minute after that (a create counts as failed, `workspace not
+    created`; a remove as `workspace not removed`), so a helper that hangs
+    (btrfs I/O stuck) cannot hold the slot of a step.
   - Worst case of a bug in lukd run or a compromised lukd run, through
     the helpers: a workspace of another valid name in `<root>/root/job`
     created, or removed while its unit is not active (and the count

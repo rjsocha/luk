@@ -78,7 +78,14 @@ var (
 	// requestTimeout bounds receiving the request, writing the started
 	// frame and answering a refusal.
 	requestTimeout = 5 * time.Second
+	// helperTimeout bounds a create or remove helper: its RuntimeMaxSec
+	// plus a minute for systemd to end it.
+	helperTimeout = workspace.HelperTimeout + time.Minute
 )
+
+// errPeerData is the protocol error of a peer that sends anything after
+// its request.
+var errPeerData = errors.New("peer sent data after its request")
 
 // errNotCreated is the refusal of a step whose workspace was not created;
 // the reason goes to the journal.
@@ -167,8 +174,7 @@ func (s *Server) serve(g *Global, conn *net.UnixConn, fw *runproto.FrameWriter) 
 	if req.Job == "" {
 		free, err := s.slot(g.Limits.Units.Max, gone)
 		if errors.Is(err, errGone) {
-			s.Log.Warn("peer closed while waiting for a unit slot", u.attrs()...)
-			return nil
+			return s.left(u, "a unit slot", spoke)
 		}
 		if err != nil {
 			s.Log.Error("unit slot", append(u.attrs(), "err", err)...)
@@ -185,8 +191,7 @@ func (s *Server) serve(g *Global, conn *net.UnixConn, fw *runproto.FrameWriter) 
 	if u.State == StateLocked {
 		unlock, err := s.lock(u.Job, u.Pipeline, gone)
 		if errors.Is(err, errGone) {
-			s.Log.Warn("peer closed while waiting for the state lock", u.attrs()...)
-			return nil
+			return s.left(u, "the state lock", spoke)
 		}
 		if err != nil {
 			s.Log.Error("state lock", append(u.attrs(), "err", err)...)
@@ -207,7 +212,7 @@ func (s *Server) serve(g *Global, conn *net.UnixConn, fw *runproto.FrameWriter) 
 			s.Log.Warn("workspace lock not released", "unit", u.Name, "err", err)
 		}
 	}()
-	code, err := s.Runner.Run(context.Background(), workspace.HelperArgv(s.Lukd, g.Root, "create", u.Name), nil, io.Discard, io.Discard)
+	code, err := s.helper(g.Root, "create", u.Name)
 	if err != nil || code != 0 {
 		s.Log.Error("workspace not created", "unit", u.Name, "exit", code, "err", err)
 		return refusal{errNotCreated}
@@ -227,7 +232,7 @@ func (s *Server) serve(g *Global, conn *net.UnixConn, fw *runproto.FrameWriter) 
 	if settled {
 		s.remove(g.Root, u.Name)
 	} else {
-		s.Log.Warn("workspace left to prune", "unit", u.Name)
+		s.Log.Warn("unit still active: workspace left to prune, unit slot and state lock released", u.attrs()...)
 	}
 	return err
 }
@@ -259,7 +264,7 @@ func (s *Server) run(u *Unit, argv []string, ch *os.File, fw *runproto.FrameWrit
 	case <-gone:
 		var perr error
 		if spoke() {
-			perr = errors.New("peer sent data during the run")
+			perr = errPeerData
 			s.Log.Warn("peer sent data during the run, stopping the job", u.attrs()...)
 		} else {
 			s.Log.Warn("peer closed, stopping the job", u.attrs()...)
@@ -274,10 +279,29 @@ func (s *Server) run(u *Unit, argv []string, ch *os.File, fw *runproto.FrameWrit
 	}
 }
 
+// left is the end of a step whose peer left while it waited for what: a
+// close is no error, a byte from the peer is errPeerData.
+func (s *Server) left(u *Unit, what string, spoke func() bool) error {
+	if spoke() {
+		s.Log.Warn("peer sent data while waiting for "+what, u.attrs()...)
+		return errPeerData
+	}
+	s.Log.Warn("peer closed while waiting for "+what, u.attrs()...)
+	return nil
+}
+
+// helper runs the helper unit of action on unit, bounded by
+// helperTimeout.
+func (s *Server) helper(root, action, unit string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), helperTimeout)
+	defer cancel()
+	return s.Runner.Run(ctx, workspace.HelperArgv(s.Lukd, root, action, unit), nil, io.Discard, io.Discard)
+}
+
 // remove runs the remove helper of unit. A failure is logged and changes
 // nothing else: the helper counts the workspace it leaves.
 func (s *Server) remove(root, unit string) {
-	code, err := s.Runner.Run(context.Background(), workspace.HelperArgv(s.Lukd, root, "remove", unit), nil, io.Discard, io.Discard)
+	code, err := s.helper(root, "remove", unit)
 	if err != nil || code != 0 {
 		s.Log.Warn("workspace not removed", "unit", unit, "exit", code, "err", err)
 	}

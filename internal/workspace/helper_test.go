@@ -293,7 +293,7 @@ func TestHelperArgv(t *testing.T) {
 		"ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectKernelLogs=yes",
 		"ProtectControlGroups=yes", "ProtectProc=invisible", "RestrictNamespaces=yes",
 		"RestrictSUIDSGID=yes", "LockPersonality=yes", "MemoryDenyWriteExecute=yes",
-		"SystemCallArchitectures=native", "UMask=0077",
+		"SystemCallArchitectures=native", "UMask=0077", "RuntimeMaxSec=300",
 	} {
 		if i := slices.Index(got, p); i < 1 || got[i-1] != "-p" {
 			t.Errorf("missing -p %s", p)

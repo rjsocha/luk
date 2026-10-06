@@ -455,8 +455,8 @@ func (l lockedWriter) Write(p []byte) (int, error) {
 }
 
 // fakeRunner records every argv it runs. The create and remove helpers
-// (workspace.HelperArgv) exit with createExit and removeExit (remove,
-// when set, decides instead), a unit runs run.
+// (workspace.HelperArgv) exit with createExit and removeExit (create and
+// remove, when set, decide instead), a unit runs run.
 type fakeRunner struct {
 	mu         sync.Mutex
 	runs       [][]string
@@ -464,7 +464,8 @@ type fakeRunner struct {
 	stopped    []string
 	createExit int
 	removeExit int
-	remove     func(unit string) int
+	create     func(ctx context.Context) int
+	remove     func(ctx context.Context, unit string) int
 	run        func(ctx context.Context, stdout, stderr io.Writer) (int, error)
 	// stop and active, when set, answer Stop and Active; a unit is
 	// inactive without active.
@@ -484,14 +485,17 @@ func (f *fakeRunner) Run(ctx context.Context, argv []string, stdin *os.File, std
 	f.mu.Lock()
 	f.runs = append(f.runs, argv)
 	f.stdin = append(f.stdin, stdin)
-	run, remove := f.run, f.remove
+	run, create, remove := f.run, f.create, f.remove
 	f.mu.Unlock()
 	switch helperAction(argv) {
 	case "create":
+		if create != nil {
+			return create(ctx), nil
+		}
 		return f.createExit, nil
 	case "remove":
 		if remove != nil {
-			return remove(argv[len(argv)-1]), nil
+			return remove(ctx, argv[len(argv)-1]), nil
 		}
 		return f.removeExit, nil
 	}
@@ -1186,7 +1190,7 @@ func TestServeEarlyCloseStopsUnit(t *testing.T) {
 	}
 	var polls, removedAt atomic.Int32
 	e.fr.active = func(string) (bool, error) { return polls.Add(1) < 3, nil }
-	e.fr.remove = func(string) int {
+	e.fr.remove = func(context.Context, string) int {
 		removedAt.Store(polls.Load())
 		return 0
 	}
@@ -1219,7 +1223,7 @@ func TestServePeerSpeaks(t *testing.T) {
 	c, errc := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1})
 	<-started
 	c.Write([]byte("x"))
-	if err := ends(t, "peer speaks", errc, 5*time.Second); err == nil || err.Error() != "peer sent data during the run" {
+	if err := ends(t, "peer speaks", errc, 5*time.Second); err == nil || err.Error() != "peer sent data after its request" {
 		t.Fatalf("%v", err)
 	}
 	if len(e.fr.stopped) != 1 || helperAction(e.fr.argvs()[2]) != "remove" {
@@ -1241,6 +1245,9 @@ func TestServeActiveKeepsWorkspace(t *testing.T) {
 		return 143, nil
 	}
 	e.fr.active = func(string) (bool, error) { return true, nil }
+	var logs strings.Builder
+	var mu sync.Mutex
+	e.srv.Log = slog.New(slog.NewTextHandler(lockedWriter{&mu, &logs}, nil))
 	c, errc := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1})
 	<-started
 	c.Close()
@@ -1249,6 +1256,75 @@ func TestServeActiveKeepsWorkspace(t *testing.T) {
 	}
 	if runs := e.fr.argvs(); len(runs) != 2 {
 		t.Fatalf("removed an active unit: %q", runs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := `level=WARN msg="unit still active: workspace left to prune, unit slot and state lock released" job=s3-upload unit=` + unitName(e.fr.unitArgv())
+	if !strings.Contains(logs.String(), want) {
+		t.Fatalf("journal: %s", logs.String())
+	}
+}
+
+// A hung helper cannot hold the slot: lukd run gives up on it after
+// helperTimeout, a create as not created, a remove as not removed.
+func TestServeHelperTimeout(t *testing.T) {
+	defer func(d time.Duration) { helperTimeout = d }(helperTimeout)
+	helperTimeout = 20 * time.Millisecond
+	e := newEnv(t)
+	hang := func(ctx context.Context) int {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("helper without a deadline")
+		}
+		<-ctx.Done()
+		return 143
+	}
+	e.fr.create = hang
+	fs, _ := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1}, true)
+	if len(fs) != 3 || fs[1].p != "lukd run: workspace not created\n" || e.fr.unitRuns() != 0 {
+		t.Fatalf("hung create: %+v", fs)
+	}
+	e.fr.create = nil
+	e.fr.remove = func(ctx context.Context, _ string) int { return hang(ctx) }
+	fs, err := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1}, true)
+	if err != nil || len(fs) != 2 || fs[1] != (frame{runproto.Exit, "0"}) {
+		t.Fatalf("hung remove: %+v %v", fs, err)
+	}
+	if runs := e.fr.argvs(); len(runs) != 4 || helperAction(runs[3]) != "remove" {
+		t.Fatalf("%q", runs)
+	}
+}
+
+// A byte from the peer while the step waits for a slot or the state lock
+// is the protocol error it is during the run; nothing starts.
+func TestServePeerSpeaksWhileWaiting(t *testing.T) {
+	defer func(d time.Duration) { lockPoll = d }(lockPoll)
+	lockPoll = 5 * time.Millisecond
+	e := newEnv(t)
+	write(t, e.srv.Config, "root: "+e.root+"\nconfig: "+e.conf+"\nlimits:\n  units:\n    max: 1\n", 0o600)
+	release := make(chan struct{})
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { <-release; return 0, nil }
+	first, errFirst := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1})
+	waitFrame(t, first, runproto.Started)
+	// Waiting for the slot.
+	second, errc := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1})
+	time.Sleep(30 * time.Millisecond)
+	second.Write([]byte("x"))
+	if err := ends(t, "slot wait", errc, 5*time.Second); err == nil || err.Error() != "peer sent data after its request" {
+		t.Fatalf("slot wait: %v", err)
+	}
+	// Waiting for the state lock (a nested job takes no slot).
+	third, errc := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Job: "state"})
+	waitFrame(t, third, runproto.Started)
+	third.Write([]byte("x"))
+	if err := ends(t, "state lock wait", errc, 5*time.Second); err == nil || err.Error() != "peer sent data after its request" {
+		t.Fatalf("state lock wait: %v", err)
+	}
+	close(release)
+	if err := ends(t, "first", errFirst, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.fr.unitRuns(); n != 1 {
+		t.Fatalf("%d units", n)
 	}
 }
 
