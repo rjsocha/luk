@@ -228,6 +228,11 @@ func TestServiceUID(t *testing.T) {
 		t.Fatalf("%d %v", uid, err)
 	}
 	os.Remove(filepath.Join(root, "data"))
+	write(t, filepath.Join(root, "data"), "", 0o600)
+	if _, err := g.ServiceUID(); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("file: %v", err)
+	}
+	os.Remove(filepath.Join(root, "data"))
 	os.Symlink(t.TempDir(), filepath.Join(root, "data"))
 	if _, err := g.ServiceUID(); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("symlink: %v", err)
@@ -342,6 +347,8 @@ func TestArgvRefusesPaths(t *testing.T) {
 		state bool
 	}{
 		"colon in unit":          {ok, "lukd-run-j:x-0123456789ab", "", false},
+		"unit x/..":              {ok, "x/..", "", false},
+		"unit not a unit name":   {ok, "other-0123456789ab", "", false},
 		"space in unit":          {ok, "lukd-run-j x-0123456789ab", "", false},
 		"space in root":          {box("/var/lib/l k", "/etc/site/lukd"), unit, "", false},
 		"root is /":              {box("/", "/etc/site/lukd"), unit, "", false},
@@ -392,6 +399,12 @@ func TestArgvRefusesPaths(t *testing.T) {
 	}
 	if a, err := ProgramUnit(unit, StepDef{Program: "/opt/j"}, 0, "p", 1).Argv(ok, nil); err == nil {
 		t.Fatalf("no timeout accepted: %q", a)
+	}
+	dyn := &Job{Command: "/opt/j", Timeout: config.Duration(time.Minute)}
+	u := dyn.Unit(unit, "j", "p", 1)
+	u.Privileged = true
+	if a, err := u.Argv(ok, nil); err == nil || !strings.Contains(err.Error(), "privileged needs user") {
+		t.Fatalf("privileged dynamic user: %q %v", a, err)
 	}
 	// A hidden path under root, the configuration directory or /run/luk
 	// is left out, whatever its characters.

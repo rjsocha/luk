@@ -327,20 +327,32 @@ func TestLoadLukdSteps(t *testing.T) {
 			t.Fatalf("step %s %d", c.p, c.n)
 		}
 	}
+	// lukd allows any other env name and value, and so does lukd run.
+	write(t, e.main, "pipeline:\n  p:\n    steps: [{run: /x, env: {a-b: \"x\\ny\"}}]\n", 0o640)
+	if lk, err := LoadLukd(e.main, e.top, me); err != nil || lk.Steps["p"][0].Env["a-b"] != "x\ny" {
+		t.Fatalf("env: %v", err)
+	}
+	write(t, e.main, "pipeline:\n  p:\n    timeout: 2h\n    steps: [{run: /opt/luk/p}]\n  q:\n    steps: [{run: /opt/luk/q}]\n", 0o640)
+	if lk, err = LoadLukd(e.main, e.top, me); err != nil {
+		t.Fatal(err)
+	}
 	if lk.Timeout["p"] != 2*time.Hour || lk.Timeout["q"] != config.DefaultPipelineTimeout {
 		t.Fatalf("%v", lk.Timeout)
 	}
 	const run = "run must be an absolute path or {job: NAME}"
 	for body, want := range map[string]string{
-		"pipeline:\n  p:\n    steps: [{run: {job: x, y: z}}]\n": "pipeline p: step 1: " + run,
-		"pipeline:\n  p:\n    steps: [{run: {job: [x]}}]\n":     "pipeline p: step 1: " + run,
-		"pipeline:\n  p:\n    steps: [{run: [a]}]\n":            "pipeline p: step 1: " + run,
-		"pipeline:\n  p:\n    steps: [{run: x}]\n":              "pipeline p: step 1: " + run,
-		"pipeline:\n  p:\n    steps: [{run: 5}]\n":              "pipeline p: step 1: " + run,
-		"pipeline:\n  p:\n    steps: [{run: /x, env: [a]}]\n":   "pipeline p: step 1: env: ",
-		"pipeline:\n  p:\n    steps: [{run: /x, jobs: a}]\n":    "pipeline p: step 1: jobs: ",
-		"pipeline:\n  p:\n    timeout: soon\n":                  "pipeline p: timeout: ",
-		"pipeline:\n  p:\n    timeout: 168h\n":                  "pipeline p: timeout: must be under 168h0m0s",
+		"pipeline:\n  p:\n    steps: [{run: {job: x, y: z}}]\n":      "pipeline p: step 1: " + run,
+		"pipeline:\n  p:\n    steps: [{run: {job: [x]}}]\n":          "pipeline p: step 1: " + run,
+		"pipeline:\n  p:\n    steps: [{run: [a]}]\n":                 "pipeline p: step 1: " + run,
+		"pipeline:\n  p:\n    steps: [{run: x}]\n":                   "pipeline p: step 1: " + run,
+		"pipeline:\n  p:\n    steps: [{run: 5}]\n":                   "pipeline p: step 1: " + run,
+		"pipeline:\n  p:\n    steps: [{run: /x, env: [a]}]\n":        "pipeline p: step 1: env: ",
+		"pipeline:\n  p:\n    steps: [{run: /x, jobs: a}]\n":         "pipeline p: step 1: jobs: ",
+		"pipeline:\n  p:\n    timeout: soon\n":                       "pipeline p: timeout: ",
+		"pipeline:\n  p:\n    timeout: 168h\n":                       "pipeline p: timeout: must be under 168h0m0s",
+		"pipeline:\n  p:\n    timeout: 500ms\n":                      "pipeline p: timeout: 500ms: less than 1s",
+		"pipeline:\n  p:\n    timeout: -1h\n":                        "pipeline p: timeout: ",
+		"pipeline:\n  p:\n    steps: [{run: /x, env: {LUK_X: a}}]\n": "pipeline p: step 1: env.LUK_X: LUK_* names are reserved",
 	} {
 		write(t, e.main, body, 0o640)
 		if _, err := LoadLukd(e.main, e.top, me); err == nil || !strings.Contains(err.Error(), want) {

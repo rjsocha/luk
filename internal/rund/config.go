@@ -475,8 +475,8 @@ type Unit struct {
 	Privileged          bool
 }
 
-// Unit is the unit name of job on step of pipeline: as User, else as the
-// dynamic user of job and pipeline.
+// Unit is the unit <name> of job on step of pipeline: as User, else as
+// the dynamic user of job and pipeline.
 func (j *Job) Unit(name, job, pipeline string, step int) *Unit {
 	u := &Unit{
 		Name: name, Job: job, Pipeline: pipeline, Step: step,
@@ -490,9 +490,9 @@ func (j *Job) Unit(name, job, pipeline string, step int) *Unit {
 	return u
 }
 
-// ProgramUnit is the unit name of the run program of d, step of pipeline,
-// as the dynamic user of that step, bounded by timeout (the pipeline
-// timeout).
+// ProgramUnit is the unit <name> of the run program of d, step of
+// pipeline, as the dynamic user of that step, bounded by timeout (the
+// pipeline timeout).
 func ProgramUnit(name string, d StepDef, timeout time.Duration, pipeline string, step int) *Unit {
 	return &Unit{
 		Name: name, Pipeline: pipeline, Step: step,
@@ -511,6 +511,12 @@ func (u *Unit) Workspace(box *Box) string { return workspace.Path(box.Root, u.Na
 // the wrapper (box.Lukd run workspace run) runs the command with the
 // workspace as its argument.
 func (u *Unit) Argv(box *Box, vars []string) ([]string, error) {
+	if !workspace.ValidUnit(u.Name) {
+		return nil, fmt.Errorf("unit %q: invalid unit name", u.Name)
+	}
+	if u.Privileged && u.User == "" {
+		return nil, errors.New("privileged needs user")
+	}
 	if !filepath.IsAbs(u.Command) || filepath.Clean(u.Command) != u.Command {
 		return nil, fmt.Errorf("command %q: not a clean absolute path", u.Command)
 	}

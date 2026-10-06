@@ -161,7 +161,7 @@ func stepRun(n *yaml.Node, d *StepDef) error {
 }
 
 // pipelineTimeout is the timeout of a pipeline: config.DefaultPipelineTimeout
-// when absent or 0, under config.MaxPipelineTimeout.
+// when absent or 0, else at least 1s and under config.MaxPipelineTimeout.
 func pipelineTimeout(n *yaml.Node) (time.Duration, error) {
 	var d config.Duration
 	if n.Kind != 0 {
@@ -171,6 +171,9 @@ func pipelineTimeout(n *yaml.Node) (time.Duration, error) {
 	}
 	if d == 0 {
 		return config.DefaultPipelineTimeout, nil
+	}
+	if time.Duration(d) < time.Second {
+		return 0, fmt.Errorf("%v: less than 1s", time.Duration(d))
 	}
 	if time.Duration(d) >= config.MaxPipelineTimeout {
 		return 0, fmt.Errorf("must be under %v", config.MaxPipelineTimeout)
@@ -190,16 +193,18 @@ func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) 
 // LoadLukd reads the steps, the timeouts and the paths of the lukd
 // configuration: the main file p and the *.yaml of config.d next to it
 // (dotfiles left out, in lexical order), as lukd loads them. The steps
-// keep only what lukd run starts (see StepDef). The pipelines of a job are those
-// with a step relay: <job> and those with a run step whose jobs lists it;
-// the paths are the root of the merged configuration (config.DefaultRoot
-// when no file sets it) and those of every file (see jobsFile.paths). A missing p (or
-// a missing directory above it) allows nothing. Every directory from top down to config.d, p
-// and the snippets must pass the checks of run.d (CheckParents,
-// readSafe) for owner; a refused or malformed file (a run, env, jobs or
-// timeout of the wrong type included), too many snippets or a pipeline
-// defined in two files or a step with both run and relay (an error of
-// lukd as well) refuse the whole configuration.
+// keep only what lukd run starts (see StepDef). The pipelines of a job
+// are those with a step relay: <job> and those with a run step whose
+// jobs lists it; the paths are the root of the merged configuration
+// (config.DefaultRoot when no file sets it) and those of every file (see
+// jobsFile.paths). A missing p (or a missing directory above it) allows
+// nothing. Every directory from top down to config.d, p and the snippets
+// must pass the checks of run.d (CheckParents, readSafe) for owner; a
+// refused or malformed file (a run, env, jobs or timeout of the wrong
+// type, a timeout out of range or a reserved env name included), too
+// many snippets or a pipeline defined in two files or a step with both
+// run and relay (an error of lukd as well) refuse the whole
+// configuration.
 func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 	dir := filepath.Dir(p)
 	if err := CheckParents(dir, top, owner); errors.Is(err, os.ErrNotExist) {
@@ -283,8 +288,11 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 				if d.Program == "" {
 					d.Jobs, d.Env = nil, nil
 				}
-				if err := checkEnv(d.Env); err != nil {
-					return nil, bad(err)
+				// The rule of lukd for the env of a step.
+				for _, k := range sortedKeys(d.Env) {
+					if strings.HasPrefix(k, "LUK_") {
+						return nil, bad(fmt.Errorf("env.%s: LUK_* names are reserved", k))
+					}
 				}
 				// The steps of one pipeline come one after the other: a
 				// job it already allows ends in name.
