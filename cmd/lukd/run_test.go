@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"luk/internal/server"
 )
 
 func TestPeerUID(t *testing.T) {
@@ -35,6 +37,11 @@ func TestPeerUID(t *testing.T) {
 const testMainEnv = "LUKD_TEST_MAIN"
 
 func TestMain(m *testing.M) {
+	// The roles refuse a root outside btrfs; the test roots are temporary
+	// directories wherever TMPDIR lies.
+	if os.Getenv("LUK_TEST_BTRFS") == "" {
+		server.CheckRootFS = func(string) error { return nil }
+	}
 	if os.Getenv(testMainEnv) == "1" {
 		main()
 		os.Exit(0)

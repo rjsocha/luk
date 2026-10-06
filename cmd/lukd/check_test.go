@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"luk/internal/config"
+	"luk/internal/rund"
 	"luk/internal/server"
 )
 
@@ -119,7 +121,7 @@ func TestCheckWarnsRelayWithoutJobFile(t *testing.T) {
 }
 
 // A job a run step lists in jobs needs a file as a relayed one does; a
-// job of run.d that no relay step and no jobs name is unused, and a file
+// job of run.d that no step names is unused, and a file
 // of run.d that does not load is named with the reason.
 func TestCheckWarnsRunStepJobs(t *testing.T) {
 	cfgPath, _ := statusConfig(t)
@@ -149,7 +151,7 @@ func TestCheckWarnsRunStepJobs(t *testing.T) {
 	runJobs = jobs
 	out, errOut, err := runCheck(t, "--no-running", "-c", cfgPath)
 	want := "warning: pipeline archive: step 2: job notify has no file in " + jobs + "\n" +
-		"warning: " + filepath.Join(jobs, "idle.yaml") + ": unused: no relay step and no jobs of a run step name the job\n" +
+		"warning: " + filepath.Join(jobs, "idle.yaml") + ": unused: no step names the job\n" +
 		"warning: run.d job broken: " + filepath.Join(jobs, "broken.yaml") + ": pipelines: removed: "
 	if err != nil || out != "ok\n" || !strings.HasPrefix(errOut, want) || strings.Count(errOut, "\n") != 3 {
 		t.Fatalf("%q %q %v", out, errOut, err)
@@ -255,7 +257,7 @@ func TestRunRootWarning(t *testing.T) {
 	for root, want := range map[string]string{
 		"/srv/luk":     "",
 		"/srv/luk/":    "",
-		"/var/lib/luk": p + ": root /var/lib/luk is not the lukd root /srv/luk as written: lukd run refuses every work directory",
+		"/var/lib/luk": p + ": root /var/lib/luk is not the lukd root /srv/luk as written: every unit gets it as an empty tmpfs",
 	} {
 		if err := os.WriteFile(p, []byte("root: "+root+"\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -279,8 +281,8 @@ func TestRunConfigWarning(t *testing.T) {
 	p := filepath.Join(dir, "run.yaml")
 	for data, want := range map[string]string{
 		"config: " + dir + "/lukd/./config.yaml\n": "",
-		"config: /etc/other.yaml\n":                p + ": config /etc/other.yaml is not the checked configuration " + cfg.Path + ": lukd run takes the jobs of the pipelines from it",
-		"root: /var/lib/luk\n":                     p + ": config /etc/site/lukd/config.yaml is not the checked configuration " + cfg.Path + ": lukd run takes the jobs of the pipelines from it",
+		"config: /etc/other.yaml\n":                p + ": config /etc/other.yaml is not the checked configuration " + cfg.Path + ": lukd run takes what each step runs from it",
+		"root: /var/lib/luk\n":                     p + ": config /etc/site/lukd/config.yaml is not the checked configuration " + cfg.Path + ": lukd run takes what each step runs from it",
 	} {
 		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
@@ -315,7 +317,7 @@ func TestRunConfigRefusedWarning(t *testing.T) {
 	if w := runRootWarning(cfg, p); w != nil {
 		t.Fatalf("accepted: %q", w)
 	}
-	want := p + ": lukd run refuses the configuration " + cfgPath + ", no pipeline may run a job: "
+	want := p + ": lukd run refuses the configuration " + cfgPath + ", no step may run: "
 	refused := func(what string) {
 		t.Helper()
 		w := runRootWarning(cfg, p)
@@ -348,8 +350,76 @@ func TestCheckAsRootWarnsRunRoot(t *testing.T) {
 	geteuid, reexecAs = func() int { return 0 }, func(uid, gid uint32, groups []uint32) error { return exitCode(0) }
 	t.Cleanup(func() { geteuid, reexecAs, runGlobal = os.Geteuid, reexec, old })
 	_, errOut, _ := runCheck(t, "--no-running", "-c", cfgPath)
-	want := "warning: " + run + ": root " + root + "/other is not the lukd root " + root + " as written: lukd run refuses every work directory\n"
+	want := "warning: " + run + ": root " + root + "/other is not the lukd root " + root + " as written: every unit gets it as an empty tmpfs\n"
 	if !strings.Contains(errOut, want) {
 		t.Fatalf("%q", errOut)
+	}
+}
+
+func TestCheckRefusesNonBtrfsRoot(t *testing.T) {
+	cfgPath, _ := statusConfig(t)
+	writeIdentity(t, cfgPath)
+	old := server.CheckRootFS
+	server.CheckRootFS = func(root string) error { return fmt.Errorf("root %s: not a btrfs filesystem", root) }
+	t.Cleanup(func() { server.CheckRootFS = old })
+	_, errOut, err := runCheck(t, "-c", cfgPath, "--no-running")
+	var code exitCode
+	if !errors.As(err, &code) || code != 1 || !strings.Contains(errOut, "not a btrfs filesystem") {
+		t.Fatalf("%v %q", err, errOut)
+	}
+}
+
+// parseCfg parses the pipelines text with a minimal listener, auth,
+// endpoint ep and storage s.
+func parseCfg(t *testing.T, pipelines string) *config.Config {
+	t.Helper()
+	cfg, err := config.Parse([]byte(`root: ` + t.TempDir() + `
+listen: {main: {addr: "127.0.0.1:0"}}
+auth:
+  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+endpoint:
+  ep: {listen: main, endpoint: /ep, path: q/ep, allow: [robert.socha]}
+storage:
+  s: {type: local, base: s/s, path: "{{ .File }}"}
+` + pipelines))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestUnitsWarning(t *testing.T) {
+	cfg := parseCfg(t, `pipeline:
+  a:
+    endpoint: [ep]
+    queue: {concurrency: 10}
+    steps: [{run: /opt/a}]
+  b:
+    endpoint: [ep]
+    queue: {concurrency: 8}
+    steps: [{relay: s3-upload}]
+  c:
+    endpoint: [ep]
+    queue: {concurrency: 50}
+    steps: [{store: s}]
+`)
+	g := &rund.Global{}
+	g.Limits.Units.Max = 16
+	w := unitsWarning(cfg, g)
+	if len(w) != 1 || w[0] != "queue.concurrency of run steps 18 exceeds limits.units.max 16: steps wait in lukd run" {
+		t.Fatalf("%q", w)
+	}
+	g.Limits.Units.Max = 18
+	if w := unitsWarning(cfg, g); len(w) != 0 {
+		t.Fatalf("%q", w)
+	}
+}
+
+func TestRelayWarningsRunJob(t *testing.T) {
+	dir := t.TempDir()
+	cfg := parseCfg(t, "pipeline:\n  p:\n    endpoint: [ep]\n    steps: [{run: {job: db-dump}}]\n")
+	w := relayWarnings(cfg, dir)
+	if len(w) != 1 || !strings.Contains(w[0], "pipeline p: step 1: run job db-dump has no file in "+dir) {
+		t.Fatalf("%q", w)
 	}
 }

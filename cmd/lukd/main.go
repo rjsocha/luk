@@ -107,14 +107,18 @@ func rootCmd() *cobra.Command {
 			"config.yaml, config.d, ssh.d, the tls files, the eab key file, gpg.keys and\n" +
 			"the passwords. The part that reads the files of the service user (running\n" +
 			"state, storage bases) then runs again as the owner of <root>/data.\n" +
-			"A relay step or a jobs entry of a run step whose job has no file in\n" +
+			"The root must lie on btrfs (the job workspaces are subvolumes of it): an\n" +
+			"existing <root> on another filesystem fails the check. A relay step, a\n" +
+			"run: {job} step or a jobs entry of a run step whose job has no file in\n" +
 			rund.DefaultJobs + " is a warning when that directory is readable, and so is\n" +
-			"one whose readable job file does not load (with the reason), a job no relay\n" +
-			"step and no jobs name (unused) and any other readable job file that does not\n" +
-			"load. Run as root, a root in " + rund.DefaultConfig + " that is not the root\n" +
-			"of the configuration as written is a warning (lukd run would refuse every work\n" +
-			"directory), and so is a config there that is not the checked file (lukd run\n" +
-			"takes the jobs of the pipelines from it) or that lukd run refuses.",
+			"one whose readable job file does not load (with the reason), a job no step\n" +
+			"names (unused) and any other readable job file that does not load. Run as\n" +
+			"root, a root in " + rund.DefaultConfig + " that is not the root of the\n" +
+			"configuration as written is a warning (every unit would get it as an empty\n" +
+			"tmpfs), and so is a config there that is not the checked file (lukd run\n" +
+			"takes what each step runs from it) or that lukd run refuses, and a sum of\n" +
+			"queue.concurrency of the pipelines with run or relay steps above\n" +
+			"limits.units.max (the steps wait in lukd run).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(cfgPath)
@@ -143,6 +147,12 @@ func rootCmd() *cobra.Command {
 				fmt.Fprintln(errw, "warning: "+w)
 			}
 			failed := false
+			if _, err := os.Lstat(cfg.Root); err == nil {
+				if err := server.CheckRootFS(cfg.Root); err != nil {
+					fmt.Fprintln(errw, err)
+					failed = true
+				}
+			}
 			if noIdentity {
 				// The process role never reads the key: it is neither
 				// loaded nor required to be readable here.

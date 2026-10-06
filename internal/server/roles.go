@@ -80,6 +80,9 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if err := setNonDumpable(); err != nil {
 		return fmt.Errorf("non-dumpable: %w", err)
 	}
+	if err := CheckRootFS(cfg.Root); err != nil {
+		return err
+	}
 	if err := prepareDirs(cfg, "receive"); err != nil {
 		return err
 	}
@@ -183,6 +186,9 @@ func (s *Server) persistNonces(dir string) error {
 // On the way out it waits for the running pipelines, bounded by the
 // shutdown timeout.
 func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
+	if err := CheckRootFS(cfg.Root); err != nil {
+		return err
+	}
 	if err := prepareDirs(cfg, "process"); err != nil {
 		return err
 	}

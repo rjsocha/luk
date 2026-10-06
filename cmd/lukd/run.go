@@ -114,10 +114,10 @@ func peerUID(c *net.UnixConn) (uint32, error) {
 	return cred.Uid, nil
 }
 
-// relayWarnings names the relay steps and the jobs of the run steps of
-// cfg whose job has no file in dir, the run.d of lukd run, or whose
+// relayWarnings names the relay steps, the run: {job} steps and the jobs
+// of the run steps of cfg whose job has no file in dir, the run.d of lukd run, or whose
 // readable file does not load (with the reason), then the valid jobs of
-// dir that no relay step and no jobs name (unused) and the other readable
+// dir that no step names (unused) and the other readable
 // job files that do not load. dir is root's and
 // changes without a reload, so it is never required: an unreadable dir or
 // file gives no warning.
@@ -143,8 +143,11 @@ func relayWarnings(cfg *config.Config, dir string) []string {
 	for _, pn := range slices.Sorted(maps.Keys(cfg.Pipeline)) {
 		for i, s := range cfg.Pipeline[pn].Steps {
 			what, names := "job", s.Jobs
-			if s.Relay != "" {
+			switch {
+			case s.Relay != "":
 				what, names = "relay job", []string{s.Relay}
+			case s.Run.Job != "":
+				what, names = "run job", []string{s.Run.Job}
 			}
 			for _, j := range names {
 				used[j] = true
@@ -159,7 +162,7 @@ func relayWarnings(cfg *config.Config, dir string) []string {
 	}
 	for _, name := range slices.Sorted(maps.Keys(jobs.OK)) {
 		if !used[name] {
-			w = append(w, fmt.Sprintf("%s: unused: no relay step and no jobs of a run step name the job", filepath.Join(dir, name+rund.JobExt)))
+			w = append(w, fmt.Sprintf("%s: unused: no step names the job", filepath.Join(dir, name+rund.JobExt)))
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(jobs.Bad)) {
@@ -170,13 +173,30 @@ func relayWarnings(cfg *config.Config, dir string) []string {
 	return w
 }
 
+// unitsWarning reports pipelines whose run and relay steps may all run at
+// once (the sum of their queue.concurrency) past limits.units.max: the
+// steps then wait in lukd run.
+func unitsWarning(cfg *config.Config, g *rund.Global) []string {
+	sum := 0
+	for _, p := range cfg.Pipeline {
+		if !slices.ContainsFunc(p.Steps, func(s config.Step) bool { return s.Run.Set() || s.Relay != "" }) {
+			continue
+		}
+		sum += max(p.Queue.Concurrency, 1)
+	}
+	if sum <= g.Limits.Units.Max {
+		return nil
+	}
+	return []string{fmt.Sprintf("queue.concurrency of run steps %d exceeds limits.units.max %d: steps wait in lukd run", sum, g.Limits.Units.Max)}
+}
+
 // runRootWarning reports a root of run.yaml p that differs from the root
-// of cfg: lukd run compares the work path with it as written, so it
-// refuses every work directory of this lukd. It also reports a config of
-// p that is not the file of cfg: lukd run takes the steps of the pipelines
-// from that file. When it is that file, a configuration lukd run refuses
-// (LoadLukd) is reported: no step may run. A missing or unreadable p gives
-// no warning.
+// of cfg: the units of lukd run get the root as written, so a different
+// one is an empty tmpfs for every unit. It also reports a config of p that
+// is not the file of cfg: lukd run takes what each step runs from that
+// file. When it is that file, a configuration lukd run refuses (LoadLukd)
+// is reported: no step may run. It then adds unitsWarning. A missing or
+// unreadable p gives no warning.
 func runRootWarning(cfg *config.Config, p string) []string {
 	fi, err := os.Lstat(p)
 	if err != nil {
@@ -188,17 +208,17 @@ func runRootWarning(cfg *config.Config, p string) []string {
 	}
 	var w []string
 	if g.Root != cfg.Root {
-		w = append(w, fmt.Sprintf("%s: root %s is not the lukd root %s as written: lukd run refuses every work directory", p, g.Root, cfg.Root))
+		w = append(w, fmt.Sprintf("%s: root %s is not the lukd root %s as written: every unit gets it as an empty tmpfs", p, g.Root, cfg.Root))
 	}
 	abs, err := filepath.Abs(cfg.Path)
 	switch {
 	case err != nil:
 	case g.Config != abs:
-		w = append(w, fmt.Sprintf("%s: config %s is not the checked configuration %s: lukd run takes the jobs of the pipelines from it", p, g.Config, abs))
+		w = append(w, fmt.Sprintf("%s: config %s is not the checked configuration %s: lukd run takes what each step runs from it", p, g.Config, abs))
 	default:
 		if _, err := rund.LoadLukd(g.Config, runTop, runOwner); err != nil {
-			w = append(w, fmt.Sprintf("%s: lukd run refuses the configuration %s, no pipeline may run a job: %v", p, g.Config, err))
+			w = append(w, fmt.Sprintf("%s: lukd run refuses the configuration %s, no step may run: %v", p, g.Config, err))
 		}
 	}
-	return w
+	return append(w, unitsWarning(cfg, g)...)
 }
