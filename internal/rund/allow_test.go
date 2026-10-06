@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"luk/internal/config"
 	"luk/internal/runproto"
 )
 
@@ -271,5 +272,79 @@ storage:
 	}
 	if !slices.Equal(lk.Pipelines["j1"], []string{"a", "b"}) {
 		t.Fatalf("pipelines %q", lk.Pipelines)
+	}
+}
+
+// lukdTree is a configuration directory owned by the test user below a
+// private top: main is its config.yaml.
+type lukdTree struct{ top, main string }
+
+func lukdDir(t *testing.T) lukdTree {
+	t.Helper()
+	top := t.TempDir()
+	os.Chmod(top, 0o700)
+	d := filepath.Join(top, "lukd")
+	os.Mkdir(d, 0o750)
+	return lukdTree{top, filepath.Join(d, "config.yaml")}
+}
+
+func TestLoadLukdSteps(t *testing.T) {
+	e := lukdDir(t)
+	write(t, e.main, `pipeline:
+  p:
+    timeout: 2h
+    steps:
+      - run: /opt/luk/p
+        env: {A: b}
+        jobs: [s3-upload]
+      - run: {job: db-dump}
+      - relay: s3-upload
+      - store: a
+  q:
+    steps: [{run: /opt/luk/q}]
+`, 0o640)
+	lk, err := LoadLukd(e.main, e.top, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := lk.Step("p", 1); !ok || d.Program != "/opt/luk/p" || d.Env["A"] != "b" || !slices.Equal(d.Jobs, []string{"s3-upload"}) {
+		t.Fatalf("%+v", d)
+	}
+	if d, _ := lk.Step("p", 2); d.Job != "db-dump" || d.Program != "" {
+		t.Fatalf("%+v", d)
+	}
+	if d, _ := lk.Step("p", 3); d.Relay != "s3-upload" {
+		t.Fatalf("%+v", d)
+	}
+	if d, ok := lk.Step("p", 4); !ok || d.Program != "" || d.Job != "" || d.Relay != "" {
+		t.Fatalf("store step: %+v %v", d, ok)
+	}
+	for _, c := range []struct {
+		p string
+		n int
+	}{{"p", 5}, {"p", 0}, {"p", -1}, {"x", 1}} {
+		if _, ok := lk.Step(c.p, c.n); ok {
+			t.Fatalf("step %s %d", c.p, c.n)
+		}
+	}
+	if lk.Timeout["p"] != 2*time.Hour || lk.Timeout["q"] != config.DefaultPipelineTimeout {
+		t.Fatalf("%v", lk.Timeout)
+	}
+	const run = "run must be an absolute path or {job: NAME}"
+	for body, want := range map[string]string{
+		"pipeline:\n  p:\n    steps: [{run: {job: x, y: z}}]\n": "pipeline p: step 1: " + run,
+		"pipeline:\n  p:\n    steps: [{run: {job: [x]}}]\n":     "pipeline p: step 1: " + run,
+		"pipeline:\n  p:\n    steps: [{run: [a]}]\n":            "pipeline p: step 1: " + run,
+		"pipeline:\n  p:\n    steps: [{run: x}]\n":              "pipeline p: step 1: " + run,
+		"pipeline:\n  p:\n    steps: [{run: 5}]\n":              "pipeline p: step 1: " + run,
+		"pipeline:\n  p:\n    steps: [{run: /x, env: [a]}]\n":   "pipeline p: step 1: env: ",
+		"pipeline:\n  p:\n    steps: [{run: /x, jobs: a}]\n":    "pipeline p: step 1: jobs: ",
+		"pipeline:\n  p:\n    timeout: soon\n":                  "pipeline p: timeout: ",
+		"pipeline:\n  p:\n    timeout: 168h\n":                  "pipeline p: timeout: must be under 168h0m0s",
+	} {
+		write(t, e.main, body, 0o640)
+		if _, err := LoadLukd(e.main, e.top, me); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want %q, got %v", body, want, err)
+		}
 	}
 }

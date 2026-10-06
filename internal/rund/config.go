@@ -22,10 +22,12 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"luk/internal/config"
+	"luk/internal/workspace"
 )
 
 const (
-	// DefaultConfig holds the global settings (root, peer).
+	// DefaultConfig holds the global settings (root, config, hide,
+	// limits).
 	DefaultConfig = "/etc/site/lukd/run.yaml"
 	// DefaultJobs holds one <job>.yaml per job.
 	DefaultJobs = "/etc/site/lukd/run.d"
@@ -45,8 +47,12 @@ const (
 	// maxUser is the length systemd recommends for a user name.
 	maxUser = 31
 	// RunDir holds the socket of lukd run, the nonce cache and the
-	// volatile secrets; a job never sees it.
+	// volatile secrets; a unit never sees it.
 	RunDir = "/run/luk"
+	// DefaultUnitsMax is limits.units.max when run.yaml does not set it.
+	DefaultUnitsMax = 16
+	// DefaultPath is the PATH of every unit, before its env.
+	DefaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
 var (
@@ -60,10 +66,16 @@ var (
 type Global struct {
 	Root string `yaml:"root"`
 	Peer string `yaml:"peer"`
-	// Config is the main file of the lukd configuration (see LoadJobPipelines).
+	// Config is the main file of the lukd configuration (see LoadLukd).
 	Config string `yaml:"config"`
-	// Hide lists further absolute paths a job must not see (see Box).
-	Hide []string `yaml:"hide"`
+	// Hide lists further absolute paths a unit must not see (see Box).
+	Hide   []string `yaml:"hide"`
+	Limits struct {
+		Units struct {
+			// Max is the units of steps running at once, at least 1.
+			Max int `yaml:"max"`
+		} `yaml:"units"`
+	} `yaml:"limits"`
 }
 
 // Job is one file of run.d. The pipelines that may run it come from the
@@ -77,6 +89,8 @@ type Job struct {
 	Timeout     config.Duration   `yaml:"timeout"`
 	Env         map[string]string `yaml:"env"`
 	State       string            `yaml:"state"`
+	// Privileged leaves out NoNewPrivileges=yes; it needs User.
+	Privileged bool `yaml:"privileged"`
 	// RemovedPipelines catches the key replaced by the jobs of the run
 	// steps, so the error names the new place.
 	// A node, so a null value counts as well.
@@ -167,6 +181,23 @@ func LoadGlobal(p string, owner uint32) (*Global, error) {
 		if err := config.DecodeStrict(b, g); err != nil {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
+		// A second pass tells an absent max from 0.
+		var set struct {
+			Limits struct {
+				Units struct {
+					Max *int `yaml:"max"`
+				} `yaml:"units"`
+			} `yaml:"limits"`
+		}
+		if err := decodeOne(b, &set); err != nil {
+			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+		if m := set.Limits.Units.Max; m != nil && *m < 1 {
+			return nil, fmt.Errorf("%s: limits.units.max: at least 1", p)
+		}
+	}
+	if g.Limits.Units.Max == 0 {
+		g.Limits.Units.Max = DefaultUnitsMax
 	}
 	if g.Root == "" {
 		g.Root = config.DefaultRoot
@@ -206,6 +237,28 @@ func (g *Global) PeerUID() (uint32, error) {
 	}
 	id, err := strconv.ParseUint(u.Uid, 10, 32)
 	return uint32(id), err
+}
+
+// ServiceUID is the uid of the service user, the only peer: the owner of
+// <root>/data, which must be a directory, not a symlink, not owned by
+// root.
+func (g *Global) ServiceUID() (uint32, error) {
+	p := filepath.Join(g.Root, config.DataName)
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return 0, err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return 0, fmt.Errorf("%s: a symlink", p)
+	}
+	if !fi.IsDir() {
+		return 0, fmt.Errorf("%s: not a directory", p)
+	}
+	uid := fi.Sys().(*syscall.Stat_t).Uid
+	if uid == 0 {
+		return 0, fmt.Errorf("%s: owned by root", p)
+	}
+	return uid, nil
 }
 
 // Ignored reports whether a file of run.d is not a job: not ending in
@@ -288,6 +341,9 @@ func (j *Job) validate() error {
 	if j.Group != "" && j.User == "" {
 		bad("group %q: needs user", j.Group)
 	}
+	if j.Privileged && j.User == "" {
+		bad("privileged needs user")
+	}
 	for _, g := range j.Groups {
 		if !account.MatchString(g) {
 			bad("groups: %q: invalid", g)
@@ -322,15 +378,25 @@ func (j *Job) validate() error {
 	if j.State != "" && j.State != StateLocked && j.State != StateShared {
 		bad("state %q: want %s or %s", j.State, StateLocked, StateShared)
 	}
-	for k, v := range j.Env {
+	if err := checkEnv(j.Env); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// checkEnv refuses a fixed environment with an invalid name, a reserved
+// LUK_* name or a NUL or newline in a value.
+func checkEnv(env map[string]string) error {
+	var errs []error
+	for _, k := range sortedKeys(env) {
 		if !envName.MatchString(k) {
-			bad("env.%s: invalid name", k)
+			errs = append(errs, fmt.Errorf("env.%s: invalid name", k))
 		}
 		if strings.HasPrefix(k, "LUK_") {
-			bad("env.%s: LUK_* names are reserved", k)
+			errs = append(errs, fmt.Errorf("env.%s: LUK_* names are reserved", k))
 		}
-		if strings.ContainsAny(v, "\x00\n") {
-			bad("env.%s: NUL or newline in the value", k)
+		if strings.ContainsAny(env[k], "\x00\n") {
+			errs = append(errs, fmt.Errorf("env.%s: NUL or newline in the value", k))
 		}
 	}
 	return errors.Join(errs...)
@@ -345,63 +411,182 @@ func sortedKeys(m map[string]string) []string {
 	return ks
 }
 
-// SupplementaryGroups is peerGroup, the primary group of the peer that
-// owns the work directory, followed by the groups of the job, without
-// duplicates.
-func (j *Job) SupplementaryGroups(peerGroup string) []string {
-	gs := []string{peerGroup}
-	for _, g := range j.Groups {
-		if !slices.Contains(gs, g) {
-			gs = append(gs, g)
-		}
-	}
-	return gs
-}
-
 // StatePath is LUK_STATE of job on pipeline, the path of
 // StateDirectory=lukd-run/<job>/<pipeline>.
 func StatePath(job, pipeline string) string {
 	return filepath.Join("/var/lib", StateDir, job, pipeline)
 }
 
-// DynamicUser is the name of the dynamic user of job on pipeline:
-// lukd-<job and pipeline, shortened>-<8 hex of sha256(job/pipeline)>, a
-// valid user name of at most 31 characters. The same pair always gets the
-// same name, and so the same UID, the owner of its state directory.
-func DynamicUser(job, pipeline string) string {
-	sum := sha256.Sum256([]byte(job + "/" + pipeline))
+// DynamicUser is the name of the dynamic user of job on pipeline (see
+// dynamicName, key <job>/<pipeline>). The same pair always gets the same
+// name, and so the same UID, the owner of its state directory.
+func DynamicUser(job, pipeline string) string { return dynamicName(job+"-"+pipeline, job+"/"+pipeline) }
+
+// StepUser is the name of the dynamic user of the run program of step of
+// pipeline (see dynamicName, key step:<pipeline>/<step>; a job name has
+// no colon, so it is never the name of a job).
+func StepUser(pipeline string, step int) string {
+	return dynamicName(pipeline+"-"+strconv.Itoa(step), "step:"+pipeline+"/"+strconv.Itoa(step))
+}
+
+// dynamicName is lukd-<readable, shortened>-<8 hex of sha256(key)>, a
+// valid user name of at most 31 characters: readable lowercased, every
+// run of characters outside [a-z0-9_-] replaced by _.
+func dynamicName(readable, key string) string {
+	sum := sha256.Sum256([]byte(key))
 	h := hex.EncodeToString(sum[:4])
-	r := nonUser.ReplaceAllString(strings.ToLower(job+"-"+pipeline), "_")
+	r := nonUser.ReplaceAllString(strings.ToLower(readable), "_")
 	if n := maxUser - len("lukd--") - len(h); len(r) > n {
 		r = r[:n]
 	}
 	return "lukd-" + strings.TrimRight(r, "-") + "-" + h
 }
 
-// Box is the sandbox of a job (see Job.Argv): the root of run.yaml, the
+// Box is the sandbox of a unit (see Unit.Argv): the root of run.yaml, the
 // directory of the lukd configuration, further paths to hide (hide of
-// run.yaml, Lukd.Paths), the lukd binary that checks the work directory
-// inside the unit and the identity of the work directory CheckWork
-// accepted.
+// run.yaml, Lukd.Paths) and the lukd binary of the wrapper and of
+// ExecStartPre.
 type Box struct {
-	Root    string
-	Config  string
-	Hide    []string
-	Checker string
-	Work    Inode
+	Root   string
+	Config string
+	Hide   []string
+	Lukd   string
+	// Work is the identity of the work directory of Job.Argv, which
+	// CheckWork accepted.
+	Work Inode
+}
+
+// Unit is what lukd run starts for a step or a job: the transient unit
+// Name, the job (empty for a run program), the pipeline and step, a user
+// or a dynamic user, the group and groups of a job, the command, the
+// credentials, the timeout (RuntimeMaxSec), the fixed env and the state
+// of a job, and whether it keeps the setuid binaries working.
+type Unit struct {
+	Name, Job, Pipeline string
+	Step                int
+	User, Dynamic       string
+	Group               string
+	Groups              []string
+	Command             string
+	Credentials         map[string]string
+	Timeout             time.Duration
+	Env                 map[string]string
+	State               string
+	Privileged          bool
+}
+
+// Unit is the unit name of job on step of pipeline: as User, else as the
+// dynamic user of job and pipeline.
+func (j *Job) Unit(name, job, pipeline string, step int) *Unit {
+	u := &Unit{
+		Name: name, Job: job, Pipeline: pipeline, Step: step,
+		User: j.User, Group: j.Group, Groups: j.Groups, Command: j.Command,
+		Credentials: j.Credentials, Timeout: time.Duration(j.Timeout), Env: j.Env,
+		State: j.State, Privileged: j.Privileged,
+	}
+	if u.User == "" {
+		u.Dynamic = DynamicUser(job, pipeline)
+	}
+	return u
+}
+
+// ProgramUnit is the unit name of the run program of d, step of pipeline,
+// as the dynamic user of that step, bounded by timeout (the pipeline
+// timeout).
+func ProgramUnit(name string, d StepDef, timeout time.Duration, pipeline string, step int) *Unit {
+	return &Unit{
+		Name: name, Pipeline: pipeline, Step: step,
+		Dynamic: StepUser(pipeline, step), Command: d.Program, Env: d.Env, Timeout: timeout,
+	}
+}
+
+// Workspace is the workspace of u, <root>/root/job/<unit>.
+func (u *Unit) Workspace(box *Box) string { return workspace.Path(box.Root, u.Name) }
+
+// Argv is the systemd-run command line of u. vars is the LUK_* metadata
+// and TMPDIR of the unit (runstep.UnitVars), set after PATH, LANG and the
+// env of u and before LUK_JOB and LUK_STATE, one --setenv argument each.
+// The unit sees nothing of box but its workspace, at the same path (see
+// sandbox); ExecStartPre gives the workspace to the user of the unit, and
+// the wrapper (box.Lukd run workspace run) runs the command with the
+// workspace as its argument.
+func (u *Unit) Argv(box *Box, vars []string) ([]string, error) {
+	if !filepath.IsAbs(u.Command) || filepath.Clean(u.Command) != u.Command {
+		return nil, fmt.Errorf("command %q: not a clean absolute path", u.Command)
+	}
+	if u.Timeout < time.Second {
+		return nil, fmt.Errorf("timeout %v: less than 1s", u.Timeout)
+	}
+	ws := u.Workspace(box)
+	var state string
+	if u.State != "" {
+		state = StatePath(u.Job, u.Pipeline)
+	}
+	sb, err := sandbox(box, ws, u.Command, state)
+	if err != nil {
+		return nil, err
+	}
+	a := []string{"systemd-run", "--wait", "--collect", "--pipe", "--quiet", "--expand-environment=no", "--unit=" + u.Name}
+	if u.User != "" {
+		a = append(a, "--uid="+u.User)
+	} else {
+		a = append(a, "-p", "DynamicUser=yes", "-p", "User="+u.Dynamic)
+	}
+	a = append(a, "--working-directory="+ws)
+	if u.Group != "" {
+		a = append(a, "--gid="+u.Group)
+	}
+	var gs []string
+	for _, g := range u.Groups {
+		if !slices.Contains(gs, g) {
+			gs = append(gs, g)
+		}
+	}
+	if len(gs) > 0 {
+		a = append(a, "-p", "SupplementaryGroups="+strings.Join(gs, " "))
+	}
+	if !u.Privileged {
+		a = append(a, "-p", "NoNewPrivileges=yes")
+	}
+	a = append(a, "-p", "PrivateTmp=yes")
+	a = append(a, sb...)
+	a = append(a, "-p", "ExecStartPre=+"+box.Lukd+" run workspace own "+u.Name)
+	if u.State != "" {
+		a = append(a, "-p", "StateDirectory="+StateDir+"/"+u.Job+"/"+u.Pipeline, "-p", "StateDirectoryMode=0700")
+	}
+	for _, n := range sortedKeys(u.Credentials) {
+		a = append(a, "-p", "LoadCredential="+n+":"+u.Credentials[n])
+	}
+	a = append(a, "-p", "RuntimeMaxSec="+strconv.FormatInt(int64(u.Timeout/time.Second), 10))
+	a = append(a, "--setenv=PATH="+DefaultPath, "--setenv=LANG=C.UTF-8")
+	for _, k := range sortedKeys(u.Env) {
+		a = append(a, "--setenv="+k+"="+u.Env[k])
+	}
+	for _, kv := range vars {
+		a = append(a, "--setenv="+kv)
+	}
+	if u.Job != "" {
+		a = append(a, "--setenv=LUK_JOB="+u.Job)
+	}
+	if u.State != "" {
+		a = append(a, "--setenv=LUK_STATE="+state)
+	}
+	return append(a, box.Lukd, "run", "workspace", "run", ws, "--", u.Command, ws), nil
 }
 
 // Argv is the systemd-run command line of job name on work (a step of
-// pipeline) as unit. peerGroup (a name or a numeric gid) is the primary
-// group of the peer; without a user the job gets a dynamic user per job
-// and pipeline. vars is the LUK_* metadata of work (runstep.Vars), set
-// after the job's env and before LUK_JOB, LUK_TMP and LUK_STATE, one
-// --setenv argument each. The job sees nothing of box but work, at the
-// same path (see sandbox). The unit runs box.Checker run check-work, which
-// checks work inside the namespace and then executes command work in its
-// place, with the environment of the unit.
+// pipeline) as unit, started through box.Lukd run check-work. peerGroup
+// (a name or a numeric gid) is the primary group of the peer, followed by
+// the groups of the job.
 func (j *Job) Argv(box *Box, unit, name, pipeline, work, peerGroup string, vars []string) ([]string, error) {
-	sb, err := j.sandbox(box, name, pipeline, work)
+	if !strings.HasPrefix(work, box.Root+"/") {
+		return nil, fmt.Errorf("work %q: not under %s", work, box.Root)
+	}
+	var state string
+	if j.State != "" {
+		state = StatePath(name, pipeline)
+	}
+	sb, err := sandbox(box, work, j.Command, state)
 	if err != nil {
 		return nil, err
 	}
@@ -415,7 +600,13 @@ func (j *Job) Argv(box *Box, unit, name, pipeline, work, peerGroup string, vars 
 	if j.Group != "" {
 		a = append(a, "--gid="+j.Group)
 	}
-	a = append(a, "-p", "SupplementaryGroups="+strings.Join(j.SupplementaryGroups(peerGroup), " "))
+	gs := []string{peerGroup}
+	for _, g := range j.Groups {
+		if !slices.Contains(gs, g) {
+			gs = append(gs, g)
+		}
+	}
+	a = append(a, "-p", "SupplementaryGroups="+strings.Join(gs, " "))
 	a = append(a, "-p", "PrivateTmp=yes")
 	a = append(a, sb...)
 	if j.State != "" {
@@ -433,14 +624,14 @@ func (j *Job) Argv(box *Box, unit, name, pipeline, work, peerGroup string, vars 
 	}
 	a = append(a, "--setenv=LUK_JOB="+name, "--setenv=LUK_TMP="+TmpDir)
 	if j.State != "" {
-		a = append(a, "--setenv=LUK_STATE="+StatePath(name, pipeline))
+		a = append(a, "--setenv=LUK_STATE="+state)
 	}
-	return append(a, box.Checker, "run", CheckWorkCmd, box.Root, work,
+	return append(a, box.Lukd, "run", CheckWorkCmd, box.Root, work,
 		strconv.FormatUint(box.Work.Dev, 10), strconv.FormatUint(box.Work.Ino, 10), "--", j.Command, work), nil
 }
 
 // systemDirs may be neither the root nor the directory of the lukd
-// configuration: the job would lose the system below them.
+// configuration: the unit would lose the system below them.
 var systemDirs = []string{
 	"/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root",
 	"/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/usr/bin", "/usr/lib", "/usr/local",
@@ -452,32 +643,27 @@ func under(p, d string) bool {
 	return p == d || strings.HasPrefix(p, d+"/")
 }
 
-// sandbox is the part of the unit of a job that hides what the group of
-// the peer may read. The directory of the lukd configuration (identity
-// key, passwords, TLS settings), RunDir and the paths of box.Hide outside
-// both and the root become inaccessible; the root (keys, storages,
-// queues, other work directories) an empty read-only tmpfs with only work
-// bound back, read-write and at the same path, so LUK_WORK, LUK_IN,
-// LUK_OUT and LUK_META stay valid. luk may swap a directory above work
-// for a symlink after CheckWork, and systemd binds what the path resolves
-// to, for each process of the unit on its own: so the check of work
-// inside the namespace is the process of the job itself (see Argv),
-// which becomes the command only after it. The processes of other users
-// are hidden. The credentials of the job are read by systemd before the
-// namespace is set up.
-func (j *Job) sandbox(box *Box, name, pipeline, work string) ([]string, error) {
-	for _, p := range []string{box.Root, box.Config, work, box.Checker} {
+// sandbox is the part of a unit that hides lukd from it. The directory of
+// the lukd configuration (identity key, passwords, TLS settings), RunDir
+// and the paths of box.Hide outside both and the root become
+// inaccessible; the root (keys, storages, queues, other workspaces) an
+// empty read-only tmpfs with only the workspace ws bound back, read-write
+// and at the same path, so LUK_WORK, LUK_IN, LUK_OUT, LUK_META and LUK_TMP
+// stay valid. The workspace and its parent are root's, so the unit cannot
+// swap them. The processes of other users are hidden. The credentials are
+// read by systemd before the namespace is set up. command, the state
+// directory state (none when empty) and box.Lukd must lie outside every
+// hidden path, ws outside every one but the root.
+func sandbox(box *Box, ws, command, state string) ([]string, error) {
+	for _, p := range []string{box.Root, box.Config, ws, box.Lukd} {
 		if err := unitPath(p); err != nil {
 			return nil, err
 		}
 	}
 	for _, d := range []struct{ what, path string }{{"root", box.Root}, {"configuration directory", box.Config}} {
 		if slices.Contains(systemDirs, d.path) {
-			return nil, fmt.Errorf("%s %s: a system directory, a job cannot run without it", d.what, d.path)
+			return nil, fmt.Errorf("%s %s: a system directory, a unit cannot run without it", d.what, d.path)
 		}
-	}
-	if !strings.HasPrefix(work, box.Root+"/") {
-		return nil, fmt.Errorf("work %q: not under %s", work, box.Root)
 	}
 	hidden := []string{box.Config, RunDir}
 	var hide []string
@@ -489,22 +675,22 @@ func (j *Job) sandbox(box *Box, name, pipeline, work string) ([]string, error) {
 			return nil, err
 		}
 		if slices.Contains(systemDirs, h) {
-			return nil, fmt.Errorf("hidden path %s: a system directory, a job cannot run without it", h)
+			return nil, fmt.Errorf("hidden path %s: a system directory, a unit cannot run without it", h)
 		}
 		hide = append(hide, h)
 		hidden = append(hidden, h)
 	}
-	keep := map[string]string{"work": work, "command": j.Command, "checker": box.Checker}
-	if j.State != "" {
-		keep["state directory"] = StatePath(name, pipeline)
+	keep := map[string]string{"workspace": ws, "command": command, "lukd": box.Lukd}
+	if state != "" {
+		keep["state directory"] = state
 	}
 	for _, what := range sortedKeys(keep) {
 		for _, d := range slices.Concat(hidden, []string{box.Root}) {
-			if d == box.Root && what == "work" {
+			if d == box.Root && what == "workspace" {
 				continue
 			}
 			if under(keep[what], d) {
-				return nil, fmt.Errorf("%s %s: hidden from the job under %s", what, keep[what], d)
+				return nil, fmt.Errorf("%s %s: hidden from the unit under %s", what, keep[what], d)
 			}
 		}
 	}
@@ -514,7 +700,7 @@ func (j *Job) sandbox(box *Box, name, pipeline, work string) ([]string, error) {
 	}
 	return append(a,
 		"-p", "TemporaryFileSystem="+box.Root+":ro",
-		"-p", "BindPaths="+work+":"+work+":norbind",
+		"-p", "BindPaths="+ws+":"+ws+":norbind",
 	), nil
 }
 

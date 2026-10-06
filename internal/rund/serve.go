@@ -177,7 +177,7 @@ func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, 
 	unit := UnitName(req.Job)
 	box := &Box{
 		Root: g.Root, Config: filepath.Dir(g.Config), Hide: slices.Concat(g.Hide, lk.Paths),
-		Checker: s.Checker, Work: ino,
+		Lukd: s.Checker, Work: ino,
 	}
 	argv, err := job.Argv(box, unit, req.Job, pipeline, work, group, vars)
 	if err != nil {

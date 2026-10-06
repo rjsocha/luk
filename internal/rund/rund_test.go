@@ -190,101 +190,182 @@ func TestLoadJobsRules(t *testing.T) {
 	}
 }
 
-// box is the sandbox of the argv tests.
-func box(root, conf string, hide ...string) *Box {
-	return &Box{Root: root, Config: conf, Hide: hide, Checker: "/usr/bin/lukd", Work: Inode{2049, 77}}
+func TestLoadGlobalLimits(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "run.yaml")
+	write(t, p, "limits:\n  units:\n    max: 4\n", 0o600)
+	g, err := LoadGlobal(p, me)
+	if err != nil || g.Limits.Units.Max != 4 {
+		t.Fatalf("%+v %v", g, err)
+	}
+	write(t, p, "", 0o600)
+	if g, _ := LoadGlobal(p, me); g.Limits.Units.Max != DefaultUnitsMax {
+		t.Fatalf("default %d", g.Limits.Units.Max)
+	}
+	if g, _ := LoadGlobal(filepath.Join(dir, "missing.yaml"), me); g.Limits.Units.Max != DefaultUnitsMax {
+		t.Fatalf("missing file: %d", g.Limits.Units.Max)
+	}
+	for body, want := range map[string]string{
+		"limits:\n  units:\n    max: 0\n":  "limits.units.max: at least 1",
+		"limits:\n  units:\n    max: -2\n": "limits.units.max: at least 1",
+		"limits:\n  units:\n    min: 1\n":  "field min not found",
+	} {
+		write(t, p, body, 0o600)
+		if _, err := LoadGlobal(p, me); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want %q, got %v", body, want, err)
+		}
+	}
 }
 
-func TestArgv(t *testing.T) {
-	d := t.TempDir()
-	write(t, filepath.Join(d, "j.yaml"), s3Job, 0o600)
-	j, err := loadJob(filepath.Join(d, "j.yaml"), me)
+func TestServiceUID(t *testing.T) {
+	root := t.TempDir()
+	g := &Global{Root: root}
+	if _, err := g.ServiceUID(); err == nil {
+		t.Fatal("missing data accepted")
+	}
+	os.Mkdir(filepath.Join(root, "data"), 0o750)
+	if uid, err := g.ServiceUID(); err != nil || uid != me {
+		t.Fatalf("%d %v", uid, err)
+	}
+	os.Remove(filepath.Join(root, "data"))
+	os.Symlink(t.TempDir(), filepath.Join(root, "data"))
+	if _, err := g.ServiceUID(); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlink: %v", err)
+	}
+}
+
+func TestPrivilegedNeedsUser(t *testing.T) {
+	j := &Job{Command: "/opt/x", Privileged: true}
+	if err := j.validate(); err == nil || !strings.Contains(err.Error(), "privileged needs user") {
+		t.Fatalf("got %v", err)
+	}
+	j.User = "podman"
+	if err := j.validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStepUser(t *testing.T) {
+	a, b := StepUser("p", 1), DynamicUser("p", "1")
+	if a == b {
+		t.Fatalf("step 1 of p and job p on pipeline 1 share %s", a)
+	}
+	if !strings.HasPrefix(a, "lukd-p-1-") || len(a) > 31 {
+		t.Fatalf("%q", a)
+	}
+	if u := StepUser(strings.Repeat("Long.Pipeline", 10), 12); len(u) > 31 || strings.ContainsAny(u, ".L") {
+		t.Fatalf("%q", u)
+	}
+	if StepUser("p", 1) != StepUser("p", 1) {
+		t.Fatal("not stable")
+	}
+}
+
+// box is the sandbox of the argv tests.
+func box(root, conf string, hide ...string) *Box {
+	return &Box{Root: root, Config: conf, Hide: hide, Lukd: "/usr/bin/lukd"}
+}
+
+func TestArgvProgram(t *testing.T) {
+	u := ProgramUnit("lukd-step-p-2-0123456789ab", StepDef{Program: "/opt/luk/p", Env: map[string]string{"B": "2", "A": "1"}}, 2*time.Hour, "p", 2)
+	ws := "/var/lib/luk/root/job/lukd-step-p-2-0123456789ab"
+	if got := u.Workspace(box("/var/lib/luk", "/etc/site/lukd")); got != ws {
+		t.Fatalf("workspace %s", got)
+	}
+	argv, err := u.Argv(box("/var/lib/luk", "/etc/site/lukd"), []string{"LUK_WORK=" + ws, "TMPDIR=" + ws + "/tmp"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	j.State = StateLocked
-	vars := []string{"LUK_WORK=/var/lib/luk/work/a/offsite/1", "LUK_PIPELINE=offsite", "LUK_TAGS=a b,$HOME"}
-	b := box("/var/lib/luk", "/etc/site/lukd", "/storage", "/run/luk/volatile/q", "/var/lib/luk/tls/k.pem", "/etc/site/lukd/gpg.d", "/storage/x", "/etc/ssl/private/k.pem")
-	a, err := j.Argv(b, "lukd-run-s3-1", "s3-upload", "offsite", "/var/lib/luk/work/a/offsite/1", "luk", vars)
+	want := []string{
+		"systemd-run", "--wait", "--collect", "--pipe", "--quiet", "--expand-environment=no",
+		"--unit=lukd-step-p-2-0123456789ab",
+		"-p", "DynamicUser=yes", "-p", "User=" + StepUser("p", 2),
+		"--working-directory=" + ws,
+		"-p", "NoNewPrivileges=yes", "-p", "PrivateTmp=yes", "-p", "ProtectProc=invisible",
+		"-p", "InaccessiblePaths=-/etc/site/lukd", "-p", "InaccessiblePaths=-/run/luk",
+		"-p", "TemporaryFileSystem=/var/lib/luk:ro", "-p", "BindPaths=" + ws + ":" + ws + ":norbind",
+		"-p", "ExecStartPre=+/usr/bin/lukd run workspace own lukd-step-p-2-0123456789ab",
+		"-p", "RuntimeMaxSec=7200",
+		"--setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "--setenv=LANG=C.UTF-8",
+		"--setenv=A=1", "--setenv=B=2", "--setenv=LUK_WORK=" + ws, "--setenv=TMPDIR=" + ws + "/tmp",
+		"/usr/bin/lukd", "run", "workspace", "run", ws, "--", "/opt/luk/p", ws,
+	}
+	if !slices.Equal(argv, want) {
+		t.Fatalf("got  %q\nwant %q", argv, want)
+	}
+}
+
+func TestArgvJob(t *testing.T) {
+	j := &Job{User: "podman", Groups: []string{"backup", "backup"}, Command: "/opt/luk/pod", Privileged: true,
+		State: StateShared, Timeout: config.Duration(time.Hour), Credentials: map[string]string{"s3": "/etc/site/lukd/s3"}}
+	u := j.Unit("lukd-run-pod-0123456789ab", "pod", "p", 1)
+	argv, err := u.Argv(box("/var/lib/luk", "/etc/site/lukd"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(a, " ")
-	want := "systemd-run --wait --collect --pipe --quiet --expand-environment=no --unit=lukd-run-s3-1 --uid=luk-s3 " +
-		"--working-directory=/var/lib/luk/work/a/offsite/1 --gid=luk-s3 -p SupplementaryGroups=luk backup " +
-		"-p PrivateTmp=yes -p ProtectProc=invisible -p InaccessiblePaths=-/etc/site/lukd -p InaccessiblePaths=-/run/luk " +
-		"-p InaccessiblePaths=-/etc/ssl/private/k.pem -p InaccessiblePaths=-/storage " +
-		"-p TemporaryFileSystem=/var/lib/luk:ro -p BindPaths=/var/lib/luk/work/a/offsite/1:/var/lib/luk/work/a/offsite/1:norbind " +
-		"-p StateDirectory=lukd-run/s3-upload/offsite -p StateDirectoryMode=0700 " +
-		"-p LoadCredential=s3:/etc/site/lukd/s3.credentials -p RuntimeMaxSec=1800 --setenv=BUCKET=example-backup " +
-		"--setenv=LUK_WORK=/var/lib/luk/work/a/offsite/1 --setenv=LUK_PIPELINE=offsite --setenv=LUK_TAGS=a b,$HOME " +
-		"--setenv=LUK_JOB=s3-upload --setenv=LUK_TMP=/var/tmp --setenv=LUK_STATE=/var/lib/lukd-run/s3-upload/offsite " +
-		"/usr/bin/lukd run check-work /var/lib/luk /var/lib/luk/work/a/offsite/1 2049 77 -- /opt/luk/s3-upload /var/lib/luk/work/a/offsite/1"
-	if got != want {
-		t.Fatalf("\n got %s\nwant %s", got, want)
+	s := strings.Join(argv, " ")
+	for _, want := range []string{"--uid=podman", "-p SupplementaryGroups=backup -p", "-p StateDirectory=lukd-run/pod/p",
+		"-p LoadCredential=s3:/etc/site/lukd/s3", "-p RuntimeMaxSec=3600", "--setenv=LUK_JOB=pod", "--setenv=LUK_STATE=/var/lib/lukd-run/pod/p"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in %s", want, s)
+		}
 	}
-	if g := strings.Join(j.SupplementaryGroups("1234"), " "); g != "1234 luk backup" {
-		t.Fatalf("groups %s", g)
+	if strings.Contains(s, "NoNewPrivileges") {
+		t.Fatalf("privileged job: %s", s)
 	}
-	dyn := &Job{Command: "/opt/luk/notify", Groups: []string{"mail"}, Timeout: config.Duration(time.Minute)}
-	a, err = dyn.Argv(box("/srv/l", "/etc/l"), "lukd-run-n-1", "notify", "p", "/srv/l/work/i/p/1", "luk", []string{"LUK_WORK=/srv/l/work/i/p/1", "LUK_PIPELINE=p"})
+	for _, a := range argv {
+		if strings.HasPrefix(a, "SupplementaryGroups=") && a != "SupplementaryGroups=backup" {
+			t.Fatalf("groups: %s", a)
+		}
+	}
+	// A dynamic user per job and pipeline, no groups, NoNewPrivileges.
+	dyn := &Job{Command: "/opt/luk/n", Timeout: config.Duration(time.Minute)}
+	argv, err = dyn.Unit("lukd-run-n-0123456789ab", "n", "p", 3).Argv(box("/var/lib/luk", "/etc/site/lukd"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got = strings.Join(a, " ")
-	want = "systemd-run --wait --collect --pipe --quiet --expand-environment=no --unit=lukd-run-n-1 -p DynamicUser=yes -p User=" + DynamicUser("notify", "p") + " " +
-		"--working-directory=/srv/l/work/i/p/1 -p SupplementaryGroups=luk mail -p PrivateTmp=yes -p ProtectProc=invisible " +
-		"-p InaccessiblePaths=-/etc/l -p InaccessiblePaths=-/run/luk -p TemporaryFileSystem=/srv/l:ro " +
-		"-p BindPaths=/srv/l/work/i/p/1:/srv/l/work/i/p/1:norbind " +
-		"-p RuntimeMaxSec=60 " +
-		"--setenv=LUK_WORK=/srv/l/work/i/p/1 --setenv=LUK_PIPELINE=p --setenv=LUK_JOB=notify --setenv=LUK_TMP=/var/tmp " +
-		"/usr/bin/lukd run check-work /srv/l /srv/l/work/i/p/1 2049 77 -- /opt/luk/notify /srv/l/work/i/p/1"
-	if got != want {
-		t.Fatalf("\n got %s\nwant %s", got, want)
-	}
-	if u := UnitName("s3.Up_x"); !strings.HasPrefix(u, "lukd-run-s3--p-x-") || u == UnitName("s3.Up_x") {
-		t.Fatalf("unit %s", u)
+	s = strings.Join(argv, " ")
+	if !strings.Contains(s, "-p DynamicUser=yes -p User="+DynamicUser("n", "p")+" ") || strings.Contains(s, "SupplementaryGroups") ||
+		!strings.Contains(s, "-p NoNewPrivileges=yes") || strings.Contains(s, "LUK_STATE") || !strings.Contains(s, "--setenv=LUK_JOB=n") {
+		t.Fatalf("dynamic job: %s", s)
 	}
 }
 
 func TestArgvRefusesPaths(t *testing.T) {
 	j := &Job{User: "u", Command: "/opt/j", Timeout: config.Duration(time.Minute)}
 	ok := box("/var/lib/luk", "/etc/site/lukd")
-	const w = "/var/lib/luk/work/i/p/1"
+	const unit = "lukd-run-j-0123456789ab"
 	for name, c := range map[string]struct {
 		b     *Box
-		work  string
+		unit  string
 		cmd   string
 		state bool
 	}{
-		"space in work":          {ok, "/var/lib/luk/work/i/p q/1", "", false},
-		"tab in work":            {ok, "/var/lib/luk/work/i/p\tq/1", "", false},
-		"newline in work":        {ok, "/var/lib/luk/work/i/p\nq/1", "", false},
-		"control in work":        {ok, "/var/lib/luk/work/i/p\x01/1", "", false},
-		"colon in work":          {ok, "/var/lib/luk/work/i/p:q/1", "", false},
-		"quote in work":          {ok, "/var/lib/luk/work/i/p\"q/1", "", false},
-		"backslash in work":      {ok, "/var/lib/luk/work/i/p\\q/1", "", false},
-		"percent in work":        {ok, "/var/lib/luk/work/i/p%q/1", "", false},
-		"work outside root":      {ok, "/var/lib/other/work/i/p/1", "", false},
-		"work not clean":         {ok, "/var/lib/luk/work/i/../p/1", "", false},
-		"space in root":          {box("/var/lib/l k", "/etc/site/lukd"), "/var/lib/l k/work/i/p/1", "", false},
-		"root is /":              {box("/", "/etc/site/lukd"), "/work/i/p/1", "", false},
-		"root is /var/lib":       {box("/var/lib", "/etc/site/lukd"), "/var/lib/work/i/p/1", "", false},
-		"root is /srv":           {box("/srv", "/etc/site/lukd"), "/srv/work/i/p/1", "", false},
-		"space in config dir":    {box("/var/lib/luk", "/etc/l k"), w, "", false},
-		"config dir is /":        {box("/var/lib/luk", "/"), w, "", false},
-		"config dir is /etc":     {box("/var/lib/luk", "/etc"), w, "", false},
-		"space in hidden path":   {box("/var/lib/luk", "/etc/site/lukd", "/srv/a b"), w, "", false},
-		"hidden path holds work": {box("/var/lib/luk", "/etc/site/lukd", "/var/lib"), w, "", false},
-		"hidden command":         {box("/var/lib/luk", "/etc/site/lukd", "/opt/j"), w, "", false},
-		"hidden checker":         {&Box{Root: "/var/lib/luk", Config: "/etc/site/lukd", Hide: []string{"/usr/local/lukd"}, Checker: "/usr/local/lukd/bin/lukd"}, w, "", false},
-		"hidden /srv":            {box("/var/lib/luk", "/etc/site/lukd", "/srv"), w, "", false},
-		"hidden /usr/bin":        {box("/var/lib/luk", "/etc/site/lukd", "/usr/bin"), w, "", false},
-		"hidden state":           {box("/var/lib/luk", "/etc/site/lukd", "/var/lib/lukd-run"), w, "", true},
-		"relative checker":       {&Box{Root: "/var/lib/luk", Config: "/etc/site/lukd", Checker: "lukd"}, w, "", false},
-		"command under root":     {ok, w, "/var/lib/luk/bin/j", false},
-		"command in config":      {ok, w, "/etc/site/lukd/j", false},
-		"command in /run/luk":    {ok, w, "/run/luk/j", false},
+		"colon in unit":          {ok, "lukd-run-j:x-0123456789ab", "", false},
+		"space in unit":          {ok, "lukd-run-j x-0123456789ab", "", false},
+		"space in root":          {box("/var/lib/l k", "/etc/site/lukd"), unit, "", false},
+		"root is /":              {box("/", "/etc/site/lukd"), unit, "", false},
+		"root is /var/lib":       {box("/var/lib", "/etc/site/lukd"), unit, "", false},
+		"root is /srv":           {box("/srv", "/etc/site/lukd"), unit, "", false},
+		"root not clean":         {box("/var/lib/luk/", "/etc/site/lukd"), unit, "", false},
+		"space in config dir":    {box("/var/lib/luk", "/etc/l k"), unit, "", false},
+		"config dir is /":        {box("/var/lib/luk", "/"), unit, "", false},
+		"config dir is /etc":     {box("/var/lib/luk", "/etc"), unit, "", false},
+		"space in hidden path":   {box("/var/lib/luk", "/etc/site/lukd", "/srv/a b"), unit, "", false},
+		"colon in hidden path":   {box("/var/lib/luk", "/etc/site/lukd", "/srv/a:b"), unit, "", false},
+		"hidden path holds root": {box("/var/lib/luk", "/etc/site/lukd", "/var/lib"), unit, "", false},
+		"hidden command":         {box("/var/lib/luk", "/etc/site/lukd", "/opt/j"), unit, "", false},
+		"hidden lukd":            {&Box{Root: "/var/lib/luk", Config: "/etc/site/lukd", Hide: []string{"/usr/local/lukd"}, Lukd: "/usr/local/lukd/bin/lukd"}, unit, "", false},
+		"hidden /srv":            {box("/var/lib/luk", "/etc/site/lukd", "/srv"), unit, "", false},
+		"hidden /usr/bin":        {box("/var/lib/luk", "/etc/site/lukd", "/usr/bin"), unit, "", false},
+		"hidden state":           {box("/var/lib/luk", "/etc/site/lukd", "/var/lib/lukd-run"), unit, "", true},
+		"relative lukd":          {&Box{Root: "/var/lib/luk", Config: "/etc/site/lukd", Lukd: "lukd"}, unit, "", false},
+		"relative command":       {ok, unit, "opt/j", false},
+		"command not clean":      {ok, unit, "/opt/../opt/j", false},
+		"command under root":     {ok, unit, "/var/lib/luk/bin/j", false},
+		"command in workspace":   {ok, unit, "/var/lib/luk/root/job/" + unit + "/j", false},
+		"command in config":      {ok, unit, "/etc/site/lukd/j", false},
+		"command in /run/luk":    {ok, unit, "/run/luk/j", false},
 	} {
 		jc := *j
 		if c.cmd != "" {
@@ -293,16 +374,28 @@ func TestArgvRefusesPaths(t *testing.T) {
 		if c.state {
 			jc.State = StateShared
 		}
-		if a, err := jc.Argv(c.b, "u1", "j", "p", c.work, "luk", nil); err == nil {
-			t.Errorf("%s accepted: %q", name, a)
+		if a, err := jc.Unit(c.unit, "j", "p", 1).Argv(c.b, nil); err == nil {
+			t.Errorf("%s: job accepted: %q", name, a)
+		}
+		if c.state {
+			continue
+		}
+		if a, err := ProgramUnit(c.unit, StepDef{Program: jc.Command}, time.Minute, "p", 1).Argv(c.b, nil); err == nil {
+			t.Errorf("%s: program accepted: %q", name, a)
 		}
 	}
-	if _, err := j.Argv(ok, "u1", "j", "p", w, "luk", nil); err != nil {
+	if _, err := j.Unit(unit, "j", "p", 1).Argv(ok, nil); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := ProgramUnit(unit, StepDef{Program: "/opt/j"}, time.Minute, "p", 1).Argv(ok, nil); err != nil {
+		t.Fatal(err)
+	}
+	if a, err := ProgramUnit(unit, StepDef{Program: "/opt/j"}, 0, "p", 1).Argv(ok, nil); err == nil {
+		t.Fatalf("no timeout accepted: %q", a)
 	}
 	// A hidden path under root, the configuration directory or /run/luk
 	// is left out, whatever its characters.
-	a, err := j.Argv(box("/var/lib/luk", "/etc/site/lukd", "/var/lib/luk/a b", "/run/luk/x:y"), "u1", "j", "p", w, "luk", nil)
+	a, err := j.Unit(unit, "j", "p", 1).Argv(box("/var/lib/luk", "/etc/site/lukd", "/var/lib/luk/a b", "/run/luk/x:y"), nil)
 	if err != nil || strings.Count(strings.Join(a, " "), "InaccessiblePaths=") != 2 {
 		t.Fatalf("%q %v", a, err)
 	}

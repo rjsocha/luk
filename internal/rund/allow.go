@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -18,7 +19,7 @@ import (
 
 const (
 	// DefaultLukdConfig is the main file of the lukd configuration whose
-	// steps allow the pipelines of a job (see LoadJobPipelines).
+	// steps decide what a step runs (see LoadLukd).
 	DefaultLukdConfig = "/etc/site/lukd/config.yaml"
 	// maxConfigFile bounds one file of the lukd configuration,
 	// maxSnippets the files of its config.d.
@@ -27,15 +28,18 @@ const (
 )
 
 // jobsFile is the part of a file of the lukd configuration lukd run
-// reads: the relay steps and the jobs of the run steps of the pipelines,
-// and the paths that hold data or secrets of lukd (see Lukd.Paths).
+// reads: the timeouts and the steps of the pipelines (run, env, relay,
+// jobs), and the paths that hold data or secrets of lukd (see Lukd.Paths).
 // Every other key is left to lukd.
 type jobsFile struct {
 	Pipeline map[string]*struct {
-		Steps []struct {
+		// Nodes, so an error names the key.
+		Timeout yaml.Node `yaml:"timeout"`
+		Steps   []struct {
 			Run   yaml.Node `yaml:"run"`
+			Env   yaml.Node `yaml:"env"`
 			Relay string    `yaml:"relay"`
-			Jobs  []string  `yaml:"jobs"`
+			Jobs  yaml.Node `yaml:"jobs"`
 		} `yaml:"steps"`
 	} `yaml:"pipeline"`
 	Root   string `yaml:"root"`
@@ -100,12 +104,78 @@ func (f *jobsFile) paths() []string {
 	return out
 }
 
-// Lukd is what lukd run takes from the lukd configuration: per job the
-// pipelines that may run it, sorted, and the paths that hold data or
-// secrets of lukd, which a job must not see (sorted, without duplicates).
+// StepDef is what a step of the lukd configuration runs: a run program
+// (Program, with the nested jobs it may ask for and its env), the job of a
+// run: {job} step (Job) or of a relay step (Relay); none of them for any
+// other step.
+type StepDef struct {
+	Program string
+	Job     string
+	Relay   string
+	Jobs    []string
+	Env     map[string]string
+}
+
+// Lukd is what lukd run takes from the lukd configuration: per pipeline
+// its steps in order and its timeout (config.DefaultPipelineTimeout when
+// unset), per job the pipelines that may run it, sorted, and the paths
+// that hold data or secrets of lukd, which a unit must not see (sorted,
+// without duplicates).
 type Lukd struct {
+	Steps     map[string][]StepDef
+	Timeout   map[string]time.Duration
 	Pipelines map[string][]string
 	Paths     []string
+}
+
+// Step is step (from 1) of pipeline; false when the configuration has no
+// such step.
+func (lk *Lukd) Step(pipeline string, step int) (StepDef, bool) {
+	ss := lk.Steps[pipeline]
+	if step < 1 || step > len(ss) {
+		return StepDef{}, false
+	}
+	return ss[step-1], true
+}
+
+func emptyLukd() *Lukd {
+	return &Lukd{Steps: map[string][]StepDef{}, Timeout: map[string]time.Duration{}, Pipelines: map[string][]string{}}
+}
+
+// stepRun reads the run of a step into d: a string is the program, which
+// must be an absolute path, a mapping of exactly job: <name> the job; an
+// absent run sets neither.
+func stepRun(n *yaml.Node, d *StepDef) error {
+	switch {
+	case n.Kind == 0:
+		return nil
+	case n.Kind == yaml.ScalarNode && n.Tag == "!!str" && filepath.IsAbs(n.Value):
+		d.Program = n.Value
+		return nil
+	case n.Kind == yaml.MappingNode && len(n.Content) == 2 && n.Content[0].Value == "job" &&
+		n.Content[1].Kind == yaml.ScalarNode && n.Content[1].Tag == "!!str" && n.Content[1].Value != "":
+		d.Job = n.Content[1].Value
+		return nil
+	}
+	return errors.New("run must be an absolute path or {job: NAME}")
+}
+
+// pipelineTimeout is the timeout of a pipeline: config.DefaultPipelineTimeout
+// when absent or 0, under config.MaxPipelineTimeout.
+func pipelineTimeout(n *yaml.Node) (time.Duration, error) {
+	var d config.Duration
+	if n.Kind != 0 {
+		if err := n.Decode(&d); err != nil {
+			return 0, err
+		}
+	}
+	if d == 0 {
+		return config.DefaultPipelineTimeout, nil
+	}
+	if time.Duration(d) >= config.MaxPipelineTimeout {
+		return 0, fmt.Errorf("must be under %v", config.MaxPipelineTimeout)
+	}
+	return time.Duration(d), nil
 }
 
 // LoadJobPipelines is the Pipelines of LoadLukd.
@@ -117,27 +187,29 @@ func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) 
 	return lk.Pipelines, nil
 }
 
-// LoadLukd reads the steps and the paths of the lukd configuration: the
-// main file p and the *.yaml of config.d next to it (dotfiles left out, in
-// lexical order), as lukd loads them. The pipelines of a job are those
+// LoadLukd reads the steps, the timeouts and the paths of the lukd
+// configuration: the main file p and the *.yaml of config.d next to it
+// (dotfiles left out, in lexical order), as lukd loads them. The steps
+// keep only what lukd run starts (see StepDef). The pipelines of a job are those
 // with a step relay: <job> and those with a run step whose jobs lists it;
 // the paths are the root of the merged configuration (config.DefaultRoot
 // when no file sets it) and those of every file (see jobsFile.paths). A missing p (or
 // a missing directory above it) allows nothing. Every directory from top down to config.d, p
 // and the snippets must pass the checks of run.d (CheckParents,
-// readSafe) for owner; a refused or malformed file, too many snippets or
-// a pipeline defined in two files or a step with both run and relay (an
-// error of lukd as well) refuse the whole configuration.
+// readSafe) for owner; a refused or malformed file (a run, env, jobs or
+// timeout of the wrong type included), too many snippets or a pipeline
+// defined in two files or a step with both run and relay (an error of
+// lukd as well) refuse the whole configuration.
 func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 	dir := filepath.Dir(p)
 	if err := CheckParents(dir, top, owner); errors.Is(err, os.ErrNotExist) {
-		return &Lukd{Pipelines: map[string][]string{}}, nil
+		return emptyLukd(), nil
 	} else if err != nil {
 		return nil, err
 	}
 	b, err := readSafe(p, owner, maxConfigFile)
 	if errors.Is(err, os.ErrNotExist) {
-		return &Lukd{Pipelines: map[string][]string{}}, nil
+		return emptyLukd(), nil
 	}
 	if err != nil {
 		return nil, err
@@ -148,7 +220,8 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 	}
 	// origin maps each pipeline to the file that defines it.
 	origin := map[string]string{}
-	rs := map[string][]string{}
+	lk := emptyLukd()
+	rs := lk.Pipelines
 	var paths []string
 	// root of the merged configuration: lukd takes it from the one file
 	// that sets it.
@@ -170,20 +243,48 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 				return nil, fmt.Errorf("pipeline %s: defined in %s and %s", name, prev, f)
 			}
 			origin[name] = f
+			lk.Timeout[name] = config.DefaultPipelineTimeout
 			if pl == nil {
 				continue
 			}
+			if lk.Timeout[name], err = pipelineTimeout(&pl.Timeout); err != nil {
+				return nil, fmt.Errorf("%s: pipeline %s: timeout: %w", f, name, err)
+			}
+			steps := make([]StepDef, len(pl.Steps))
 			for i, s := range pl.Steps {
+				bad := func(err error) error { return fmt.Errorf("%s: pipeline %s: step %d: %w", f, name, i+1, err) }
+				d := &steps[i]
 				if s.Run.Kind != 0 && s.Relay != "" {
-					return nil, fmt.Errorf("%s: pipeline %s: step %d: more than one of run and relay", f, name, i+1)
+					return nil, bad(errors.New("more than one of run and relay"))
 				}
+				if err := stepRun(&s.Run, d); err != nil {
+					return nil, bad(err)
+				}
+				if s.Env.Kind != 0 {
+					if err := s.Env.Decode(&d.Env); err != nil {
+						return nil, bad(fmt.Errorf("env: %w", err))
+					}
+				}
+				if s.Jobs.Kind != 0 {
+					if err := s.Jobs.Decode(&d.Jobs); err != nil {
+						return nil, bad(fmt.Errorf("jobs: %w", err))
+					}
+				}
+				d.Relay = s.Relay
 				var jobs []string
 				if s.Relay != "" {
 					jobs = append(jobs, s.Relay)
 				}
 				// lukd refuses jobs on any other step.
 				if s.Run.Kind != 0 {
-					jobs = append(jobs, s.Jobs...)
+					jobs = append(jobs, d.Jobs...)
+				}
+				// Only a run program asks for nested jobs and has an env.
+				if d.Program == "" {
+					d.Jobs, d.Env = nil, nil
+				}
+				if err := checkEnv(d.Env); err != nil {
+					return nil, bad(err)
 				}
 				// The steps of one pipeline come one after the other: a
 				// job it already allows ends in name.
@@ -193,6 +294,7 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 					}
 				}
 			}
+			lk.Steps[name] = steps
 		}
 	}
 	for _, ps := range rs {
@@ -202,7 +304,8 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 		paths = append(paths, filepath.Clean(root))
 	}
 	slices.Sort(paths)
-	return &Lukd{Pipelines: rs, Paths: slices.Compact(paths)}, nil
+	lk.Paths = slices.Compact(paths)
+	return lk, nil
 }
 
 // snippetFiles lists the *.yaml of dir that are not dotfiles, in lexical
