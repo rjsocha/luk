@@ -2614,7 +2614,9 @@ func ValidJobName(n string) bool { return len(n) <= maxJobName && jobName.MatchS
 // ValidPipelineName reports whether n may name a pipeline: [A-Za-z0-9_.-],
 // not starting with a dot or a dash, at most maxPipelineName bytes. lukd
 // run refuses a work directory of any other pipeline name.
-func ValidPipelineName(n string) bool { return len(n) <= maxPipelineName && pipelineName.MatchString(n) }
+func ValidPipelineName(n string) bool {
+	return len(n) <= maxPipelineName && pipelineName.MatchString(n)
+}
 
 // ValidPasswordName reports whether n may name a password: the file of it
 // in password.d follows the name rule of a job file in run.d.

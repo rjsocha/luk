@@ -2637,9 +2637,9 @@ container.
 Work directory: see Step contract below.
 
 Name: a pipeline name is of `[A-Za-z0-9_.-]`, does not start with a
-dot or a dash and has at most 128 bytes (a config error otherwise). It is a component of the work
-directory path, and `lukd run` refuses any other name (see Jobs with
-other users).
+dot or a dash and has at most 128 bytes (a config error otherwise). It
+is a component of the work directory path, and `lukd run` refuses any
+other name (see Jobs with other users).
 
 Failure: the steps already done stay done (a `store` before a failed
 `run` keeps its files). The upload is dropped with a failure record
@@ -3046,8 +3046,8 @@ passed by flags only. Errors go to stderr with exit 1.
   (default socket `/run/luk/run.sock`) to run the admin-allowlisted
   job NAME as its own user on the work directory (see Service, Jobs with
   other users), passing on the metadata variables of its own environment
-  (see Step environment). The job's stdout and stderr are relayed to luk-job's
-  stdout and stderr and luk-job exits with the job's exit status; a
+  (see Step environment). The job's stdout and stderr are relayed to
+  luk-job's stdout and stderr and luk-job exits with the job's exit status; a
   refused request, a connection or protocol error exits 1 with a message.
   `SIGTERM` or `SIGINT` (the step timeout, a stop of lukd) closes the
   connection, which stops the job, and exits 1. A pipeline that only
@@ -4505,9 +4505,10 @@ work directory. No polkit and no sudo are involved.
   Otherwise nobody but root could be trusted not to swap the files
   below: a bad directory above `run.yaml` makes lukd run close every
   connection without an answer (logged), one above run.d refuses every
-  job as unavailable (logged). The directory is read per connection: adding or
-  removing a file needs no reload. A malformed or refused file disables
-  only its job: a request for it is refused and the reason is logged.
+  job as unavailable (logged). The directory is read per connection:
+  adding or removing a file needs no reload. A malformed or refused file
+  disables only its job: a request for it is refused and the reason is
+  logged.
   Keys of a job:
   - `user` (optional): the account of the job (`systemd-run --uid`).
     Without `user` the job runs as a dynamic user (`-p DynamicUser=yes
@@ -4591,10 +4592,10 @@ work directory. No polkit and no sudo are involved.
   later; the lukd package requires systemd 257 for `PrivatePIDs=`), a transient unit outside
   both the lukd and the lukd run sandbox, and streams the job's stdout and
   stderr back. `<work>` is the work path of the request as checked
-  (never resolved): the job's argument, its `LUK_WORK` and its current directory, as for a `run`
-  program. `<peer group>` is the primary group of the peer (passwd), by
-  name, or the numeric gid when it has no name or one that is not a
-  plain account name.
+  (never resolved): the job's argument, its `LUK_WORK` and its current
+  directory, as for a `run` program. `<peer group>` is the primary group
+  of the peer (passwd), by name, or the numeric gid when it has no name or
+  one that is not a plain account name.
 - Deadlines: the request must arrive, and a refusal be read, within 5
   seconds of the connection; a peer that sends nothing, half a line or
   does not read the refusal is cut off then. A job waiting for its state
@@ -4625,9 +4626,10 @@ work directory. No polkit and no sudo are involved.
   but the filter holds `luk` to that; `LUK_FILE` always names a file of
   `<work>/in/`, not necessarily an existing one).
 - Read access to the work directory comes from its group, the peer's
-  primary group the job gets (work directories are 0750, inputs and `meta.json` 0440). Results go to
-  `out/` only when the job user may write there; usually a job just
-  delivers the inputs elsewhere and the `run` program writes `out/`.
+  primary group the job gets (work directories are 0750, inputs and
+  `meta.json` 0440). Results go to `out/` only when the job user may write
+  there; usually a job just delivers the inputs elsewhere and the `run`
+  program writes `out/`.
 - A dynamic user (no `user`) is allocated by systemd for the run of the
   job and released after it. Its name is fixed per job and pipeline,
   `lukd-<job>-<pipeline>-<hash>`: `<job>-<pipeline>` lowercased, every
@@ -4752,9 +4754,9 @@ pipeline:
   (`in/`, an empty `out/`, `meta.json`, owned by `luk`), connects to
   `/run/luk/run.sock` and sends `{"job": <job>, "work": <work>, "env":
   {<metadata>}}`, as `luk-job run` does, the metadata being the free-form
-  variables a `run` step there would get. A relay step takes no `env` (the environment of the
-  job comes from its run.d file and the Step environment) and no `tee`
-  (it always passes its set on).
+  variables a `run` step there would get. A relay step takes no `env` (the
+  environment of the job comes from its run.d file and the Step
+  environment) and no `tee` (it always passes its set on).
 - The next step gets the input set of the relay step unchanged (the
   files and their per-file meta, the upload itself when it is the first
   step), as after a `tee` run step; it may be the last step. The job only
@@ -5618,10 +5620,10 @@ disk. Test on lukd.vm / luk.vm.
 
 - Work directory `<root>/work/<id>/<pipeline>/<step>/` with `in/`,
   `out/`, `meta.json` (`{"server", "client", "pipeline", "step",
-  "produced"}`) and `log`. `in/` holds the current file set: step 1 the upload payload
-  named by `file` (the id when empty); later steps the previous `out/`.
-  `in/<name>.meta.json` carries the per-file meta from the step that
-  produced it.
+  "produced"}`) and `log`. `in/` holds the current file set: step 1 the
+  upload payload named by `file` (the id when empty); later steps the
+  previous `out/`. `in/<name>.meta.json` carries the per-file meta from
+  the step that produced it.
 - The program runs as the lukd user with a clean environment: `PATH`
   (system default), `LANG=C.UTF-8`, the step's `env`, then the `LUK_*`
   variables (last, so `env` cannot override them). Argument: the work
