@@ -5,7 +5,9 @@ package wire
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -755,36 +757,47 @@ const MaxLinkPage = 1000
 const maxCursorID = 128
 
 // LinkCursor is the place of an entry in the order of a link list: its
-// acceptance order (NS, Seq) and its upload ID. It carries nothing a
-// listing does not show.
+// acceptance order (NS, Seq), the key of its URL (LinkKey) and its upload
+// ID. It carries nothing a listing does not show and not the URL itself.
 type LinkCursor struct {
 	NS  int64
 	Seq int
+	Key string
 	ID  string
 }
 
+// LinkKey is the key that orders link list entries of the same acceptance
+// order and id: the first 16 bytes of the sha256 of the URL, in lowercase
+// hex.
+func LinkKey(url string) string {
+	h := sha256.Sum256([]byte(url))
+	return hex.EncodeToString(h[:16])
+}
+
+var linkKeyRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
 // Encode is the cursor as sent: base64url without padding of
-// "<ns>.<seq>.<id>".
+// "<ns>.<seq>.<key>.<id>".
 func (c LinkCursor) Encode() string {
-	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(c.NS, 10) + "." + strconv.Itoa(c.Seq) + "." + c.ID))
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(c.NS, 10) + "." + strconv.Itoa(c.Seq) + "." + c.Key + "." + c.ID))
 }
 
 // ParseLinkCursor reads a cursor Encode wrote; any other form, a negative
-// seq or an id that is empty, too long or not printable ASCII is an
-// error.
+// seq, a key not of LinkKey's form or an id that is empty, too long or
+// not printable ASCII is an error.
 func ParseLinkCursor(s string) (LinkCursor, error) {
 	bad := fmt.Errorf("bad cursor %q", s)
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
 		return LinkCursor{}, bad
 	}
-	f := strings.SplitN(string(b), ".", 3)
-	if len(f) != 3 || f[2] == "" || len(f[2]) > maxCursorID || strings.IndexFunc(f[2], func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
+	f := strings.SplitN(string(b), ".", 4)
+	if len(f) != 4 || !linkKeyRe.MatchString(f[2]) || f[3] == "" || len(f[3]) > maxCursorID || strings.IndexFunc(f[3], func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
 		return LinkCursor{}, bad
 	}
 	ns, err1 := strconv.ParseInt(f[0], 10, 64)
 	seq, err2 := strconv.Atoi(f[1])
-	c := LinkCursor{NS: ns, Seq: seq, ID: f[2]}
+	c := LinkCursor{NS: ns, Seq: seq, Key: f[2], ID: f[3]}
 	if err1 != nil || err2 != nil || seq < 0 || c.Encode() != s {
 		return LinkCursor{}, bad
 	}

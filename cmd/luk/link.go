@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -190,9 +191,11 @@ of its current version ("version", as in the table).
 
 The list comes in pages of --limit links (default 100, at most 1000), each
 link with an opaque cursor; --after CURSOR starts the page after that
-link. When more links follow, the text output ends with "more: luk link ls
---after CURSOR" on stderr (not with --quiet); --all fetches every page, one
-request each, and prints them as one list.
+link. When more links follow, the text output ends with the command of the
+next page on stderr (not with --quiet): "more: luk link ls -e ENDPOINT
+[--any] [--limit N] --after CURSOR", with the endpoint (given or the
+default), --any and a --limit given, quoted for a shell; --all fetches
+every page, one request each, and prints them as one list.
 
 --json prints one object: "links" (name, size, sent, expires, updated,
 flags, url, permanent: the name a link is the current version of, shared:
@@ -202,7 +205,7 @@ cursor of the last link) when more links follow.`,
 		Example: `  luk link ls
   luk link ls -e drop --json
   luk link ls --all --any
-  luk link ls --limit 20 --after MTc5MTI4ODAwMDAwMDAwMDAwMC4wLjIwMjYxMDA2VDEyMDAwMFotMGExYjJjM2Q
+  luk link ls --limit 20 --after MTc5MTI4ODAwMDAwMDAwMDAwMC4wLmIxMGE1MDE3ZjI0ZWE4OTgxYzViNjdiOWFkN2MzYjZiLjIwMjYxMDA2VDEyMDAwMFotMGExYjJjM2Q
   luk link ls --all --json | jq -r '.permanent[] | "\(.name) \(.url)"'`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -242,7 +245,17 @@ cursor of the last link) when more links follow.`,
 				return err
 			}
 			if ls.Next != "" && !quiet {
-				fmt.Fprintf(cmd.ErrOrStderr(), "more: luk link ls --after %s\n", client.Printable(ls.Next))
+				// The command of the next page: the endpoint (also the
+				// default of the config), --any and a --limit given.
+				next := []string{"luk", "link", "ls", "-e", cmp.Or(endpoint, cfg.Default)}
+				if anyOf {
+					next = append(next, "--any")
+				}
+				if cmd.Flags().Changed("limit") {
+					next = append(next, "--limit", strconv.Itoa(limit))
+				}
+				next = append(next, "--after", ls.Next)
+				fmt.Fprintf(cmd.ErrOrStderr(), "more: %s\n", client.Printable(shellJoin(next)))
 			}
 			return nil
 		},

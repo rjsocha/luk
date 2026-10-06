@@ -314,25 +314,31 @@ func TestLinkMetaList(t *testing.T) {
 	}
 }
 
-// A cursor is base64url of the acceptance order and the id; only the
-// form EncodeLinkCursor writes parses.
+// A cursor is base64url of the acceptance order, the key of the URL and
+// the id; only the form Encode writes parses.
 func TestLinkCursor(t *testing.T) {
-	c := LinkCursor{NS: 1791288000123456789, Seq: 3, ID: "20261006T120000Z-0a1b2c3d"}
+	key := LinkKey("https://d.example/d/a")
+	if len(key) != 32 || key == LinkKey("https://d.example/d/b") {
+		t.Fatalf("key %q", key)
+	}
+	c := LinkCursor{NS: 1791288000123456789, Seq: 3, Key: key, ID: "20261006T120000Z-0a1b2c3d"}
 	s := c.Encode()
-	if want := base64.RawURLEncoding.EncodeToString([]byte("1791288000123456789.3.20261006T120000Z-0a1b2c3d")); s != want {
+	if want := base64.RawURLEncoding.EncodeToString([]byte("1791288000123456789.3." + key + ".20261006T120000Z-0a1b2c3d")); s != want {
 		t.Fatalf("%s, want %s", s, want)
 	}
 	if got, err := ParseLinkCursor(s); err != nil || got != c {
 		t.Fatalf("%+v %v", got, err)
 	}
-	if got, err := ParseLinkCursor(LinkCursor{ID: "x"}.Encode()); err != nil || got != (LinkCursor{ID: "x"}) {
+	if got, err := ParseLinkCursor(LinkCursor{Key: key, ID: "x.y"}.Encode()); err != nil || got != (LinkCursor{Key: key, ID: "x.y"}) {
 		t.Fatalf("zero order: %+v %v", got, err)
 	}
 	b64 := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	for _, bad := range []string{
-		"", "!!", b64("1.2.x") + "=", base64.StdEncoding.EncodeToString([]byte("1.2.x>?")),
-		b64("1.2"), b64("1.2."), b64("x.2.id"), b64("1.x.id"), b64("01.2.id"), b64("+1.2.id"), b64("1.-2.id"),
-		b64("1.2.a\nb"), b64("1.2." + strings.Repeat("a", 200)),
+		"", "!!", b64("1.2."+key+".x") + "=", base64.StdEncoding.EncodeToString([]byte("1.2." + key + ".x>?")),
+		b64("1.2.x"), b64("1.2." + key), b64("1.2." + key + "."), b64("x.2." + key + ".id"), b64("1.x." + key + ".id"),
+		b64("01.2." + key + ".id"), b64("+1.2." + key + ".id"), b64("1.-2." + key + ".id"),
+		b64("1.2." + strings.ToUpper(key) + ".id"), b64("1.2." + key[1:] + ".id"),
+		b64("1.2." + key + ".a\nb"), b64("1.2." + key + "." + strings.Repeat("a", 200)),
 	} {
 		if c, err := ParseLinkCursor(bad); err == nil {
 			t.Errorf("%q accepted: %+v", bad, c)

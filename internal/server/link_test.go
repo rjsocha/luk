@@ -825,6 +825,41 @@ func TestLinkListPages(t *testing.T) {
 	}
 }
 
+// TestLinkListSameOrderAndID: entries of one acceptance order and one id
+// are told apart by the key of their URL, so a page boundary between them
+// loses none and repeats none.
+func TestLinkListSameOrderAndID(t *testing.T) {
+	f := listFixture(t, newSigner(t))
+	var urls []string
+	for i := range 3 {
+		urls = append(urls, f.drop(t, f.user, wire.Meta{}, fmt.Sprint(i)))
+	}
+	for _, u := range urls {
+		f.setSidecar(t, u, func(sc *store.Sidecar) {
+			sc.Accepted, sc.AcceptedSeq, sc.ID = 1791288000000000000, 0, "20261006T120000Z-0a1b2c3d"
+		})
+	}
+	full := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
+	if len(full.Links) != 3 {
+		t.Fatalf("full: %+v", full)
+	}
+	seen := map[string]bool{}
+	for i, l := range full.Links {
+		c, err := wire.ParseLinkCursor(l.Cursor)
+		if err != nil || c.Key != wire.LinkKey(l.URL) || seen[l.Cursor] {
+			t.Fatalf("%d: %+v %+v %v", i, l, c, err)
+		}
+		seen[l.Cursor] = true
+		if i > 0 && wire.LinkKey(full.Links[i-1].URL) >= c.Key {
+			t.Fatalf("not ordered by key at %d", i)
+		}
+	}
+	got := listPages(t, f, linkReq{signer: f.user}, 1)
+	if len(got) != 3 || got[0] != full.Links[0] || got[1] != full.Links[1] || got[2] != full.Links[2] {
+		t.Fatalf("pages: %+v", got)
+	}
+}
+
 // TestLinkListLimit: a page holds at most limit entries, and never more
 // than the server cap; no limit is the cap.
 func TestLinkListLimit(t *testing.T) {

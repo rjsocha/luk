@@ -298,7 +298,7 @@ var maxLinkPage = wire.MaxLinkPage
 // files of access any others uploaded through ep that the protect expose
 // serves it, not once, marked shared; without it private.list is not
 // looked at. One order for all: newest first by acceptance order, then
-// by id, then by URL. The page holds the entries after the cursor after
+// by id, then by the key of the URL. The page holds the entries after the cursor after
 // (from the newest without one), at most limit (none: maxLinkPage) and
 // never more than maxLinkPage; Next is the cursor of its last entry when
 // more follow.
@@ -311,12 +311,13 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 	type item struct {
 		order queue.Acceptance
 		id    string
+		key   string
 		e     wire.LinkEntry
 	}
 	// rank orders a before b (negative) in the list: newest first, then
-	// by id; equal for one upload.
+	// by id, then by the key of the URL (wire.LinkKey).
 	rank := func(a, b item) int {
-		return cmp.Or(b.order.Compare(a.order), strings.Compare(b.id, a.id))
+		return cmp.Or(b.order.Compare(a.order), strings.Compare(b.id, a.id), strings.Compare(a.key, b.key))
 	}
 	var items []item
 	for _, sn := range storages {
@@ -355,18 +356,18 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 			if sc.AliasOf != "" || sc.Endpoint != ep.Name || !own && !shared || expiredAt(sc.Expires, now) {
 				return nil
 			}
-			it := item{order: sc.Order(), id: sc.ID}
-			if after != nil && rank(it, item{order: queue.Acceptance{NS: after.NS, Seq: after.Seq}, id: after.ID}) <= 0 {
-				return nil
-			}
 			u, ok := s.fileURL(cfg, sn, rel, sc.Client.Access)
 			if !ok {
+				return nil
+			}
+			it := item{order: sc.Order(), id: sc.ID, key: wire.LinkKey(u)}
+			if after != nil && rank(it, item{order: queue.Acceptance{NS: after.NS, Seq: after.Seq}, id: after.ID, key: after.Key}) <= 0 {
 				return nil
 			}
 			it.e = wire.LinkEntry{
 				URL: u, File: sc.Client.File, Size: sc.Size, Received: sc.Received, Expires: sc.Expires,
 				Once: sc.Client.Once, Mutable: sc.Client.Mutable, Portal: sc.Client.Portal, Access: sc.Client.Access, Updated: sc.Updated,
-				Shared: shared, Cursor: wire.LinkCursor{NS: it.order.NS, Seq: it.order.Seq, ID: sc.ID}.Encode(),
+				Shared: shared, Cursor: wire.LinkCursor{NS: it.order.NS, Seq: it.order.Seq, Key: it.key, ID: sc.ID}.Encode(),
 			}
 			if p := ep.Permanent; p != nil && own && sn == ep.Storage && sc.Client.Permanent != "" && sc.PermanentPath == p.Path {
 				cur := current[p.Path+"/"+sc.Client.Permanent]

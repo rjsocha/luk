@@ -1412,13 +1412,16 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   of links, `any` and whether more follow).
   - Order: one order for every entry and every page, newest first by
     acceptance order (`accepted`, `accepted_seq`, see Acceptance order),
-    then by upload id (descending), then by URL. Shared entries take
+    then by upload id (descending), then by the key of the URL (the
+    first 16 bytes of its sha256, lowercase hex, ascending), so no two
+    entries share a place. Shared entries take
     their place in the same order, between the signer's own links.
   - Pages: meta `limit` is the most entries of the page; absent (or 0)
     and anything above 1000 is 1000, the cap of a page; a negative one is
     422 `bad limit <n>`. Each entry has `cursor`: base64url without
-    padding of `<accepted ns>.<accepted_seq>.<id>`, opaque to a client
-    (it carries nothing the entry does not already tell). Meta `after` (a
+    padding of `<accepted ns>.<accepted_seq>.<url key>.<id>`, opaque to
+    a client (it carries nothing the entry does not already tell, and
+    not the URL itself). Meta `after` (a
     cursor) starts the page with the first entry strictly after that
     place in the order; the entry it came from need not exist any more.
     A malformed cursor is 400 `bad cursor "<cursor>"`. `next` is the
@@ -5322,9 +5325,12 @@ URL>` and `  version  <version URL>` (exactly the `URL` of its row, the
 join key); no block when there is none. A page shows the blocks of the
 names whose current version is on that page, so every name is shown on
 exactly one page of a walk; with `--all` all blocks follow the whole
-list. When more links follow the page (not with `--all`), a line `more:
-luk link ls --after <next>` goes to stderr after the table (none with
-`-q`/`--quiet`); exit 0. The texts are escaped as every server text is
+list. When more links follow the page (not with `--all`), the command of
+the next page goes to stderr after the table (none with `-q`/`--quiet`):
+`more: luk link ls -e <endpoint> [--any] [--limit <n>] --after <next>`,
+with the endpoint as given or the default of the config, `--any` when
+given and `--limit` when given, each word quoted for a POSIX shell when
+needed; exit 0. The texts are escaped as every server text is
 (see Client).
 
 ```
@@ -5343,7 +5349,7 @@ README.md  160 B  2026-10-05 14:04  never    permanent  https://drop.example.com
 permanent example.txt
   url      https://drop.example.com/d/permanent/example.txt
   version  https://drop.example.com/d/raFvNMX3MD4AVzybvdaHe5N6wBbstByy
-more: luk link ls --after MTc5MTIwMTg0MDAwMDAwMDAwMC4wLjIwMjYxMDA1VDEyMDQwMFotMGExYjJjM2Q
+more: luk link ls -e drop --limit 1 --after MTc5MTIwMTg0MDAwMDAwMDAwMC4wLmVmNmU4MTg1NWJhNGM4NDQzMDA0MGQzZmMxNTU4ZGU0LjIwMjYxMDA1VDEyMDQwMFotMGExYjJjM2Q
 ```
 
 `--json` prints one object, built by the client from the server answer:
