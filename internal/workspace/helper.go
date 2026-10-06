@@ -364,8 +364,9 @@ func below(job, ws int, name string) ([]uint64, error) {
 
 // Prune removes, as Remove does, every workspace of <root>/root/job whose
 // unit is inactive and whose lock (see Hold, below the lock directory
-// locks of lukd run) is free, and returns how many it could not remove;
-// an entry not named like a workspace is logged and left alone. A
+// locks of lukd run) is free, and returns how many it could not remove,
+// counting one whose unit is still active without lukd run holding its
+// lock; an entry not named like a workspace is logged and left alone. A
 // missing job/ leaves nothing.
 func Prune(top, root, locks string, owner uint32, show Show, log *slog.Logger) (left int, err error) {
 	job, err := OpenChain(top, filepath.Join(root, "root", JobDir), owner)
@@ -405,7 +406,7 @@ func Prune(top, root, locks string, owner uint32, show Show, log *slog.Logger) (
 }
 
 // pruneOne removes the workspace name of job unless lukd run holds its
-// lock or its unit is not inactive (used).
+// lock (used); a unit that is not inactive leaves it as an error.
 func pruneOne(job *os.File, locks, name string, show Show) (used bool, err error) {
 	lock, free, err := tryLock(locks, name)
 	if err != nil {
@@ -417,12 +418,8 @@ func pruneOne(job *os.File, locks, name string, show Show) (used bool, err error
 	if lock != nil {
 		defer lock.Close()
 	}
-	p, err := show(name, "LoadState", "ActiveState")
-	if err != nil {
+	if err := checkInactive(name, show); err != nil {
 		return false, err
-	}
-	if !Inactive(p) {
-		return true, nil
 	}
 	return false, destroy(job, name)
 }

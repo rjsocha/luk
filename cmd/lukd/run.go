@@ -56,6 +56,7 @@ func runCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&jobs, "jobs", rund.DefaultJobs, "directory of the job files")
+	cmd.AddCommand(workspaceCmd())
 	return cmd
 }
 

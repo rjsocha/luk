@@ -30,12 +30,12 @@ func TestPeerUID(t *testing.T) {
 	}
 }
 
-// checkWorkMain makes the test binary run lukd with its arguments (see
+// testMainEnv makes the test binary run lukd with its arguments (see
 // TestMain).
-const checkWorkMain = "LUKD_TEST_MAIN"
+const testMainEnv = "LUKD_TEST_MAIN"
 
 func TestMain(m *testing.M) {
-	if os.Getenv(checkWorkMain) == "1" {
+	if os.Getenv(testMainEnv) == "1" {
 		main()
 		os.Exit(0)
 	}

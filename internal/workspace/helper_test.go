@@ -158,8 +158,9 @@ func TestPruneLeavesOtherEntries(t *testing.T) {
 		}
 		return notFound(u)
 	}
+	// a is a plain directory, b's unit is still active: both are left over.
 	left, err := Prune(top, root, t.TempDir(), me, show, quiet)
-	if err != nil || left != 1 {
+	if err != nil || left != 2 {
 		t.Fatalf("left %d: %v", left, err)
 	}
 	for _, n := range []string{"other", "lukd-run-a-0123456789ab", "lukd-run-b-0123456789ab"} {
