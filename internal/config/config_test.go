@@ -2294,6 +2294,7 @@ func TestValidPipelineNameLength(t *testing.T) {
 func TestRunJobStep(t *testing.T) {
 	for step, want := range map[string]string{
 		"      - run: {job: S3}\n":                                 `step 1: run.job "S3": invalid job name`,
+		"      - run: {job: \"\"}\n":                               `step 1: run.job "": invalid job name`,
 		"      - run: {job: db-dump, user: x}\n":                   "step 1: run must be an absolute path or {job: NAME}",
 		"      - run: [a]\n":                                       "step 1: run must be an absolute path or {job: NAME}",
 		"      - run: relative/x\n":                                "step 1: run must be an absolute path or {job: NAME}",

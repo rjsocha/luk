@@ -848,13 +848,15 @@ type RunSpec struct {
 	Job     string
 	// invalid marks a value of another form, reported by validation.
 	invalid bool
+	// named marks the form {job: ...}, so an empty name is still a job step.
+	named bool
 }
 
-func (r RunSpec) Set() bool { return r.Program != "" || r.Job != "" || r.invalid }
+func (r RunSpec) Set() bool { return r.Program != "" || r.Job != "" || r.invalid || r.named }
 
 // String is what the step errors name: the program, or "job <job>".
 func (r RunSpec) String() string {
-	if r.Job != "" {
+	if r.Job != "" || r.named {
 		return "job " + r.Job
 	}
 	return r.Program
@@ -870,7 +872,7 @@ func (r *RunSpec) UnmarshalYAML(n *yaml.Node) error {
 		r.Program = n.Value
 	case n.Kind == yaml.MappingNode && len(n.Content) == 2 && n.Content[0].Value == "job" &&
 		n.Content[1].Kind == yaml.ScalarNode && n.Content[1].Tag == "!!str":
-		r.Job = n.Content[1].Value
+		r.Job, r.named = n.Content[1].Value, true
 	default:
 		r.invalid = true
 	}
@@ -1708,7 +1710,7 @@ func (c *Config) validate() []error {
 			switch {
 			case s.Run.invalid, s.Run.Program != "" && !filepath.IsAbs(s.Run.Program):
 				bad("pipeline %s: step %d: run must be an absolute path or {job: NAME}", name, i+1)
-			case s.Run.Job != "":
+			case s.Run.Job != "" || s.Run.named:
 				if !ValidJobName(s.Run.Job) {
 					bad("pipeline %s: step %d: run.job %q: invalid job name", name, i+1, s.Run.Job)
 				}
