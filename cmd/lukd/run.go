@@ -27,6 +27,13 @@ var runJobs = rund.DefaultJobs
 // with the lukd root.
 var runGlobal = rund.DefaultConfig
 
+// runOwner and runTop are the Owner and Top of lukd run, with which lukd
+// check reads the configuration as lukd run does.
+var (
+	runOwner uint32
+	runTop   string
+)
+
 func runCmd() *cobra.Command {
 	var jobs string
 	cmd := &cobra.Command{
@@ -160,7 +167,9 @@ func relayWarnings(cfg *config.Config, dir string) []string {
 // of cfg: lukd run compares the work path with it as written, so it
 // refuses every work directory of this lukd. It also reports a config of
 // p that is not the file of cfg: lukd run takes the jobs of the pipelines
-// from that file. A missing or unreadable p gives no warning.
+// from that file. When it is that file, a configuration lukd run refuses
+// (LoadJobPipelines) is reported: no pipeline may run a job. A missing or
+// unreadable p gives no warning.
 func runRootWarning(cfg *config.Config, p string) []string {
 	fi, err := os.Lstat(p)
 	if err != nil {
@@ -174,8 +183,15 @@ func runRootWarning(cfg *config.Config, p string) []string {
 	if g.Root != cfg.Root {
 		w = append(w, fmt.Sprintf("%s: root %s is not the lukd root %s as written: lukd run refuses every work directory", p, g.Root, cfg.Root))
 	}
-	if abs, err := filepath.Abs(cfg.Path); err == nil && g.Config != abs {
+	abs, err := filepath.Abs(cfg.Path)
+	switch {
+	case err != nil:
+	case g.Config != abs:
 		w = append(w, fmt.Sprintf("%s: config %s is not the checked configuration %s: lukd run takes the jobs of the pipelines from it", p, g.Config, abs))
+	default:
+		if _, err := rund.LoadJobPipelines(g.Config, runTop, runOwner); err != nil {
+			w = append(w, fmt.Sprintf("%s: lukd run refuses the configuration %s, no pipeline may run a job: %v", p, g.Config, err))
+		}
 	}
 	return w
 }

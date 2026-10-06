@@ -4514,7 +4514,8 @@ work directory. No polkit and no sudo are involved.
   - `config`: the main file of the lukd configuration, an absolute
     path; default `/etc/site/lukd/config.yaml`. It decides which
     pipelines may run a job (see Pipelines of a job below); `lukd
-    check` run as root warns when it is not the checked file.
+    check` run as root warns when it is not the checked file, and when
+    it is but lukd run would refuse it.
 - Jobs: `/etc/site/lukd/run.d/<job>.yaml`, one job per file
   (`deploy/run.d/s3-upload.yaml.example`). The job name is the file base
   name, `[a-z0-9][a-z0-9._-]*`. Files not ending in `.yaml`, dotfiles and
@@ -4583,9 +4584,10 @@ work directory. No polkit and no sudo are involved.
   `/` down to it as above `run.d`. A missing main file (or a missing
   directory above it) allows no pipeline. A refused file, a malformed
   one (YAML that does not parse, a `relay` or `jobs` of the wrong type,
-  a second document) or a pipeline defined in two files refuses the
-  whole configuration: no pipeline may run a job, and the reason goes
-  to the journal. The files are the ones on disk, not the configuration
+  a second document), a step with both `run` and `relay` or a pipeline
+  defined in two files refuses the whole configuration: no pipeline may
+  run a job, and the reason goes to the journal; `lukd check` run as
+  root reports it as a warning. The files are the ones on disk, not the configuration
   lukd runs with: an edit counts at the next connection, before a
   reload of lukd.
 - Request flow: `luk-job run --job NAME` connects and sends one JSON

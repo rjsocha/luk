@@ -46,8 +46,8 @@ type jobsFile struct {
 // above it) allows nothing. Every directory from top down to config.d, p
 // and the snippets must pass the checks of run.d (CheckParents,
 // readSafe) for owner; a refused or malformed file, too many snippets or
-// a pipeline defined in two files (an error of lukd as well) refuse the
-// whole configuration.
+// a pipeline defined in two files or a step with both run and relay (an
+// error of lukd as well) refuse the whole configuration.
 func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) {
 	dir := filepath.Dir(p)
 	if err := CheckParents(dir, top, owner); errors.Is(err, os.ErrNotExist) {
@@ -87,7 +87,10 @@ func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) 
 			if pl == nil {
 				continue
 			}
-			for _, s := range pl.Steps {
+			for i, s := range pl.Steps {
+				if s.Run != "" && s.Relay != "" {
+					return nil, fmt.Errorf("%s: pipeline %s: step %d: more than one of run and relay", f, name, i+1)
+				}
 				var jobs []string
 				if s.Relay != "" {
 					jobs = append(jobs, s.Relay)
@@ -96,9 +99,11 @@ func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) 
 				if s.Run != "" {
 					jobs = append(jobs, s.Jobs...)
 				}
+				// The steps of one pipeline come one after the other: a
+				// job it already allows ends in name.
 				for _, j := range jobs {
-					if !slices.Contains(rs[j], name) {
-						rs[j] = append(rs[j], name)
+					if ps := rs[j]; len(ps) == 0 || ps[len(ps)-1] != name {
+						rs[j] = append(ps, name)
 					}
 				}
 			}

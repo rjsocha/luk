@@ -271,6 +271,10 @@ func TestRunRootWarning(t *testing.T) {
 // config of run.yaml: another file than the one checked is reported.
 func TestRunConfigWarning(t *testing.T) {
 	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	oldOwner, oldTop := runOwner, runTop
+	t.Cleanup(func() { runOwner, runTop = oldOwner, oldTop })
+	runOwner, runTop = uint32(os.Getuid()), dir
 	cfg := &config.Config{Root: "/var/lib/luk", Path: filepath.Join(dir, "lukd", "config.yaml")}
 	p := filepath.Join(dir, "run.yaml")
 	for data, want := range map[string]string{
@@ -286,6 +290,48 @@ func TestRunConfigWarning(t *testing.T) {
 			t.Errorf("%s: %q", data, w)
 		}
 	}
+}
+
+// A configuration lukd accepts but lukd run refuses (a symlinked
+// snippet, a writable file, another owner) allows no pipeline to run a
+// job: lukd check says so.
+func TestRunConfigRefusedWarning(t *testing.T) {
+	dir := t.TempDir()
+	os.Chmod(dir, 0o700)
+	oldOwner, oldTop := runOwner, runTop
+	t.Cleanup(func() { runOwner, runTop = oldOwner, oldTop })
+	runOwner, runTop = uint32(os.Getuid()), dir
+	lukd := filepath.Join(dir, "lukd")
+	os.MkdirAll(filepath.Join(lukd, "config.d"), 0o750)
+	cfgPath := filepath.Join(lukd, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("pipeline:\n  a:\n    steps: [{relay: j}]\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Root: "/var/lib/luk", Path: cfgPath}
+	p := filepath.Join(dir, "run.yaml")
+	if err := os.WriteFile(p, []byte("config: "+cfgPath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if w := runRootWarning(cfg, p); w != nil {
+		t.Fatalf("accepted: %q", w)
+	}
+	want := p + ": lukd run refuses the configuration " + cfgPath + ", no pipeline may run a job: "
+	refused := func(what string) {
+		t.Helper()
+		w := runRootWarning(cfg, p)
+		if len(w) != 1 || !strings.HasPrefix(w[0], want) {
+			t.Fatalf("%s: %q", what, w)
+		}
+	}
+	link := filepath.Join(lukd, "config.d", "x.yaml")
+	os.Symlink(cfgPath, link)
+	refused("symlinked snippet")
+	os.Remove(link)
+	os.Chmod(cfgPath, 0o660)
+	refused("writable")
+	os.Chmod(cfgPath, 0o640)
+	runOwner++
+	refused("owner")
 }
 
 func TestCheckAsRootWarnsRunRoot(t *testing.T) {

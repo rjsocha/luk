@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"luk/internal/runproto"
 )
@@ -128,6 +129,9 @@ func TestLoadJobPipelinesRefuses(t *testing.T) {
 		"relay not a string": {func(t *testing.T, top, p string) {
 			write(t, p, "pipeline:\n  a:\n    steps: [{relay: [j1]}]\n", 0o640)
 		}, "cannot unmarshal"},
+		"run and relay": {func(t *testing.T, top, p string) {
+			write(t, p, "pipeline:\n  a:\n    steps: [{run: /x, relay: j1}]\n", 0o640)
+		}, "pipeline a: step 1: more than one of run and relay"},
 		"jobs not a list": {func(t *testing.T, top, p string) {
 			write(t, p, "pipeline:\n  a:\n    steps: [{run: /x, jobs: {j1: x}}]\n", 0o640)
 		}, "cannot unmarshal"},
@@ -205,5 +209,30 @@ func TestServeJobPipelines(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(e.srv.Locks, "state", "r.lock")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("lock of a refused pipeline: %v", err)
+	}
+}
+
+// Many pipelines relaying to one job cost time linear in their number.
+func TestLoadJobPipelinesMany(t *testing.T) {
+	top, p := relayTree(t)
+	const files, per = 8, 3000
+	for f := range files {
+		var b strings.Builder
+		b.WriteString("pipeline:\n")
+		for i := range per {
+			b.WriteString("  p" + strconv.Itoa(f*per+i) + ": {steps: [{relay: many}, {run: /x, jobs: [many]}]}\n")
+		}
+		write(t, filepath.Join(filepath.Dir(p), "config.d", "m"+strconv.Itoa(f)+".yaml"), b.String(), 0o640)
+	}
+	start := time.Now()
+	rs, err := LoadJobPipelines(p, top, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs["many"]) != files*per || !slices.IsSorted(rs["many"]) {
+		t.Fatalf("%d pipelines", len(rs["many"]))
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("took %v", d)
 	}
 }

@@ -115,6 +115,8 @@ func TestLoadJobsRules(t *testing.T) {
 		"longest.yaml":             "user: a\ncommand: /x\ntimeout: 167h\n",
 		"pipelines.yaml":           "user: a\ncommand: /x\npipelines: [p]\n",
 		"empty-pipelines.yaml":     "user: a\ncommand: /x\npipelines: []\n",
+		"null-pipelines.yaml":      "user: a\ncommand: /x\npipelines:\n",
+		"tilde-pipelines.yaml":     "user: a\ncommand: /x\npipelines: ~\n",
 		"bad-cred.yaml":            "user: a\ncommand: /x\ncredentials:\n  a:b: /x\n",
 		"group-writable.yaml":      s3Job,
 		"symlink.yaml":             "",
@@ -148,7 +150,7 @@ func TestLoadJobsRules(t *testing.T) {
 		t.Fatalf("ok %v", ok)
 	}
 	wantBad := []string{"Upper", "bad-cred", "bad-state", "broken", "dir", "empty-pipelines", "group-no-user", "group-writable",
-		"long", "luk-any", "luk-work", "no-command", "pipelines", "relative", "short", "symlink", "unknown-key"}
+		"long", "luk-any", "luk-work", "no-command", "null-pipelines", "pipelines", "relative", "short", "symlink", "tilde-pipelines", "unknown-key"}
 	if !slices.Equal(bad, wantBad) {
 		t.Fatalf("bad %v", bad)
 	}
@@ -159,7 +161,7 @@ func TestLoadJobsRules(t *testing.T) {
 	if err := js.Bad["group-no-user"]; !strings.Contains(err.Error(), "needs user") {
 		t.Fatalf("group without user: %v", err)
 	}
-	for _, n := range []string{"pipelines", "empty-pipelines"} {
+	for _, n := range []string{"pipelines", "empty-pipelines", "null-pipelines", "tilde-pipelines"} {
 		if err := js.Bad[n]; !strings.Contains(err.Error(), "pipelines: removed") || !strings.Contains(err.Error(), "jobs of the run step") {
 			t.Fatalf("%s: %v", n, err)
 		}

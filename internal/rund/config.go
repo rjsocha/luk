@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"luk/internal/config"
 )
 
@@ -55,7 +57,7 @@ var (
 type Global struct {
 	Root string `yaml:"root"`
 	Peer string `yaml:"peer"`
-	// Config is the main file of the lukd configuration (see LoadRelays).
+	// Config is the main file of the lukd configuration (see LoadJobPipelines).
 	Config string `yaml:"config"`
 }
 
@@ -72,7 +74,8 @@ type Job struct {
 	State       string            `yaml:"state"`
 	// RemovedPipelines catches the key replaced by the jobs of the run
 	// steps, so the error names the new place.
-	RemovedPipelines any `yaml:"pipelines"`
+	// A node, so a null value counts as well.
+	RemovedPipelines yaml.Node `yaml:"pipelines"`
 }
 
 // checkSafe refuses a file or directory not owned by owner or writable by
@@ -302,7 +305,7 @@ func (j *Job) validate() error {
 	if time.Duration(j.Timeout) >= config.MaxPipelineTimeout {
 		bad("timeout: must be under %v", config.MaxPipelineTimeout)
 	}
-	if j.RemovedPipelines != nil {
+	if j.RemovedPipelines.Kind != 0 {
 		bad("pipelines: removed: list the job in jobs of the run step of the lukd configuration, a relay step allows its own job")
 	}
 	if j.State != "" && j.State != StateLocked && j.State != StateShared {

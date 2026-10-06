@@ -114,7 +114,7 @@ func rootCmd() *cobra.Command {
 			"load. Run as root, a root in " + rund.DefaultConfig + " that is not the root\n" +
 			"of the configuration as written is a warning (lukd run would refuse every work\n" +
 			"directory), and so is a config there that is not the checked file (lukd run\n" +
-			"takes the jobs of the pipelines from it).",
+			"takes the jobs of the pipelines from it) or that lukd run refuses.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(cfgPath)
