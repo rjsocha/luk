@@ -36,8 +36,17 @@ func TestDecodeRules(t *testing.T) {
 		`{"t":"job"}` + "\n":                         "needs a job",
 		`{"t":"go","x":1}` + "\n":                    "unknown field",
 		`{"t":"in","name":"a","data":"aGk="}` + "\n": "data",
-		"\xff\n":     "UTF-8",
-		`[1]` + "\n": "object",
+		"\xff\n":                                "UTF-8",
+		`[1]` + "\n":                            "object",
+		`{"T":"go"}` + "\n":                     `unknown field "T"`,
+		`{"t":"go","t":"in","name":"a"}` + "\n": `field "t" repeated`,
+		`{"t":"in","name":"a","data":null}` + "\n": "data: not a string",
+		`{"t":"o","data":null}` + "\n":             "data: not a string",
+		`{"t":"go","status":0}` + "\n":             `field "status" does not belong`,
+		`{"t":"in","name":"a","job":"x"}` + "\n":   `field "job" does not belong`,
+		`{"t":"stop","name":"a"}` + "\n":           `field "name" does not belong`,
+		`{"t":"exit","status":1.5}` + "\n":         "not an integer",
+		`{"t":"go","name":{"a":1}}` + "\n":         "not a string",
 	}
 	for s, want := range bad {
 		if _, err := Decode([]byte(s)); err == nil || !strings.Contains(err.Error(), want) {
@@ -47,6 +56,9 @@ func TestDecodeRules(t *testing.T) {
 }
 
 func TestEncodeLimit(t *testing.T) {
+	if _, err := Encode(Frame{T: TGo, Status: Status(0)}); err == nil || !strings.Contains(err.Error(), "does not belong") {
+		t.Fatalf("foreign field encoded: %v", err)
+	}
 	if _, err := Encode(Frame{T: TStdout, Data: make([]byte, MaxPacket)}); err == nil {
 		t.Fatal("frame over 64 KiB encoded")
 	}

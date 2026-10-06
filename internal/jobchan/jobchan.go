@@ -8,6 +8,7 @@ package jobchan
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -60,74 +62,154 @@ func Status(n int) *int { return &n }
 
 var withFile = map[string]bool{TMeta: true, TIn: true, TOut: true}
 
-func needName(f Frame) error {
-	if f.Name == "" {
+// fields holds the fields each type may carry besides "t".
+var fields = map[string][]string{
+	TMeta: nil, TIn: {"name"}, TGo: nil, TStatus: {"status", "fail"},
+	TOut: {"name"}, TRefuse: {"name", "reason"}, TEnd: nil, TJob: {"job"},
+	TStop: nil, TStdout: {"data"}, TStderr: {"data"}, TExit: {"status"},
+	TRefused: {"reason"},
+}
+
+// present names the fields of f that Encode writes.
+func present(f Frame) map[string]bool {
+	return map[string]bool{
+		"name": f.Name != "", "job": f.Job != "", "reason": f.Reason != "",
+		"fail": f.Fail != "", "status": f.Status != nil, "data": len(f.Data) > 0,
+	}
+}
+
+// check applies the rules of the type of f: has names the fields set.
+func check(f Frame, has map[string]bool) error {
+	allowed, ok := fields[f.T]
+	if !ok {
+		return fmt.Errorf("frame: unknown frame %q", f.T)
+	}
+	for _, k := range []string{"name", "job", "reason", "fail", "status", "data"} {
+		if has[k] && !slices.Contains(allowed, k) {
+			if k == "data" {
+				return fmt.Errorf("frame %s: data only on o and e", f.T)
+			}
+			return fmt.Errorf("frame %s: field %q does not belong to it", f.T, k)
+		}
+	}
+	switch {
+	case (f.T == TIn || f.T == TOut || f.T == TRefuse) && f.Name == "":
 		return fmt.Errorf("frame %s: needs a name", f.T)
-	}
-	return nil
-}
-
-func needStatus(f Frame) error {
-	if f.Status == nil {
+	case (f.T == TStatus || f.T == TExit) && f.Status == nil:
 		return fmt.Errorf("frame %s: needs a status", f.T)
-	}
-	return nil
-}
-
-func needJob(f Frame) error {
-	if f.Job == "" {
+	case f.T == TJob && f.Job == "":
 		return fmt.Errorf("frame %s: needs a job", f.T)
 	}
 	return nil
 }
 
-func none(Frame) error { return nil }
-
-// known holds the rules of each type: the fields it needs.
-var known = map[string]func(Frame) error{
-	TMeta: none, TIn: needName, TGo: none, TStatus: needStatus,
-	TOut: needName, TRefuse: needName, TEnd: none, TJob: needJob,
-	TStop: none, TStdout: none, TStderr: none, TExit: needStatus,
-	TRefused: none,
-}
-
-func check(f Frame) error {
-	rule, ok := known[f.T]
-	if !ok {
-		return fmt.Errorf("frame: unknown frame %q", f.T)
-	}
-	if f.Data != nil && f.T != TStdout && f.T != TStderr {
-		return fmt.Errorf("frame %s: data only on o and e", f.T)
-	}
-	return rule(f)
-}
-
-// Decode parses one packet: a JSON object of known fields and a newline.
+// Decode parses one packet: valid UTF-8 holding exactly one flat JSON
+// object and a newline. A key not spelled exactly as a field, a repeated
+// key, a value of the wrong kind (null included), a field the type does
+// not carry and data after the object are refused.
 func Decode(b []byte) (Frame, error) {
-	var f Frame
+	f, err := decode(b)
+	if err != nil {
+		return Frame{}, fmt.Errorf("frame: %w", err)
+	}
+	if err := check(f.Frame, f.has); err != nil {
+		return Frame{}, err
+	}
+	return f.Frame, nil
+}
+
+type decoded struct {
+	Frame
+	has map[string]bool
+}
+
+func decode(b []byte) (decoded, error) {
+	f := decoded{has: map[string]bool{}}
 	if len(b) == 0 || b[len(b)-1] != '\n' {
-		return f, errors.New("frame: no newline at the end")
+		return f, errors.New("no newline at the end")
 	}
 	if !utf8.Valid(b) {
-		return f, errors.New("frame: not valid UTF-8")
+		return f, errors.New("not valid UTF-8")
 	}
-	if t := bytes.TrimSpace(b); len(t) == 0 || t[0] != '{' {
-		return f, errors.New("frame: not a JSON object")
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
+	if t, err := d.Token(); err != nil || t != json.Delim('{') {
+		return f, errors.New("not a JSON object")
 	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&f); err != nil {
-		return f, fmt.Errorf("frame: %w", err)
+	for d.More() {
+		k, err := str(d)
+		if err != nil {
+			return f, err
+		}
+		if f.has[k] {
+			return f, fmt.Errorf("field %q repeated", k)
+		}
+		f.has[k] = true
+		switch k {
+		case "t":
+			f.T, err = str(d)
+		case "name":
+			f.Name, err = str(d)
+		case "job":
+			f.Job, err = str(d)
+		case "reason":
+			f.Reason, err = str(d)
+		case "fail":
+			f.Fail, err = str(d)
+		case "status":
+			f.Status, err = num(d)
+		case "data":
+			var s string
+			if s, err = str(d); err == nil {
+				f.Data, err = base64.StdEncoding.DecodeString(s)
+			}
+		default:
+			return f, fmt.Errorf("unknown field %q", k)
+		}
+		if err != nil {
+			return f, fmt.Errorf("%s: %w", k, err)
+		}
 	}
-	if _, err := dec.Token(); err != io.EOF {
-		return f, errors.New("frame: trailing data")
+	if t, err := d.Token(); err != nil || t != json.Delim('}') {
+		return f, errors.New("not a flat JSON object")
 	}
-	return f, check(f)
+	if _, err := d.Token(); err != io.EOF {
+		return f, errors.New("trailing data")
+	}
+	return f, nil
+}
+
+func str(d *json.Decoder) (string, error) {
+	t, err := d.Token()
+	if err != nil {
+		return "", err
+	}
+	s, ok := t.(string)
+	if !ok {
+		return "", errors.New("not a string")
+	}
+	return s, nil
+}
+
+func num(d *json.Decoder) (*int, error) {
+	t, err := d.Token()
+	if err != nil {
+		return nil, err
+	}
+	n, ok := t.(json.Number)
+	if !ok {
+		return nil, errors.New("not a number")
+	}
+	i, err := strconv.Atoi(string(n))
+	if err != nil {
+		return nil, errors.New("not an integer")
+	}
+	return &i, nil
 }
 
 // Encode renders f as one packet.
 func Encode(f Frame) ([]byte, error) {
-	if err := check(f); err != nil {
+	if err := check(f, present(f)); err != nil {
 		return nil, err
 	}
 	var b bytes.Buffer
