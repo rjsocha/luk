@@ -4926,7 +4926,7 @@ sudo are involved.
     the remove helper, every workspace of `<root>/root/job` named like a
     unit (the pattern above) whose unit is not active; any other entry is
     logged and left alone. lukd run holds an exclusive `flock` on
-    `/run/lukd-run/ws/<unit>.lock` (root, 0600, removed on release) from
+    `/run/lukd-run/.ws/<unit>.lock` (root, 0600, removed on release) from
     before the create helper until after the remove helper, and prune
     skips a workspace whose lock is held, so it never removes one that is
     being set up or in use.

@@ -10,8 +10,9 @@ import (
 )
 
 // LockDir holds the workspace locks below the lock directory of lukd run
-// (/run/lukd-run): <locks>/ws/<unit>.lock.
-const LockDir = "ws"
+// (/run/lukd-run): <locks>/.ws/<unit>.lock. The dot keeps it apart from the
+// state lock directories, which are named after jobs and never start with one.
+const LockDir = ".ws"
 
 // Lock is the lock of a workspace, held by lukd run from before the
 // create helper until after the remove helper, so prune never removes a
