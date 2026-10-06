@@ -595,8 +595,8 @@ Answers to a PART:
 | 200 `{}` | the part is verified (also: it was verified before) | done |
 | 400 | beyond the parts of the upload, a wrong length, a short part of a stream that is not the last, a frame that did not open after the first | fail the upload |
 | 408 | the part stalled for `idle` or missed `size / rate` | retry; send fewer parts at once |
-| 409 | `older attempt`; a newer attempt took over; the upload is finalizing or committed | `older attempt`: retry, no failure; else stop |
-| 410 | `upload aborted`, `upload expired`, `upload ended` | stop |
+| 409 | `older attempt`; a newer attempt took over; the upload is finalizing or committed (checked from the clear nonce, before the body) | `older attempt`: retry, no failure; else stop |
+| 410 | `upload aborted`, `upload expired` (from the clear nonce); once the body is being read, any state but open: `upload ended` (while bytes are written), `upload <state>` (`finalizing`, `committed`, `aborted`, `expired`; when the message opened) | stop |
 | 413, 422 | a stream over the limit of the endpoint (422: over the reveal limit); `upload exceeds the quota of this endpoint` | fail |
 | 429 | `part <n> ahead of the window` (`Retry-After`) | wait, retry, no failure |
 | 429 | `quota exceeded` (a stream over its quota): the upload ended | fail |
@@ -642,7 +642,8 @@ signed requests, has the scheme `luk` (section 6).
 
 #### ABORT
 
-ABORT (kind 4, number 0, empty plaintext) ends an open upload: 200 `{}`
+ABORT (kind 4, number 0, empty plaintext; a resend counts the attempt
+up, `luk` as for every message) ends an open upload: 200 `{}`
 (also for an upload that already ended without a commit), 409 `upload
 committed` after a commit. A client sends it when it gives up (`luk`:
 on a failure and on an interrupt, waiting at most 5s for the answer). A

@@ -156,7 +156,7 @@ Transport response body: 0x02 || counter (8, big-endian) || frames
 
 Request nonce (uint64):
     bits 63..60 kind     1 OP, 2 PART, 3 COMPLETE, 4 ABORT, 6 KEEPALIVE (5 reserved)
-    bits 59..28 number   part number (PART), sequence (COMPLETE, ABORT, KEEPALIVE), 0 (OP)
+    bits 59..28 number   part number (PART), round (COMPLETE), sequence (KEEPALIVE), 0 (OP, ABORT)
     bits 27..16 attempt  0..4095, incremented by the client on every resend
     bits 15..1  frame    frame index within the message
     bit  0      last     1 on the final frame of the message
@@ -911,7 +911,8 @@ none), a stream ends with its first part shorter than `parts.size`
   or beyond `limits.body.size` of a stream is 400; a part already
   verified is answered 200 at once (sending a part twice is harmless); a
   part of an aborted or expired upload is 410, of one finalizing or
-  committed 409; a part `2 x parts.parallel` or more ahead of the
+  committed 409 (once the body is being read, see below, it is 410 in
+  every state); a part `2 x parts.parallel` or more ahead of the
   contiguous prefix of verified parts is 429 `part <n> ahead of the
   window` with `Retry-After: 1`. The window bounds the staging a client
   can scatter ahead of the hash.
@@ -921,6 +922,10 @@ none), a stream ends with its first part shorter than `parts.size`
   while a newer one is being written (held up on the way) is 409 `older
   attempt` and leaves the newer one alone. Bytes land in the staging at
   their offsets as their frames open.
+- An upload that is no longer open (finalizing, committed, aborted or
+  expired) once the part's body is being read makes it 410: `upload
+  ended` while its bytes are written, `upload <state>` when the whole
+  message opened.
 - A part is verified once the whole message opened and its length is
   right: exactly `parts.size`, the rest of a file for its last part
   (400 otherwise); a short part of a stream when a later part is there
@@ -957,10 +962,11 @@ the upload; its plaintext is empty (400 otherwise).
   sent again gets it again while the session lives, 3 x
   `limits.body.idle` after the end.
 
-ABORT (kind 4) ends an open upload: the staging goes at once, the place,
-the quota and the queue space go back; 200 `{}` (also for an upload that
-had ended without a commit), 409 `upload committed` after a commit. luk
-sends it on Ctrl-C and on a failure, waiting at most 5s for the answer.
+ABORT (kind 4, number 0; luk counts the attempt up on a resend) ends an
+open upload: the staging goes at once, the place, the quota and the
+queue space go back; 200 `{}` (also for an upload that had ended without
+a commit), 409 `upload committed` after a commit. luk sends it on Ctrl-C
+and on a failure, waiting at most 5s for the answer.
 
 KEEPALIVE (kind 6, number: its own sequence from 0) keeps an upload
 open while luk waits on a slow source; its plaintext is empty (400
