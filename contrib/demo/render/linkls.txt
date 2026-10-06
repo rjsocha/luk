@@ -1,0 +1,4 @@
+NAME        SIZE       SENT              EXPIRES           FLAGS  URL
+backup.tar  114.4 MiB  2026-10-06 11:58  2026-10-13 11:58  -      https://d.example.com/SshSXfKVhS2sDksmAaht7MX49V3ZnQNz
+-           13 B       2026-10-06 11:58  2026-10-06 12:58  -      https://d.example.com/s3s47GcbGHMXkJkV6zJWeP9zJuMCvUmN
+notes.txt   2 B        2026-10-06 00:21  2026-10-13 00:21  -      https://d.example.com/HmKwjEW2mjnUaWQAW7zVgRqsdkAbdstc

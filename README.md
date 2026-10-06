@@ -6,6 +6,10 @@ server decides by who signed it, not by a shared token. Uploads go through
 pipelines that process them and store the results; stored files can be
 served over HTTP.
 
+[![luk demo](https://asciinema.org/a/1267587.svg)](https://asciinema.org/a/1267587)
+
+*Powered by asciinema-vhs.*
+
 Typical uses:
 
 - **drop**: `luk send --file report.pdf` prints a URL; the file expires by itself.

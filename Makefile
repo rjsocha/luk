@@ -3,7 +3,7 @@ GOFLAGS = -trimpath
 LDFLAGS = -s -w -X main.buildVersion=$(VERSION)
 BINS    = luk lukd luk-job
 
-.PHONY: all build $(BINS) test checkmk vet vuln clean
+.PHONY: all build $(BINS) test checkmk vet vuln marketing clean
 
 all: vet test checkmk build
 
@@ -30,6 +30,13 @@ vet:
 # Known vulnerabilities in the code paths luk calls (needs network).
 vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@latest -show verbose ./...
+
+# The demo recording: contrib/demo/luk.vhs played by asciinema-vhs (hopper
+# package) into contrib/demo/luk.cast; nothing in it runs for real.
+ASCINEMA_VHS ?= asciinema-vhs
+
+marketing:
+	$(ASCINEMA_VHS) record contrib/demo/luk.vhs -o contrib/demo/luk.cast --cols 120 --rows 30 --title "luk"
 
 clean:
 	rm -f $(BINS)
