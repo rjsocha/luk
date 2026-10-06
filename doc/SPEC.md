@@ -4598,7 +4598,11 @@ work directory. No polkit and no sudo are involved.
   both the lukd and the lukd run sandbox, and streams the job's stdout and
   stderr back. `<work>` is the work path of the request as checked
   (never resolved): the job's argument, its `LUK_WORK` and its current
-  directory, as for a `run` program. `<peer group>` is the primary group
+  directory, as for a `run` program. The check is at request time:
+  `luk` owns `<root>/work/<id>` and can swap it for a symlink before
+  systemd changes into the directory, with the same effect as running
+  the job in a tree of `luk`'s own, so a job does not trust the location
+  of its work directory beyond that. `<peer group>` is the primary group
   of the peer (passwd), by name, or the numeric gid when it has no name or
   one that is not a plain account name.
 - Deadlines: the request must arrive, and a refusal be read, within 5
