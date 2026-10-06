@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -44,6 +45,9 @@ const waitDelay = time.Second
 // (the command's, 1 after a refusal or an error before the command).
 // A cancelled ctx kills the process group of the command.
 func (w *Wrapper) Run(ctx context.Context) int {
+	if len(w.Argv) == 0 || !filepath.IsAbs(w.Argv[0]) {
+		return w.notStarted(errors.New("the command is not an absolute path"))
+	}
 	ws, err := os.OpenFile(w.Workspace, os.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
 		return w.notStarted(err)
@@ -83,6 +87,10 @@ func (w *Wrapper) Run(ctx context.Context) int {
 		l.Close()
 		return w.notStarted(err)
 	}
+	// waited keeps a late cancel from signalling the group long after the
+	// command ended. A cancel between the reap in Wait and waited still
+	// reaches -pid: the group id stays in use while members of the group
+	// live, else the kill fails with ESRCH.
 	var mu sync.Mutex
 	waited := false
 	stopKill := context.AfterFunc(ctx, func() {
@@ -259,7 +267,8 @@ func (w *Wrapper) results(ws *os.File, status int, fail string) int {
 }
 
 // openResults opens the top-level entries of out/ in name order, at most
-// jobchan.MaxFiles + 1 of them (lukd process refuses the last). The first
+// jobchan.MaxFiles + 1 of them (lukd process refuses that many, so which
+// ones does not matter when out/ holds more). The first
 // entry that is not a regular file, or whose name is not valid UTF-8,
 // ends it with its refusal.
 func openResults(ws *os.File) ([]outFile, *jobchan.Frame) {
@@ -268,16 +277,21 @@ func openResults(ws *os.File) ([]outFile, *jobchan.Frame) {
 	}
 	out, err := openDir(ws, "out")
 	if err != nil {
-		return nil, refuse("out", errors.Unwrap(err).Error())
+		var errno unix.Errno
+		if errors.As(err, &errno) {
+			return nil, refuse("out", errno.Error())
+		}
+		return nil, refuse("out", err.Error())
 	}
 	defer out.Close()
-	names, err := out.Readdirnames(-1)
-	if err != nil {
+	// Any MaxFiles+1 entries will do: lukd process refuses that many.
+	names, err := out.Readdirnames(jobchan.MaxFiles + 1)
+	if err != nil && err != io.EOF {
 		return nil, refuse("out", err.Error())
 	}
 	slices.Sort(names)
 	var files []outFile
-	for _, name := range names[:min(len(names), jobchan.MaxFiles+1)] {
+	for _, name := range names {
 		if !utf8.ValidString(name) {
 			return files, refuse(strings.ToValidUTF8(name, "?"), "invalid name")
 		}

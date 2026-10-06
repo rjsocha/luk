@@ -21,32 +21,36 @@ type nested struct {
 	mu     sync.Mutex
 	closed bool
 	active *relay
-	wg     sync.WaitGroup // the accept loop and the relays
+	wg     sync.WaitGroup // the accept loop, the relays and the refusals
+	quitc  chan struct{}  // closed by stop
 	read   chan struct{}  // closed when the reader of ch ended
 }
 
 func startNested(ch *jobchan.Conn, l *net.UnixListener) *nested {
-	n := &nested{ch: ch, l: l, read: make(chan struct{})}
+	n := &nested{ch: ch, l: l, quitc: make(chan struct{}), read: make(chan struct{})}
 	n.wg.Add(1)
 	go n.accept()
 	go n.reader()
 	return n
 }
 
-// stop closes the listener (removing the socket), ends the active relay
-// and the reader of ch.
+// stop closes the listener (removing the socket), ends the refusals and
+// the active relay (which drains a stopped job, see relay.drain) and the
+// reader of ch.
 func (n *nested) stop() {
 	n.l.Close()
 	n.mu.Lock()
 	n.closed = true
 	r := n.active
 	n.mu.Unlock()
+	close(n.quitc)
 	if r != nil {
 		r.quit()
 	}
 	n.wg.Wait()
 	n.ch.SetReadDeadline(time.Now())
 	<-n.read
+	n.ch.SetReadDeadline(time.Time{})
 }
 
 func (n *nested) accept() {
@@ -62,8 +66,9 @@ func (n *nested) accept() {
 		}
 		n.mu.Lock()
 		if n.closed || n.active != nil {
+			n.wg.Add(1)
 			n.mu.Unlock()
-			go refuse(c)
+			go n.refuse(c)
 			continue
 		}
 		r := &relay{n: n, c: c, in: make(chan item), done: make(chan struct{}), quitc: make(chan struct{})}
@@ -78,11 +83,21 @@ func (n *nested) accept() {
 const hangupGrace = 5 * time.Second
 
 // refuse answers a second request while a nested job runs. It reads what
-// the peer sent until it hangs up, briefly, since closing a socket with
-// unread frames would reset the connection before the peer reads the
-// refusal.
-func refuse(c *jobchan.Conn) {
+// the peer sent until it hangs up, briefly and not past stop, since
+// closing a socket with unread frames would reset the connection before
+// the peer reads the refusal.
+func (n *nested) refuse(c *jobchan.Conn) {
+	defer n.wg.Done()
 	defer c.Close()
+	ended := make(chan struct{})
+	defer close(ended)
+	go func() {
+		select {
+		case <-n.quitc:
+			c.Close()
+		case <-ended:
+		}
+	}()
 	if c.Send(jobchan.Frame{T: jobchan.TRefused, Reason: "another job of this step is running"}, nil) != nil {
 		return
 	}
@@ -203,6 +218,35 @@ func (r *relay) run() {
 				forwarded, upDone = <-gone, true
 			}
 			stopJob()
+			if stopped {
+				r.drain()
+			}
+			return
+		case <-r.n.read:
+			return
+		}
+	}
+}
+
+// drainLimit bounds the wait for the end of a stopped job once the
+// command ended.
+var drainLimit = jobchan.ResultGap
+
+// drain drops the frames of a stopped job until its exit or refused, so
+// none is left unread on ch when the wrapper exits: closing a socket with
+// unread frames would reset the connection before lukd process reads the
+// results.
+func (r *relay) drain() {
+	t := time.NewTimer(drainLimit)
+	defer t.Stop()
+	for {
+		select {
+		case it := <-r.in:
+			closeFile(it.fd)
+			if it.f.T == jobchan.TExit || it.f.T == jobchan.TRefused {
+				return
+			}
+		case <-t.C:
 			return
 		case <-r.n.read:
 			return

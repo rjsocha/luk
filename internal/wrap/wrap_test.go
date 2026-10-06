@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -214,7 +216,7 @@ func TestCancelKillsGroup(t *testing.T) {
 	ws := filepath.Join(t.TempDir(), "ws")
 	os.Mkdir(ws, 0o700)
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &Wrapper{Ch: ch, Workspace: ws, Argv: []string{script(t, "sleep 30 &\nwait\n"), ws}, Stdout: io.Discard, Stderr: io.Discard}
+	w := &Wrapper{Ch: ch, Workspace: ws, Argv: []string{script(t, "sleep 30 &\necho $! > tmp/pid\nwait\n"), ws}, Stdout: io.Discard, Stderr: io.Discard}
 	done := make(chan int, 1)
 	go func() { done <- w.Run(ctx) }()
 	proc.Send(jobchan.Frame{T: jobchan.TMeta}, file(t, "meta.json", "{}"))
@@ -228,6 +230,26 @@ func TestCancelKillsGroup(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("not killed")
+	}
+	b, err := os.ReadFile(filepath.Join(ws, "tmp", "pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	for end := time.Now().Add(5 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("background child %d still alive", pid)
+		}
+	}
+}
+
+func TestCommandNotAbsolute(t *testing.T) {
+	for _, argv := range [][]string{nil, {"sh", "-c", "true"}} {
+		var stderr bytes.Buffer
+		w := &Wrapper{Workspace: t.TempDir(), Argv: argv, Stdout: io.Discard, Stderr: &stderr}
+		if code := w.Run(context.Background()); code != 1 || stderr.String() != "lukd: job not started: the command is not an absolute path\n" {
+			t.Fatalf("%v: %d %q", argv, code, stderr.String())
+		}
 	}
 }
 
@@ -244,7 +266,11 @@ func relayStart(t *testing.T, ctx context.Context, cmd string) (*jobchan.Conn, *
 	os.Mkdir(ws, 0o700)
 	w := &Wrapper{Ch: ch, Workspace: ws, Argv: []string{cmd, ws}, Stdout: io.Discard, Stderr: io.Discard}
 	done := make(chan int, 1)
-	go func() { done <- w.Run(ctx) }()
+	go func() {
+		code := w.Run(ctx)
+		ch.Close()
+		done <- code
+	}()
 	proc.Send(jobchan.Frame{T: jobchan.TMeta}, file(t, "meta.json", "{}"))
 	proc.Send(jobchan.Frame{T: jobchan.TGo}, nil)
 	dir := waitDir(t, filepath.Join(ws, ".luk", "run.sock"))
@@ -353,7 +379,9 @@ func TestLukJobGoneStopsNested(t *testing.T) {
 
 func TestCommandEndStopsNested(t *testing.T) {
 	// The command leaves while its nested job runs: the wrapper stops the
-	// job, closes the connection of luk-job and sends the results.
+	// job, closes the connection of luk-job, drains the job until its exit
+	// and sends the results, which lukd process still reads after the
+	// wrapper is gone.
 	proc, dir, done := relayStart(t, context.Background(), script(t, "while ! test -e go; do sleep 0.05; done\n"))
 	job, err := jobchan.DialIn(dir, "run.sock")
 	if err != nil {
@@ -367,16 +395,27 @@ func TestCommandEndStopsNested(t *testing.T) {
 		}
 	}
 	os.WriteFile(filepath.Join(filepath.Dir(dir.Name()), "go"), nil, 0o600)
-	for _, want := range []string{jobchan.TStop, jobchan.TStatus, jobchan.TEnd} {
-		if f, _, err := proc.Recv(); err != nil || f.T != want {
-			t.Fatalf("want %s, got %+v %v", want, f, err)
-		}
+	if f, _, err := proc.Recv(); err != nil || f.T != jobchan.TStop {
+		t.Fatalf("want stop, got %+v %v", f, err)
 	}
 	if _, _, err := job.Recv(); err != io.EOF {
 		t.Fatalf("luk-job: %v", err)
 	}
+	// The wrapper still reads these: without a drain it would be gone
+	// (EPIPE) or leave them unread (a reset before status).
+	if err := proc.Send(jobchan.Frame{T: jobchan.TStderr, Data: []byte("stopped")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := proc.Send(jobchan.Frame{T: jobchan.TExit, Status: jobchan.Status(143)}, nil); err != nil {
+		t.Fatal(err)
+	}
 	if code := <-done; code != 0 {
 		t.Fatalf("exit %d", code)
+	}
+	for _, want := range []string{jobchan.TStatus, jobchan.TEnd} {
+		if f, _, err := proc.Recv(); err != nil || f.T != want {
+			t.Fatalf("want %s, got %+v %v", want, f, err)
+		}
 	}
 }
 
@@ -408,7 +447,8 @@ func TestNoDescriptorLeft(t *testing.T) {
 	t.Run("run", func(t *testing.T) {
 		run(t, cmd, map[string]string{"x": "1", "y": "2"})
 	})
-	if after := count(); after != before {
+	// Fewer is fine: earlier tests may still close theirs.
+	if after := count(); after > before {
 		t.Fatalf("descriptors: %d before, %d after", before, after)
 	}
 }
