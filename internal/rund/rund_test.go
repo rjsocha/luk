@@ -1200,7 +1200,8 @@ func TestServeParents(t *testing.T) {
 	}
 	os.Chmod(top, 0o700)
 	sub := filepath.Join(top, "etc")
-	os.Mkdir(sub, 0o775)
+	os.Mkdir(sub, 0o700)
+	os.Chmod(sub, 0o775)
 	os.Rename(e.srv.Jobs, filepath.Join(sub, "run.d"))
 	e.srv.Jobs = filepath.Join(sub, "run.d")
 	fs, err := e.exchange(t, req)
