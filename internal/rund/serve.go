@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -68,10 +69,17 @@ var (
 	// stopGrace is how long past the job timeout a stopped run waits for
 	// its unit to become inactive.
 	stopGrace = 2 * time.Minute
+	// requestTimeout bounds receiving the request and answering a
+	// refusal.
+	requestTimeout = 5 * time.Second
 )
 
 // Serve runs the request of conn: the peer check, the request, the job.
-func (s *Server) Serve(conn io.ReadWriter) error {
+// Receiving the request and answering a refusal must end within
+// requestTimeout, the job with its output within its timeout plus
+// stopGrace, so a peer that stops sending or reading cannot hold the
+// connection.
+func (s *Server) Serve(conn net.Conn) error {
 	g, err := LoadGlobal(s.Config, s.Owner)
 	if err != nil {
 		return err
@@ -87,9 +95,12 @@ func (s *Server) Serve(conn io.ReadWriter) error {
 	if got != want {
 		return fmt.Errorf("peer uid %d refused, want %d", got, want)
 	}
+	if err := conn.SetDeadline(time.Now().Add(requestTimeout)); err != nil {
+		return err
+	}
 	fw := runproto.NewFrameWriter(conn)
 	br := bufio.NewReaderSize(conn, runproto.MaxRequest)
-	err = s.serve(g, got, br, fw)
+	err = s.serve(g, got, conn, br, fw)
 	var r refusal
 	if errors.As(err, &r) {
 		io.WriteString(fw.Stream(runproto.Stderr), "lukd run: "+r.Error()+"\n")
@@ -98,7 +109,7 @@ func (s *Server) Serve(conn io.ReadWriter) error {
 	return err
 }
 
-func (s *Server) serve(g *Global, peer uint32, br *bufio.Reader, fw *runproto.FrameWriter) error {
+func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, fw *runproto.FrameWriter) error {
 	req, err := runproto.ReadRequest(br)
 	if err != nil {
 		return refusal{err}
@@ -134,6 +145,12 @@ func (s *Server) serve(g *Global, peer uint32, br *bufio.Reader, fw *runproto.Fr
 		who = DynamicUser(req.Job, pipeline)
 	}
 
+	// No read deadline while waiting for the state lock: the wait ends
+	// with the run holding it, and a refusal still has the write
+	// deadline of the request.
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return err
+	}
 	gone := make(chan struct{})
 	go func() {
 		io.Copy(io.Discard, br)
@@ -156,6 +173,11 @@ func (s *Server) serve(g *Global, peer uint32, br *bufio.Reader, fw *runproto.Fr
 		attrs = append(attrs, "state", job.State)
 	}
 	s.Log.Info("job start", attrs...)
+	// The job ends by RuntimeMaxSec=timeout; past stopGrace more a peer
+	// that does not read fails the writes and reads as gone.
+	if err := conn.SetDeadline(time.Now().Add(time.Duration(job.Timeout) + stopGrace)); err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

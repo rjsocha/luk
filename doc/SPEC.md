@@ -4458,7 +4458,10 @@ work directory. No polkit and no sudo are involved.
   `ExecStart=/usr/bin/lukd run`, sandboxed: read-only file
   system, `AF_UNIX` only, `CapabilityBoundingSet=CAP_DAC_READ_SEARCH` to
   check the work directories, `RuntimeDirectory=lukd-run` 0700 with
-  `RuntimeDirectoryPreserve=yes` for the state locks, see below).
+  `RuntimeDirectoryPreserve=yes` for the state locks, see below;
+  `MemoryMax=128M`, `TasksMax=64` and `RuntimeMaxSec=15d` as a
+  backstop: they bound the helper, not the job, which systemd-run starts
+  as a transient unit of its own in `system.slice`).
   `/run/luk` comes from tmpfiles.d (`deploy/luk.tmpfiles.conf`,
   `root:luk` 0750). Enable with `systemctl enable --now lukd-run.socket`.
 - `lukd-process` (and `lukd`) need no drop-in: `ProtectSystem=strict`
@@ -4500,7 +4503,9 @@ work directory. No polkit and no sudo are involved.
   - `credentials`: `name: path` entries passed as systemd
     `LoadCredential=name:path`; the job reads them from
     `$CREDENTIALS_DIRECTORY/<name>`, the files themselves stay root-only.
-  - `timeout`: `RuntimeMaxSec` of the job, at least `1s`; default `1h`.
+  - `timeout`: `RuntimeMaxSec` of the job, at least `1s` and under 7
+    days (no step waits longer, see the pipeline `timeout`); default
+    `1h`.
   - `env`: fixed environment. Every `LUK_*` name is reserved (a
     config error): lukd run sets them, see Environment and state below.
   - `state` (optional): `locked` or `shared`, a state directory kept
@@ -4541,6 +4546,14 @@ work directory. No polkit and no sudo are involved.
   argument, its `LUK_WORK` and its current directory, as for a `run`
   program. `<work group>` is the group of `<work>`, by name, or the
   numeric gid when it has no name.
+- Deadlines: the request must arrive, and a refusal be read, within 5
+  seconds of the connection; a peer that sends nothing, half a line or
+  does not read the refusal is cut off then. A job waiting for its state
+  lock has no deadline (the peer may close). Once the job starts, the
+  whole exchange (its output and the exit frame) must end within the job
+  `timeout` plus 2 minutes: a peer that stops reading makes the writes
+  fail by then, which counts as a closed peer (the unit is stopped, see
+  below), so it cannot hold one of the 16 connections.
 - Frames: 1 byte type (`o` stdout, `e` stderr, `x` exit), 4 byte
   big-endian payload length, the payload (at most 1 MiB; the `x` payload
   is the decimal exit status and ends the exchange). A refusal is an `e`

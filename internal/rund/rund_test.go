@@ -106,6 +106,8 @@ func TestLoadJobsRules(t *testing.T) {
 		"group-no-user.yaml":       "group: luk\ncommand: /x\n",
 		"no-command.yaml":          "user: a\n",
 		"short.yaml":               "user: a\ncommand: /x\ntimeout: 10ms\n",
+		"long.yaml":                "user: a\ncommand: /x\ntimeout: 168h\n",
+		"longest.yaml":             "user: a\ncommand: /x\ntimeout: 167h\n",
 		"bad-cred.yaml":            "user: a\ncommand: /x\ncredentials:\n  a:b: /x\n",
 		"group-writable.yaml":      s3Job,
 		"symlink.yaml":             "",
@@ -135,10 +137,10 @@ func TestLoadJobsRules(t *testing.T) {
 	}
 	slices.Sort(ok)
 	slices.Sort(bad)
-	if !slices.Equal(ok, []string{"locked", "min", "no-user", "s3-upload", "shared"}) {
+	if !slices.Equal(ok, []string{"locked", "longest", "min", "no-user", "s3-upload", "shared"}) {
 		t.Fatalf("ok %v", ok)
 	}
-	wantBad := []string{"Upper", "bad-cred", "bad-state", "broken", "dir", "group-no-user", "group-writable", "luk-any", "luk-work", "no-command", "relative", "short", "symlink", "unknown-key"}
+	wantBad := []string{"Upper", "bad-cred", "bad-state", "broken", "dir", "group-no-user", "group-writable", "long", "luk-any", "luk-work", "no-command", "relative", "short", "symlink", "unknown-key"}
 	if !slices.Equal(bad, wantBad) {
 		t.Fatalf("bad %v", bad)
 	}
@@ -934,4 +936,66 @@ func TestUnitActive(t *testing.T) {
 	if _, err := unitActive("Job=\n"); err == nil {
 		t.Error("no ActiveState accepted")
 	}
+}
+
+// ends fails the test unless errc delivers within d.
+func ends(t *testing.T, what string, errc <-chan error, d time.Duration) error {
+	t.Helper()
+	select {
+	case err := <-errc:
+		return err
+	case <-time.After(d):
+		t.Fatalf("%s: serve did not end", what)
+	}
+	return nil
+}
+
+// A peer that sends no request, half a request, or does not read the
+// refusal cannot hold the connection beyond requestTimeout.
+func TestServeRequestDeadline(t *testing.T) {
+	defer func(d time.Duration) { requestTimeout = d }(requestTimeout)
+	requestTimeout = 100 * time.Millisecond
+	e := newEnv(t)
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
+		t.Error("job ran")
+		return 0, nil
+	}
+	for name, req := range map[string]string{
+		"nothing":        "",
+		"half":           `{"job":"s3-upload","work":`,
+		"refusal unread": `{"job":"nope","work":"/x"}` + "\n",
+	} {
+		c, s := net.Pipe()
+		errc := make(chan error, 1)
+		go func() { errc <- e.srv.Serve(s) }()
+		if req != "" {
+			go io.WriteString(c, req)
+		}
+		ends(t, name, errc, 5*time.Second)
+		c.Close()
+	}
+}
+
+// A peer that stops reading while the job writes cannot pin the
+// connection: the deadline of the job (timeout plus stopGrace) ends the
+// writes, the job is stopped and Serve returns.
+func TestServeJobDeadline(t *testing.T) {
+	defer func(d time.Duration) { stopGrace = d }(stopGrace)
+	stopGrace = 100 * time.Millisecond
+	e := newEnv(t)
+	write(t, filepath.Join(e.srv.Jobs, "quick.yaml"), "command: /opt/luk/q\ntimeout: 1s\n", 0o600)
+	e.fr.run = func(ctx context.Context, stdout, _ io.Writer) (int, error) {
+		for ctx.Err() == nil {
+			if _, err := stdout.Write([]byte("output\n")); err != nil {
+				return 1, nil
+			}
+		}
+		return 143, nil
+	}
+	c, s := net.Pipe()
+	errc := make(chan error, 1)
+	go func() { errc <- e.srv.Serve(s) }()
+	io.WriteString(c, string(runproto.Request{Job: "quick", Work: e.work}.Encode()))
+	ends(t, "unread output", errc, 10*time.Second)
+	c.Close()
 }

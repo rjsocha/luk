@@ -251,6 +251,12 @@ func (j *Job) validate() error {
 	if time.Duration(j.Timeout) < time.Second {
 		bad("timeout: less than 1s")
 	}
+	// A step waits for its job at most the pipeline timeout, which is
+	// under config.MaxPipelineTimeout; lukd-run@.service has
+	// RuntimeMaxSec above twice that.
+	if time.Duration(j.Timeout) >= config.MaxPipelineTimeout {
+		bad("timeout: must be under %v", config.MaxPipelineTimeout)
+	}
 	if j.State != "" && j.State != StateLocked && j.State != StateShared {
 		bad("state %q: want %s or %s", j.State, StateLocked, StateShared)
 	}

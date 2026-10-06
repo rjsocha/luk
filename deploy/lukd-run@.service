@@ -12,6 +12,16 @@ ExecStart=/usr/bin/lukd run
 StandardInput=socket
 StandardOutput=socket
 StandardError=journal
+# Bounds of one connection. They do not reach the job: systemd-run asks
+# the service manager for a transient unit of its own in system.slice,
+# outside this unit's cgroup. lukd run itself ends the request within 5s
+# and a job with its output within the job timeout plus 2 minutes;
+# RuntimeMaxSec is only a backstop above a wait for a state lock (a peer
+# closes within its pipeline timeout, under 7 days) plus a job timeout
+# (under 7 days as well).
+MemoryMax=128M
+TasksMax=64
+RuntimeMaxSec=15d
 # Lock files of the jobs with state: locked (/run/lukd-run/<job>/<pipeline>.lock),
 # shared by all instances: kept when an instance stops, emptied by a reboot.
 RuntimeDirectory=lukd-run
