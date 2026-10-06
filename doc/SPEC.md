@@ -2956,7 +2956,7 @@ before every run, owned by `luk` and never seen by the program:
 ```
 
 The workspace `<root>/root/job/<unit>/` is the program's: a btrfs subvolume
-lukd run creates for the run, owned by the user of the unit, mode 0700
+a helper unit of lukd run creates for the run, owned by the user of the unit, mode 0700
 (see Service, Jobs with other users):
 
 ```
@@ -3206,7 +3206,7 @@ luk-job output --file "$tmp/sum" --move --name "$origin.sql.sha256" \
 ```
 
 Scratch files belong in `tmp/` (`LUK_TMP`) or elsewhere in the workspace
-outside `in/` and `out/`; the workspace is removed with its unit.
+outside `in/` and `out/`; a helper unit of lukd run removes the workspace after its unit.
 
 ### Encryption
 
@@ -4195,7 +4195,7 @@ on every janitor pass (about every minute):
   `oldest_age` is how long files wait unprocessed: the basis of an
   alert on a queue that grows faster than lukd processes it.
 
-`workspaces` repeats `/run/luk/workspaces.json` (see Jobs with other
+`workspaces` repeats `/run/luk/workspaces/count.json` (see Jobs with other
 users, Workspace), read on every janitor pass: `leftover` the
 workspaces lukd run could not remove, `updated` when the count last
 changed; absent while the file does not exist. Any `leftover` above 0
@@ -4625,7 +4625,9 @@ sudo are involved.
   `deploy/lukd-run@.service` (root, one instance per connection, the
   connection on stdin and stdout, stderr to the journal,
   `ExecStart=/usr/bin/lukd run`, sandboxed: read-only file system,
-  `AF_UNIX` only, no capability (`CapabilityBoundingSet=`),
+  `AF_UNIX` only, no capability (`CapabilityBoundingSet=`; `systemd-run`
+  needs none, and the workspaces are made and removed by helper units,
+  see Workspace),
   `ProtectProc=invisible` (processes of other users hidden),
   `RuntimeDirectory=lukd-run` 0700 with `RuntimeDirectoryPreserve=yes`
   for the locks, see below; `MemoryMax=128M`, `TasksMax=64` and
@@ -4647,7 +4649,7 @@ sudo are involved.
   - `root`: the lukd root; default `/var/lib/luk`. It must be the same
     path as the lukd `root` (every unit gets it as an empty tmpfs, see
     Sandbox of a unit); `lukd check` run as root warns when it is not.
-    The workspaces live in `<root>/root/job`: lukd run creates `job/`
+    The workspaces live in `<root>/root/job`: the create helper of lukd run makes `job/`
     itself on demand (`root:root` 0711). `<root>/root` and `job/` must
     pass the rule of the directories above run.d (below): every directory
     from `/` down to them owned by root and not writable by group or
@@ -4795,8 +4797,7 @@ sudo are involved.
   -p InaccessiblePaths=-<config dir> -p InaccessiblePaths=-/run/luk
   [-p InaccessiblePaths=-<path> ...] -p TemporaryFileSystem=<root>:ro
   -p BindPaths=<workspace>:<workspace>:norbind
-  -p ExecStartPre=+<lukd> run workspace create <root> <unit>
-  -p ExecStopPost=+<lukd> run workspace remove <root> <unit>
+  -p ExecStartPre=+<lukd> run workspace own <unit>
   [-p StateDirectory=lukd-run/<job>/<pipeline> -p StateDirectoryMode=0700]
   [-p LoadCredential=...] -p RuntimeMaxSec=<timeout> [--setenv=K=V ...]
   --setenv=LUK_WORK=<workspace> ... --setenv=LUK_ORIGIN=<origin>
@@ -4820,61 +4821,117 @@ sudo are involved.
   or system call of lukd itself (`statfs` for the magic,
   `BTRFS_IOC_SUBVOL_CREATE_V2`, `BTRFS_IOC_TREE_SEARCH`,
   `BTRFS_IOC_SNAP_DESTROY_V2`, `FICLONE`): no btrfs-progs, and root runs
-  no external program for it.
-  - `workspace create` (`ExecStartPre=+`, root, outside the sandbox) runs
-    after systemd allocated the user of the unit: a dynamic user exists
-    from the start of its unit, before `ExecStartPre`. It reads the UID
-    and GID of the unit from systemd (`systemctl show -p UID -p GID
-    --value <unit>`), never from the environment. It opens `<root>/root`
-    element by element from `/` with `O_DIRECTORY|O_NOFOLLOW` and checks
-    the rule above (owned by root, not writable by group or others),
-    creates `job/` below it when missing (`mkdirat`, `root:root` 0711)
-    and opens and checks it the same way, checks with `statfs` that it
-    lies on btrfs, creates the subvolume `<unit>` from that descriptor
-    (`BTRFS_IOC_SUBVOL_CREATE_V2`) and sets its owner and mode (`fchown`,
-    `fchmod` 0700), nothing else: the wrapper creates what lies inside,
-    as the user of the unit. A failure ends the unit before its command
-    starts, with the reason in the journal of the unit. `BindPaths=` of
-    the workspace is applied when the main process starts, after
-    `workspace create`.
-  - `workspace remove` (`ExecStopPost=+`, root) runs once the unit
-    stopped, also after a failure or a timeout kill. systemd runs
-    `ExecStopPost=` only after every process of the cgroup ended (the
-    stop sequence `stop`, `stop-sigterm`, `stop-sigkill`, `stop-post`,
-    with `KillMode=control-group`), so the mount namespace of the unit,
-    the only place the workspace is bound, is gone by then: a requirement
-    of the unit, which therefore keeps `KillMode=control-group`. It
-    deletes every subvolume the job created inside the workspace first,
-    leaves first, then the workspace itself: the nested ones are the
-    `ROOT_REF` items of the tree of tree roots below the id of the
-    workspace (`BTRFS_IOC_TREE_SEARCH`), each deleted by its id
-    (`BTRFS_IOC_SNAP_DESTROY_V2` with `BTRFS_SUBVOL_SPEC_BY_ID`), the
-    workspace from the descriptor of `<root>/root/job`. No file is read
-    and no tree of the job is walked. btrfs frees the space of a deleted
-    subvolume asynchronously, a moment later.
+  no external program for it. lukd run itself has no capability and
+  touches no workspace: one-purpose helper units make and remove them.
+  - The workspace must exist before the job unit starts: a `BindPaths=`
+    whose source is missing fails every process of the unit (at the step
+    `NAMESPACE`, even with `-`), and every command of the unit, `+` ones
+    included, runs in its mount namespace, where `<root>` is the empty
+    tmpfs. So creation and removal happen outside the job unit.
+  - The helpers `<lukd> run workspace create <unit>`, `<lukd> run
+    workspace remove <unit>` and `<lukd> run workspace own <unit>` take
+    one argument, a unit name, never a path. It must match
+    `lukd-run-<name>-<random>` or `lukd-step-<name>-<step>-<random>`:
+    only `[a-z0-9-]`, `<random>` exactly 12 lowercase hex digits at the
+    end, at most 240 bytes (so no `/`, no `.`, no `..`); anything else is
+    refused (`workspace: invalid unit name`, exit 1). Each helper builds
+    the path itself: `root` of `run.yaml` (root-owned, read with the
+    rules of Jobs above) plus `root/job/<unit>`. Nothing of the path
+    comes from `luk` or from lukd run, and no helper reads any data of
+    `luk`.
+  - Create: lukd run starts, once the step holds its slot and before the
+    job unit, `systemd-run --wait --collect --quiet
+    --unit=lukd-workspace-<random> <properties> <lukd> run workspace
+    create <unit>`. The helper opens `<root>/root` element by element from
+    `/` with `O_DIRECTORY|O_NOFOLLOW` and checks the chain rule (every
+    directory owned by root, not writable by group or others, no
+    symlink), creates `job/` below it when missing (`mkdirat`,
+    `root:root` 0711) and opens and checks it the same way, checks with
+    `statfs` that it lies on btrfs, and creates the subvolume `<unit>`
+    relative to that descriptor (`BTRFS_IOC_SUBVOL_CREATE_V2` with the
+    parent descriptor and the name), `root:root` 0700, empty. A failure
+    fails the step before the job unit starts: lukd run answers with the
+    refusal `lukd run: workspace not created`, the reason in the journal
+    of the helper unit.
+  - Own: `ExecStartPre=+<lukd> run workspace own <unit>` of the job unit
+    (root, in the namespace of the unit, before the main process)
+    validates the name the same way, reads the UID and GID systemd
+    allocated to that unit (`systemctl show -p UID -p GID --value
+    <unit>`, never the environment; a dynamic user exists from the start
+    of its unit, before `ExecStartPre`) and sets them as owner of the
+    workspace of that name through the bind (the same inode; opened with
+    `O_DIRECTORY|O_NOFOLLOW`, `fchown`), mode 0700, nothing else: the
+    wrapper creates what lies inside, as the user of the unit. A failure
+    ends the unit before its command starts, with the reason in the
+    journal of the unit.
+  - Remove: after `systemd-run --wait` of the job unit returned, or after
+    a closed peer once the job unit is inactive (see Frames), also after
+    a failure or a timeout kill, lukd run starts the helper `<lukd> run
+    workspace remove <unit>` the same way. systemd ends a unit only after
+    every process of its cgroup ended (the stop sequence `stop`,
+    `stop-sigterm`, `stop-sigkill`, with `KillMode=control-group`), so its
+    mount namespace, the only place the workspace is bound, is gone by
+    then: a requirement of the job unit, which therefore keeps
+    `KillMode=control-group`. The helper opens `<root>/root/job` with the
+    chain rule, then the name with `O_DIRECTORY|O_NOFOLLOW`, verifies that
+    it is a subvolume (inode 256 on btrfs), and refuses while the job
+    unit of that name is still active (`systemctl show -p ActiveState
+    --value <unit>.service` is neither `inactive` nor `failed`, and the
+    unit is loaded). It deletes every subvolume the job created inside
+    the workspace first, leaves first, then the workspace itself: only
+    subvolumes whose chain of `ROOT_REF` parents (`BTRFS_IOC_TREE_SEARCH`
+    in the tree of tree roots) leads to the id of that workspace, each
+    deleted by its id (`BTRFS_IOC_SNAP_DESTROY_V2` with
+    `BTRFS_SUBVOL_SPEC_BY_ID`). No file is read and no tree of the job is
+    walked. btrfs frees the space of a deleted subvolume asynchronously, a
+    moment later. A lukd run that ends before the remove (a crash, its
+    `RuntimeMaxSec`) leaves the workspace to prune.
+  - Sandbox of the helper units (create, remove; prune as well):
+    `ProtectSystem=strict` with `ReadWritePaths=<root>/root/job`
+    (`<root>/root` for create, which may make `job/`) and, for remove
+    and prune, `/run/luk/workspaces` (the count, below);
+    `CapabilityBoundingSet=CAP_SYS_ADMIN` (the kernel requires it for
+    `BTRFS_IOC_TREE_SEARCH` and destroy by id), `PrivateNetwork=yes`,
+    `RestrictAddressFamilies=AF_UNIX` (`systemctl show`),
+    `NoNewPrivileges=yes`, `ProtectHome=yes`, `PrivateTmp=yes`,
+    `PrivateDevices=yes`, `ProtectKernelTunables=yes`,
+    `ProtectKernelModules=yes`, `ProtectKernelLogs=yes`,
+    `ProtectControlGroups=yes`, `ProtectProc=invisible`,
+    `RestrictNamespaces=yes`, `RestrictSUIDSGID=yes`,
+    `LockPersonality=yes`, `MemoryDenyWriteExecute=yes`,
+    `SystemCallArchitectures=native`, `UMask=0077`. lukd run passes this
+    fixed set; nothing of it comes from a request.
+  - Worst case of a bug in lukd run or a compromised lukd run, through
+    the helpers: a workspace of another valid name in `<root>/root/job`
+    created, or removed while its unit is not active (and the count
+    raised). Never anything outside `job/`: the helpers take no path,
+    open everything by descriptor without following a symlink, and
+    destroy only subvolumes below the workspace of that name.
   - A subvolume that is still mounted cannot be deleted (`EBUSY`): a
     process stuck in uninterruptible I/O (state D) keeps the namespace of
     the unit alive, and a job of the group `docker` may have bound its
     workspace into a container that lives in the cgroup of the daemon.
-    `workspace remove` then logs `workspace not removed` (WARN, with the
-    unit and the error), leaves the subvolume and raises the count of
-    leftover workspaces at once (below).
-  - `<lukd> run workspace prune <root>` (root, `lukd-run-prune.service`,
-    pulled in by `lukd.service` at start and run every 15 minutes by
-    `lukd-run-prune.timer`) removes, as `workspace remove` does, every
-    workspace of `<root>/root/job` named like a unit (`lukd-run-*`,
-    `lukd-step-*`) whose unit is not active (`systemctl show -p
-    ActiveState --value <unit>.service` is `inactive` or `failed`, or the
-    unit is not loaded); any other entry is logged and left alone.
-  - The count of leftover workspaces lives in `/run/luk/workspaces.json`
-    (`root:luk` 0640, `{"leftover": N, "updated": "<UTC time>"}`,
-    replaced atomically under an exclusive `flock` on
-    `/run/lukd-run/workspaces.lock`): a failed `workspace remove` adds
-    one at once, and prune writes the number it still could not remove,
-    so only prune lowers it, when it cleans up. lukd process reports it
-    in `status.json` (`workspaces`, see Status). Any value above 0 is
-    meant to alert at once: in a healthy pipeline it never happens (a
-    stuck job or an escaped container).
+    The remove helper then logs `workspace not removed` (WARN, with the
+    unit and the error), leaves the subvolume, raises the count of
+    leftover workspaces at once (below) and exits 1; lukd run logs it
+    and the step result is not changed by it.
+  - Prune: `<lukd> run workspace prune` (its own unit,
+    `lukd-run-prune.service` with the sandbox of the helpers, pulled in
+    by `lukd.service` at start and run every 15 minutes by
+    `lukd-run-prune.timer`; it talks to nobody) removes, with the code of
+    the remove helper, every workspace of `<root>/root/job` named like a
+    unit (the pattern above) whose unit is not active; any other entry is
+    logged and left alone.
+  - The count of leftover workspaces lives in
+    `/run/luk/workspaces/count.json` (the directory `root:luk` 0750 from
+    tmpfiles.d, the file 0640, `{"leftover": N, "updated": "<UTC
+    time>"}`, replaced atomically under an exclusive `flock` on
+    `/run/luk/workspaces/lock`): a failed remove adds one at once, and
+    prune writes the number it still could not remove, so only prune
+    lowers it, when it cleans up. lukd process reports it in
+    `status.json` (`workspaces`, see Status). Any value above 0 is meant
+    to alert at once: in a healthy pipeline it never happens (a stuck job
+    or an escaped container).
 - Channel of a unit: lukd process creates it with
   `socketpair(AF_UNIX, SOCK_SEQPACKET)`, sends one end with the request
   and keeps the other; the unit gets it as the stdin of its main process,
@@ -4908,7 +4965,8 @@ sudo are involved.
     <program>: channel closed before the results`).
   - A received descriptor stays valid after the unit ended and after its
     file was deleted with the workspace: the wrapper exits after `end`
-    without waiting for an answer, `workspace remove` runs at once, and
+    without waiting for an answer, a helper unit of lukd run removes the workspace once
+    the unit is gone, and
     lukd process clones the results at its own pace. Both sides clone a
     received file (`FICLONE`), or copy it with `copy_file_range` on
     `EXDEV`, `EOPNOTSUPP` or `EINVAL`, decided per file at runtime (an
@@ -4937,7 +4995,7 @@ sudo are involved.
     still reads a credential from it, since systemd reads the
     credentials as root before it sets up the namespace of the unit.
   - `/run/luk` is inaccessible: the socket of lukd run, the nonce cache,
-    the volatile secrets and `workspaces.json`.
+    the volatile secrets and the count of leftover workspaces.
   - `<root>` is an empty read-only tmpfs (the TLS and ACME keys, the
     WKD key cache, the status, the storages, the queues, the work
     directories and the other workspaces are gone) with only
@@ -4954,17 +5012,17 @@ sudo are involved.
     So are the paths of `hide` in `run.yaml` (absolute, for anything
     the configuration does not name). A path under `<root>`, `<config
     dir>`, `/run/luk` or another hidden path adds nothing.
-  - `<root>/root/job` and the workspace are root's to create and remove, and
-    the parent is root's: the user of the unit cannot rename or swap
-    them (a static user owns its workspace but not its parent), so
-    nothing is checked again inside the unit.
+  - `<root>/root/job` and the workspace are root's to create and remove,
+    and the parent is root's: the user of the unit cannot rename or swap
+    them (it owns its workspace but not its parent), so nothing is
+    checked again inside the unit.
   - `ProtectProc=invisible`: the processes of other users (lukd, other
     units) are hidden in `/proc`.
   - `NoNewPrivileges=yes` on every unit (`sudo` and setuid binaries
     fail), except a job with `privileged`.
-  - The `-` of `InaccessiblePaths=` skips a missing path; the bind of
-    `<workspace>` has none, so a workspace missing at the start fails
-    the unit.
+  - The `-` of `InaccessiblePaths=` skips a missing path; a missing
+    source of `BindPaths=` fails the unit even with `-`, so lukd run
+    creates the workspace before the unit (see Workspace).
   - The unit sees the rest of the system as its user and groups allow,
     `/tmp` and `/var/tmp` private (`PrivateTmp=yes`), and its state
     directory. It gets no group of the peer.
@@ -6126,7 +6184,7 @@ disk. Test on lukd.vm / luk.vm.
   them). Argument: the workspace. On `timeout` (pipeline key, default 1h,
   applied to each run step separately, must be under 7 days) lukd closes
   the connection to `lukd run`, which stops the unit; systemd kills
-  every process of its cgroup and removes the workspace. stdout and
+  every process of its cgroup, and a helper unit of lukd run removes the workspace. stdout and
   stderr go to `log` (capped at 1 MiB); the last 4 KiB go into the
   failure log line and status unless the program wrote a `fail` file.
   The `LUK_*` variables, the in/ and out/ rules, the exit status and the
