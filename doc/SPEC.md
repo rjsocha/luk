@@ -1155,7 +1155,7 @@ endpoint:
   size and tokens) and counted, and that upload is charged nothing (what
   it took before goes back), so the buckets hold what enforce would hold. Enforce logs `quota: refused` the
   same way.
-- State: `<root>/quota.json` (JSON, mode 0640, replaced atomically and
+- State: `<root>/data/quota.json` (JSON, mode 0640, replaced atomically and
   synced after every upload that changed it, and after a refusal), never
   under `/run`: a restart does not refill the buckets. An upload counts
   in the file once it is accepted, so one cut by a crash costs nothing
@@ -2101,7 +2101,7 @@ expose:
 
 - `endpoint.<n>.secret` is optional and needs `respond: url`. `allow`
   (required, see Capabilities) is who may send secret uploads; `path` is
-  the queue directory (relative to `root` or absolute, like
+  the queue directory (relative to `<root>/data` or absolute, like
   `endpoint.<n>.path`); `storage` a local, exposed storage other than
   the endpoint `storage`. Without `secret` an endpoint works as before.
 - A `reveal` upload of a signer `secret.allow` does not grant is refused
@@ -2219,7 +2219,7 @@ files are read in lexical order, but the result does not depend on it:
 Example of the merged configuration:
 
 ```yaml
-root: /var/lib/luk                    # base of relative paths (default)
+root: /var/lib/luk                    # default; relative paths resolve against <root>/data
 
 listen:                               # see Listeners
   intake:
@@ -2383,10 +2383,12 @@ without `pretty`, or of a signer `pretty.allow` does not grant, is
 refused with 422 before the body ("endpoint <n> does not offer pretty
 URLs"). A reload applies to new uploads.
 
-`root` is an absolute path (default `/var/lib/luk`). Relative `tls.cert`,
+`root` is an absolute path (default `/var/lib/luk`) on btrfs, owned by
+root, with two entries: `<root>/data`, everything lukd writes, and
+`<root>/root`, root's (see Service, State). Relative `tls.cert`,
 `tls.key`, `endpoint.<n>.path` and `storage.<n>.base` are resolved against
-it; absolute values are used as given. A relative value that leaves `root`
-(for example `../x`) is a validation error.
+`<root>/data`; absolute values are used as given. A relative value that
+leaves `<root>/data` (for example `../x`) is a validation error.
 
 Durations accept Go syntax plus `d` (days). Sizes accept `K`, `M`, `G`,
 `T` (powers of 1024).
@@ -2444,7 +2446,7 @@ and `ssh.d/ca/`):
   secrets);
 - an endpoint `path` is equal to or apart from every other endpoint
   `path` (never nested in it), and no queue directory (`path`,
-  `secret.path`) overlaps `<root>/acme`, `<root>/gpg-cache`,
+  `secret.path`) overlaps `<root>/data/acme`, `<root>/data/gpg-cache`,
   `auth.nonces` or the work directory, or holds a `tls.cert` or
   `tls.key`;
 - a non-empty `private.*` list requires `respond: url` and a respond
@@ -2473,13 +2475,22 @@ and `ssh.d/ca/`):
   parts.size must be a multiple of 64KiB from 64KiB to 2GiB-64KiB`),
   `parts.parallel` 1 to 64; `limits.body.rate` is not negative;
   `limits.channel.*` and `limits.uploads.*` are positive;
-- `run` is an absolute path; `tee` only on a `run` step (`tee needs
-  run`); `relay` is a job name (`[a-z0-9][a-z0-9._-]*`, at most 64
-  bytes) and takes no `tee` or `env` (`relay takes no tee or env`);
-  `jobs` only on a `run` step, with or without `tee` (`jobs needs
-  run`), each a job name (`jobs: "<job>": invalid job name`) listed
-  once (`jobs: <job> listed twice`); an `env` name of a `run` step does
-  not start with `LUK_` (`env.<name>: LUK_* names are reserved`);
+- `run` is an absolute path or a mapping with exactly the key `job`
+  (`run must be an absolute path or {job: NAME}`); `run.job` is a job
+  name (`run.job "<job>": invalid job name`) and takes no `tee`, `env`
+  or `jobs` (`run job takes no tee, env or jobs`); `tee` only on a `run`
+  step (`tee needs run`); `relay` is a job name (`[a-z0-9][a-z0-9._-]*`,
+  at most 64 bytes) and takes no `tee` or `env` (`relay takes no tee or
+  env`); `jobs` only on a `run: <program>` step, with or without `tee`
+  (`jobs needs run`), each a job name (`jobs: "<job>": invalid job
+  name`) listed once (`jobs: <job> listed twice`); an `env` name of a
+  `run` step does not start with `LUK_` (`env.<name>: LUK_* names are
+  reserved`);
+- `root` lies on btrfs (`statfs`, `BTRFS_SUPER_MAGIC`; `root <root>: not
+  a btrfs filesystem`), and no path of the configuration (a queue, a
+  storage base, a TLS file, `auth.nonces`, `gpg.keys`) lies in
+  `<root>/root`, root's part of the root with the workspaces of lukd run
+  (`<key>: <path> lies in <root>/root`); see Service, State;
 - `queue.concurrency` and `timeout` are not negative, `queue.order` is
   not negative and needs `queue.group`, `queue.group` does not start
   with a dot or contain a slash; the pipeline key `concurrency` is an
@@ -2594,11 +2605,11 @@ setting, and the role keeps the current one. Each role reloads
 independently.
 
 Every role writes the restart-only settings it runs with to
-`<root>/.lukd-<role>.running.json` (`receive`, `process`) at start and
+`<root>/data/<role>.running.json` (`receive`, `process`) at start and
 after every successful reload: JSON, replaced atomically, mode `0640`.
 Nothing removes it on stop. `lukd check` compares the configuration
 with the running file of every role whose lock
-(`<root>/.lukd-<role>.lock`, see Service) is held, so a file left by a
+(`<root>/data/<role>.lock`, see Service) is held, so a file left by a
 stopped role is ignored, and fails (exit status 1) with one line per
 setting the reload would refuse, from the same comparison the reload
 uses:
@@ -2642,10 +2653,11 @@ Run as root, `lukd check` never opens a file of the service user, which
 could put a FIFO, a symlink or an endless file there: the part that
 reads them (the running files and locks of the roles, the layouts of the
 local storage bases and their orphaned permanent names) runs again as
-the owner of `root` with its groups (as `lukd queue` and `lukd storage`
-do; `root` must not be a symlink), with the same flags, and its output
-and failure join root's own. A missing `root` holds none of them: root
-then does that part itself. `lukd.service` bounds its reload with
+the owner of `<root>/data` (the service user; `<root>` itself is
+root's) with its groups (as `lukd queue` and `lukd storage` do; neither
+`root` nor `<root>/data` may be a symlink), with the same flags, and
+its output and failure join root's own. A missing `root` or
+`<root>/data` holds none of them: root then does that part itself. `lukd.service` bounds its reload with
 `TimeoutSec=5min`, so a check that hangs fails the reload instead of
 blocking it.
 
@@ -2653,26 +2665,35 @@ blocking it.
 
 A pipeline is a list of steps working on a set of files:
 
-- `run: <program>` - a transformation. lukd creates a work directory,
-  runs `<program> <workdir>` (plus `LUK_IN`, `LUK_OUT`, `LUK_META` and the
-  step's `env`), with the pipeline `timeout`. `in/` holds the current
-  file set, `out/` starts empty. Exit 0: `out/` becomes the file set for
-  the next step. Non-zero: the pipeline stops. The program runs with the
-  work directory as its current directory.
+- `run: <program>` - a transformation. lukd asks `lukd run` to run
+  `<program> <workspace>` as a transient unit of a dynamic user, in a
+  workspace of its own (plus `LUK_IN`, `LUK_OUT`, `LUK_META` and the
+  step's `env`), with the pipeline `timeout` (see Step contract and
+  Service, Jobs with other users). `in/` holds the current file set,
+  `out/` starts empty. Exit 0: `out/` becomes the file set for the next
+  step. Non-zero: the pipeline stops. The program runs with the
+  workspace as its current directory. It never runs as `luk`.
+- `run: {job: <job>}` - a transformation by a job of run.d: the
+  admin-allowlisted job `<job>` runs as the step, in its own workspace,
+  with the job's `user`, `group`, `groups`, `credentials`, `env`,
+  `timeout` and `state` (see Service, Jobs with other users); its
+  `command` gets the workspace like a `run` program. Its `out/` becomes
+  the file set of the next step under the rules of a `run` step. It
+  takes no `env`, `tee` or `jobs`.
 - `run: <program>` with `tee: true` - a consumer: the program delivers
   the set somewhere (an upload to S3, a copy to another host) and must
   leave `out/` empty; the next step gets the same file set it got (the
   files and their per-file meta). It may be the last step.
-- `jobs: [<job>, ...]` on a `run` step (with or without `tee`): the jobs
-  of `lukd run` its program may start with `luk-job run --job` (see
-  Service, Jobs with other users). `lukd run` runs a job only for the
-  pipelines that list it here or relay to it.
+- `jobs: [<job>, ...]` on a `run: <program>` step (with or without
+  `tee`): the jobs of `lukd run` its program may start with `luk-job run
+  --job` in the middle of its work (see luk-job), for a program that
+  needs another user's credentials for a part of the work. `lukd run`
+  runs such a nested job only for the step that lists it here.
 - `relay: <job>` - a consumer run by another user: lukd asks `lukd run`
-  to run the admin-allowlisted job `<job>` on the step work directory
-  (see Service, Jobs with other users), like a `tee` run step whose
-  program is `luk-job run --job <job>` and whose `jobs` is `[<job>]`,
-  without a script. The next step gets the same file set; it may be the
-  last step.
+  to run the admin-allowlisted job `<job>` as the step, in its own
+  workspace (see Service, Jobs with other users), like a `tee` run step
+  of that job. The next step gets the same file set; it may be the last
+  step.
 - `store: <storage>` or `store: [a, b]` - writes the current set to the
   storages (tee); the set passes on unchanged.
 
@@ -2680,7 +2701,7 @@ What `run` is (a shell script, a script that starts a container, a
 binary) is not lukd's concern. lukd runs natively (systemd), not in a
 container.
 
-Work directory: see Step contract below.
+Workspace and work directory: see Step contract below.
 
 Name: a pipeline name is of `[A-Za-z0-9_.-]`, does not start with a
 dot or a dash and has at most 128 bytes (a config error otherwise). It
@@ -2802,7 +2823,7 @@ finishes after a newer one.
   `accepted_seq` orders acceptances of one process within the same
   nanosecond (0, 1, 2, ...); it is omitted when 0. The order is
   `accepted`, then `accepted_seq`.
-- The receive role keeps a mark of the order in `<root>/accepted.json`
+- The receive role keeps a mark of the order in `<root>/data/accepted.json`
   (`{"mark": <ns>}`, mode 0640, replaced atomically and synced): a new
   `lukd receive` starts after the mark whatever the wall clock says, so
   a clock moved back between restarts (or one that ran ahead for a
@@ -2915,46 +2936,86 @@ pipeline:
 
 ### Step contract
 
-What lukd gives a `run` program and what it takes back. The contract is
-stable: later versions only add to it (variables, keys of `meta.json`,
-files of the work directory); nothing listed here is removed or changes
-its meaning.
+What lukd gives a `run` program (and the job of a `run: {job}` or a
+`relay` step) and what it takes back. The contract is stable: later
+versions only add to it (variables, keys of `meta.json`, files of the
+workspace); nothing listed here is removed or changes its meaning.
 
-Work directory `<root>/work/<id>/<pipeline>/<step>/`, recreated empty
-before every run:
+Two directories take part in a step. The work directory
+`<root>/data/work/<id>/<pipeline>/<step>/` is lukd's own, recreated empty
+before every run, owned by `luk` and never seen by the program:
 
 ```
 <work>/
-  in/<name>             # the current file set (step 1: the upload)
+  in/<name>             # the current file set (step 1: the upload), hardlinks
+  in/<name>.meta.json   # per-file meta of <name>, when it has any
+  out/<name>            # the results received from the workspace
+  out/<name>.meta.json  # their meta
+  meta.json             # {"server", "client", "pipeline", "step", "produced"}
+  log                   # stdout and stderr of the unit
+```
+
+The workspace `<root>/root/job/<unit>/` is the program's: a btrfs subvolume
+lukd run creates for the run, owned by the user of the unit, mode 0700
+(see Service, Jobs with other users):
+
+```
+<workspace>/
+  in/<name>             # the current file set, the program's own clones
   in/<name>.meta.json   # per-file meta of <name>, when it has any
   out/                  # empty; the program puts its results here
   out/<name>.meta.json  # optional: meta of out/<name> for the catalog,
                         # e.g. kind, compression, encryption, "alias"
-  meta.json             # {"server", "client", "pipeline", "step", "produced"}
-  log                   # stdout and stderr of the program
+  tmp/                  # TMPDIR and LUK_TMP, on the filesystem of out/
+  meta.json             # the step meta, as in the work directory
   fail                  # optional: the step error, written by the program
+  .luk/                 # 0700: the socket of luk-job run (nested jobs)
 ```
 
-- Invocation: `<program> <work>`, with `<work>` as the current
-  directory, as the lukd user, in its own process group, under the
-  pipeline `timeout`.
+Files travel between the two as open descriptors, never as paths (see
+Service, Channel of a unit): lukd process opens `meta.json` and the files
+of its `in/` and sends them; the wrapper of the unit clones each into
+the workspace. After the program ended the wrapper sends the entries of
+`out/`; lukd process clones each into its own `out/` under a temporary
+name, renames it once complete and then validates `out/`. No path of the
+workspace names the upload, the pipeline or the step.
+
+- Invocation: `<program> <workspace>`, with `<workspace>` as the current
+  directory, as a dynamic user (see Service, Jobs with other users), in
+  a transient unit of its own, under the pipeline `timeout` (it counts
+  from the start of the unit: waiting for a unit slot of lukd run does
+  not count, see `limits.units.max` under Jobs with other users); stdin is
+  `/dev/null`, stdout and stderr are the step output. The job of a
+  `run: {job}` step is invoked the same way as its `command`, as the job
+  user.
 - Environment: `PATH` (system default, includes `/usr/local/bin`),
-  `LANG=C.UTF-8`, the step's `env`, then the metadata variables of the
-  Step environment (last, so `env` cannot override them). Every `LUK_*`
-  name is reserved: an `env` key `LUK_*` is a config error, so a
-  metadata variable left unset (see Step environment) never takes a
-  value from `env`.
+  `LANG=C.UTF-8`, the step's `env` (a job: its `env` of run.d), then the
+  metadata variables of the Step environment (last, so `env` cannot
+  override them). Every `LUK_*` name is reserved: an `env` key `LUK_*` is
+  a config error, so a metadata variable left unset (see Step
+  environment) never takes a value from `env`.
 - `meta.json`: `server` (`id`, `sender`, `endpoint`, `received`, `size`,
   `sha256`, `expires` when set), `client` (the client meta as sent:
   `file`, `source`, `tags`, `backup`, ...), `pipeline`, `step` and
   `produced` (`true` when the set was written by an earlier `run` or
   `encrypt` step; absent while the set is still the upload itself).
-- Inputs are immutable. `in/` holds hardlinks (0440) of the payload or of
-  the previous step's results; the program reads them and never modifies
-  them in place (it runs as their owner, so a chmod would corrupt the
-  archived copy). Removing an `in/` name is harmless. To pass an input on
-  unchanged, hardlink it into `out/` (`ln "$LUK_IN/x" "$LUK_OUT/x"` or
-  `luk-job output --file "$LUK_IN/x"`).
+- Inputs: the files of `in/` are the program's own clones (copies when
+  the stored file lies on another filesystem), owned by the user of the
+  unit. Changing or removing them changes nothing stored and nothing
+  another step or pipeline gets; their mode 0400 is a hint, not a
+  protection. To pass an input on unchanged, link it into `out/` (`ln
+  "$LUK_IN/x" "$LUK_OUT/x"` or `luk-job output --file "$LUK_IN/x"`).
+- `tmp/` lies on the filesystem of `out/`: a result prepared there moves
+  into `out/` with a rename.
+- Results: the wrapper opens each top-level entry of `out/` with
+  `O_RDONLY|O_NOFOLLOW|O_NONBLOCK` and checks it with `fstat`. Anything
+  but a regular file (a directory, a symlink, a FIFO, a socket, a
+  device) is refused: the wrapper sends the refusal naming the entry,
+  sends no result and exits non-zero, the unit ends, and the step fails
+  (`out: "<name>": not a regular file`), also on a `tee` step. A result
+  may have any owner and mode; the copy lukd keeps is owned by `luk`,
+  mode 0440. At most 1024 top-level entries (files and meta files
+  together; `out: more than 1024 entries`).
 - Exit status 0, `tee: true`: `out/` must be empty; any entry (a file, a
   meta file, a dotfile) fails the step (`run <program>: tee step wrote
   out/<name>`). The next step gets the input set of the tee step
@@ -2964,89 +3025,92 @@ before every run:
   as a `run` step for a link replace (store steps only) and for the
   transfer dedup (store steps only); `tee` on a `store` or `encrypt` step
   is a configuration error (`tee needs run`).
-- Exit status 0 (without `tee`): `out/` is validated and becomes the file
-  set of the next step. Rules: at least one file; only regular files at the top level
-  (no directories, no symlinks); names follow the rules of `file` (not
-  empty, no `/` or control character, not starting with `.`, at most 255
-  bytes); a
-  `<name>.meta.json` next to `<name>` is its meta, a JSON object of at
-  most 64 KiB; a `<name>.meta.json` without its file fails the step.
-  Any violation fails the step (`out: ...`).
+- Exit status 0 (without `tee`): `out/` as received is validated and
+  becomes the file set of the next step. Rules: at least one file; only
+  regular files at the top level (no directories, no symlinks); names
+  follow the rules of `file` (not empty, no `/` or control character, not
+  starting with `.`, at most 255 bytes); a `<name>.meta.json` next to
+  `<name>` is its meta, a JSON object of at most 64 KiB; a
+  `<name>.meta.json` without its file fails the step. Any violation
+  fails the step (`out: ...`).
 - Non-zero exit status: the step fails and the pipeline stops. The step
-  error is the text of `<work>/fail` when the program wrote one (at most
-  4 KiB are read, control characters other than newline and tab become
-  spaces, surrounding white space is trimmed, empty means none);
-  otherwise it is `run <program>: exit status N` followed by the last
-  4 KiB of the output. The output tail is logged in either case; after
-  exit status 0 it is logged at debug level (`step output`). A
-  `fail` file is ignored when the program exits 0 and on a timeout
-  (`timeout after <d>` with the output tail); a stop of lukd interrupts
-  the pipeline instead of failing it (Phase 3).
-- The program hands results over only through `out/`, never by writing
-  into storage under `LUK_ROOT`, which would bypass sidecars, catalog and
-  dedup. How it gets the work done is its own business: it may hand the
-  input to another process, a container (bind-mount the work directory)
-  or a remote host, as long as the results end up in `out/` before it
-  exits. Whatever is left of its process group when it exits is killed.
+  error is the text of `<workspace>/fail` when the program wrote one (the
+  wrapper reads at most 4 KiB of a regular file, opened with
+  `O_NOFOLLOW|O_NONBLOCK`, and sends it with the exit status; control
+  characters other than newline and tab become spaces, surrounding white
+  space is trimmed, empty means none); otherwise it is `run <program>:
+  exit status N` (`run job <job>: exit status N` for a `run: {job}`
+  step) followed by the last 4 KiB of the output. The output tail is
+  logged in either case; after exit status 0 it is logged at debug level
+  (`step output`). A `fail` file is ignored when the program exits 0 and
+  on a timeout (`timeout after <d>` with the output tail); a stop of lukd
+  interrupts the pipeline instead of failing it (Phase 3).
+- The program hands results over only through `out/`; nothing else of
+  lukd (queues, storages, other work directories, the processes of lukd)
+  is reachable from its unit. How it gets the work done is its own
+  business: it may hand the input to another process, a container (see
+  Containers under Jobs with other users) or a remote host, as long as
+  the results end up in `out/` before it exits. A background process it
+  leaves lives in the cgroup of the unit until the wrapper ends and may
+  still change `out/` while the wrapper sends it; then the unit ends,
+  systemd kills what is left of its cgroup, and the workspace is removed.
 
 ### Step environment
 
-The metadata variables of a step work directory. A `run` program, the
-job of a `relay` step and every job of `lukd run` (`luk-job run --job`)
-get the same list with the same values, built by one function:
+The metadata variables of a step. A `run` program, the job of a `run:
+{job}` or `relay` step and every nested job (`luk-job run --job`) get the
+same list with the same values, built by one function:
 
-- Path-bound, derived from the work directory path
-  `<root>/work/<id>/<pipeline>/<step>` and the root: `LUK_WORK`,
-  `LUK_IN`, `LUK_OUT`, `LUK_META`, `LUK_ID`, `LUK_PIPELINE`, `LUK_STEP`,
-  `LUK_ROOT`. lukd run derives them itself from the path it checked and
-  `run.yaml`.
-- Metadata, derived by lukd from `meta.json` and the files of `in/`
-  (regular files; a `<name>.meta.json` next to its file is that file's
-  meta, not a member of the set): `LUK_SENDER`, `LUK_ENDPOINT`,
-  `LUK_FILE`, `LUK_NAME`, `LUK_TAGS`, `LUK_HOSTNAME`, `LUK_ORIGIN`.
-  lukd run never reads the work directory: the client passes these on
-  in the request (a `relay` step: lukd, from its own derivation;
-  `luk-job run`: the values of its own environment, the one of its `run`
-  step). Their values come from the `luk` user (see Jobs with other
-  users, the boundary).
+- Workspace-bound, set by lukd run from the path of the workspace it
+  created: `LUK_WORK`, `LUK_IN`, `LUK_OUT`, `LUK_META`, `LUK_TMP` (and
+  `TMPDIR`), and `LUK_FILE` (from a file name of the request).
+- Step-bound, from the fields of the request lukd run checked (see
+  Request flow under Jobs with other users): `LUK_ID`, `LUK_PIPELINE`,
+  `LUK_STEP`.
+- Metadata, derived by lukd process from `meta.json` and the files of
+  the set the unit gets (regular files; a `<name>.meta.json` next to its
+  file is that file's meta, not a member of the set): `LUK_SENDER`,
+  `LUK_ENDPOINT`, `LUK_FILE`, `LUK_NAME`, `LUK_TAGS`, `LUK_HOSTNAME`,
+  `LUK_ORIGIN`. lukd process passes them in the request (for a nested
+  job, derived for the files that job gets); lukd run never reads the
+  channel or the workspace. Their values come from the `luk` user (see
+  Jobs with other users, the boundary).
 
 The variables:
 
-- `LUK_WORK`: the work directory (also the argument and the cwd).
+- `LUK_WORK`: the workspace (also the argument and the cwd).
 - `LUK_IN`: `in/`.
 - `LUK_OUT`: `out/`.
 - `LUK_META`: path of `meta.json`.
-- `LUK_ID`: the upload id (the `<id>` level of the path, equal to
-  `server.id`).
+- `LUK_TMP`: `tmp/`, scratch space on the filesystem of `out/`; `TMPDIR`
+  has the same value.
+- `LUK_ID`: the upload id (equal to `server.id`).
 - `LUK_SENDER`: the authenticated key name (`server.sender`).
 - `LUK_ENDPOINT`: the endpoint name (`server.endpoint`).
 - `LUK_PIPELINE`: the pipeline name.
 - `LUK_FILE`: absolute path of the input file when the set has exactly
-  one file; unset otherwise. Always `<work>/in/<valid file name>`.
+  one file; unset otherwise. Always `<workspace>/in/<valid file name>`.
 - `LUK_NAME`: that file's name (the upload: the client `file`; a set
   `produced` by a `run` or `encrypt` step: the produced name); empty
   when the set has several files or the upload is an unnamed stream (or
   its `file` is not a valid name: the file in `in/` is then named by the
   id).
-- `LUK_ROOT`: the luk `root` (for a job: `root` of `run.yaml`, the same
-  directory, inside the job an empty tmpfs but for the work directory).
 - `LUK_STEP`: the step number, 1-based, as in the work directory.
 - `LUK_TAGS`: the client tags joined with `,`.
 - `LUK_HOSTNAME`: `backup.hostname` when present, else empty.
 - `LUK_ORIGIN`: `LUK_HOSTNAME` when present, else the sender.
 
-The metadata variables pass one filter, the same in lukd, `luk-job run`
-and lukd run: only the seven names above; a value of valid UTF-8 without
-a control character (C0 such as NUL and newline, DEL, C1); `LUK_NAME`
-empty or a valid file name; `LUK_FILE` exactly `<work>/in/<valid file
-name>`; the other five at most 1 KiB (the cap is not applied to
-`LUK_FILE` or to the path-bound variables, so a long `root` loses none
-of them). Any other name in a request is ignored. A variable that fails
-the filter is left unset, for a `run` program and a job alike; so is a
-path-bound variable with such a value. An exec
-environment cannot carry a NUL, systemd refuses most other control
-characters in an environment value (the job would not start), and a
-newline or a tab it accepts would reach the job raw. lukd refuses
+The metadata variables pass one filter, the same in lukd process and
+lukd run: only the seven names above in a request; a value of valid
+UTF-8 without a control character (C0 such as NUL and newline, DEL,
+C1); `LUK_NAME` empty or a valid file name; `LUK_FILE` a valid file name
+in the request, set as `<workspace>/in/<name>`; the other five at most
+1 KiB (the cap is not applied to `LUK_FILE` or to the workspace-bound
+variables). Any other name in a request is ignored. A variable that
+fails the filter is left unset, for a `run` program and a job alike. An
+exec environment cannot carry a NUL, systemd refuses most other control
+characters in an environment value (the unit would not start), and a
+newline or a tab it accepts would reach the program raw. lukd refuses
 control characters in client values at upload already; a tag list
 longer than 1 KiB is what the cap leaves unset in practice. A program
 or job treats an unset `LUK_*` variable as unknown, not as not
@@ -3056,13 +3120,14 @@ a file name, a host name) can add an argument or expand anything.
 
 ### luk-job
 
-`luk-job` is the helper for `run` programs, a separate static binary
-(installed next to `lukd`, `/usr/bin/luk-job` from the lukd package). It is tiny and
-needs nothing but the work directory, so a step script can bind-mount it
-into a container and call it there. It works on the work directory from
-`LUK_WORK`, or `--work` when given, and refuses (exit 1) when neither is
-set or the directory has no `in/`, `out/` and `meta.json`. Values are
-passed by flags only. Errors go to stderr with exit 1.
+`luk-job` is the helper for `run` programs and jobs, a separate static
+binary (installed next to `lukd`, `/usr/bin/luk-job` from the lukd
+package). It is tiny and needs nothing but the workspace, so a step
+script can bind-mount it into a container and call it there. It works on
+the workspace from `LUK_WORK`, or `--work` when given, and refuses (exit
+1) when neither is set or the directory has no `in/`, `out/` and
+`meta.json`. Values are passed by flags only. Errors go to stderr with
+exit 1.
 
 - `luk-job inputs [--json]`: the absolute paths of the input files, one
   per line, sorted by name (`<name>.meta.json` next to its file is not an
@@ -3088,18 +3153,32 @@ passed by flags only. Errors go to stderr with exit 1.
   builds nested objects (`backup.origin=web1`). When any meta is given
   it is written atomically to `out/NAME.meta.json`, at most 64 KiB.
 - `luk-job fail --message TEXT`: writes TEXT (sanitized as above, at
-  most 4 KiB) to `<work>/fail` and exits 1, so `exec luk-job fail ...`
-  or `luk-job fail ... || exit 1` ends the step with TEXT as its error.
-- `luk-job run --job NAME [--socket PATH]`: asks `lukd run`
-  (default socket `/run/luk/run.sock`) to run the admin-allowlisted
-  job NAME as its own user on the work directory (see Service, Jobs with
-  other users; the `run` step must list NAME in `jobs`), passing on the metadata variables of its own environment
-  (see Step environment). The job's stdout and stderr are relayed to
-  luk-job's stdout and stderr and luk-job exits with the job's exit status; a
-  refused request, a connection or protocol error exits 1 with a message.
-  `SIGTERM` or `SIGINT` (the step timeout, a stop of lukd) closes the
-  connection, which stops the job, and exits 1. A pipeline that only
-  hands its set to one job needs no script: see the `relay` step.
+  most 4 KiB) to `<workspace>/fail` and exits 1, so `exec luk-job fail
+  ...` or `luk-job fail ... || exit 1` ends the step with TEXT as its
+  error.
+- `luk-job run --job NAME [--file PATH ...] [--out DIR]`: runs the
+  nested job NAME, an admin-allowlisted job of `lukd run`, as its own
+  user in its own workspace (see Service, Jobs with other users; the
+  `run` step must list NAME in `jobs`). luk-job connects to the socket
+  of the wrapper, `<workspace>/.luk/run.sock`; the wrapper forwards the
+  request over its channel to lukd process, which asks `lukd run` for
+  the job. Inputs of the job: the files named by `--file` (repeatable;
+  regular files, not symlinks, opened by luk-job and sent as
+  descriptors; their base names are valid names and distinct, and a
+  `<name>.meta.json` among them is the meta of `<name>`); without
+  `--file`, the input set of the step. Results of the job: cloned into
+  DIR of `--out` (an existing directory, each file under a temporary
+  name and renamed once complete; an existing name is refused); without
+  `--out` the job must leave its `out/` empty (`job NAME wrote
+  out/<name>`, exit 1). The job's stdout and stderr are relayed to
+  luk-job's stdout and stderr and luk-job exits with the job's exit
+  status; a refused request, a connection or protocol error exits 1
+  with a message. One nested job at a time per step: a second `luk-job
+  run` while one runs is refused (`luk-job run: another job of this step
+  is running`). `SIGTERM` or `SIGINT` (the step timeout, a stop of lukd)
+  closes the connection, which stops the job, and exits 1. A pipeline
+  that only hands its set to one job needs no program: see the `relay`
+  and `run: {job}` steps.
 - `luk-job version`: the version.
 
 Example (`contrib/examples/run-step.sh`):
@@ -3126,8 +3205,8 @@ luk-job output --file "$tmp/sum" --move --name "$origin.sql.sha256" \
   --meta kind=checksum --meta "of=$origin.sql.gz"
 ```
 
-Scratch files may live in the work directory outside `in/` and `out/`;
-it is removed with the pipeline's other work directories.
+Scratch files belong in `tmp/` (`LUK_TMP`) or elsewhere in the workspace
+outside `in/` and `out/`; the workspace is removed with its unit.
 
 ### Encryption
 
@@ -3169,7 +3248,7 @@ pipeline:
   `<hash>` is the z-base-32 encoded SHA-1 of the lowercased local part.
   The answer is a binary key (armored is accepted too), at most 1 MiB,
   over TLS verified against the system CAs, 10 s per request. The key is
-  cached in `<root>/gpg-cache/<address>.pgp` and used without a request
+  cached in `<root>/data/gpg-cache/<address>.pgp` and used without a request
   while younger than `gpg.wkd.cache`; after that it is refetched. When the
   refetch fails for any reason but a 404, the stale cached key is used
   and a warning logged. A 404 makes the recipient unusable, as does a
@@ -3184,7 +3263,7 @@ pipeline:
   unusable recipient.
 - Every file of the current set is streamed into a binary (not armored)
   OpenPGP message to all usable recipients, `out/<name>.gpg` in the step
-  work directory `<root>/work/<id>/<pipeline>/<step>/` (with `in/` as in
+  work directory `<root>/data/work/<id>/<pipeline>/<step>/` (with `in/` as in
   a run step); the encrypted files are the set of the next step. The
   per-file meta is carried over and extended with `"encryption": "gpg"`,
   `"recipients"` (the primary key fingerprints, uppercase hex) and
@@ -3995,11 +4074,11 @@ TLS, Private files).
 
 ## Status
 
-The status directory `<root>/status/` has one directory per role; each
+The status directory `<root>/data/status/` has one directory per role; each
 file has exactly one writer, its role:
 
 ```
-<root>/status/
+<root>/data/status/
   receive/alive.json     # receive role
   process/alive.json     # process role
   process/status.json    # process role
@@ -4007,7 +4086,7 @@ file has exactly one writer, its role:
 
 Each role creates its directory at start (with `status/`, mode 0750,
 owned by the service user, checked for writing like the other lukd
-directories). A `<root>/status.json` of an older release is ignored and
+directories). A `<root>/data/status.json` of an older release is ignored and
 can be deleted.
 
 ### Liveness
@@ -4049,9 +4128,11 @@ lukd does not interpret the liveness files: no command reads them.
 The process role writes `status/process/status.json` atomically (and
 may serve it as `GET /status` behind auth): an object with
 `pipelines`, one entry per
-(pipeline, sender), and `watch`, the evaluation of the watch rules of
+(pipeline, sender), `watch`, the evaluation of the watch rules of
 the storages (see `watch` under Storage and catalog), one record per
-watched series and per rule no series matches:
+watched series and per rule no series matches, `units`, the run steps
+and lukd run, `queue`, the uploads not processed yet, and `workspaces`,
+the leftover workspaces of lukd run:
 
 ```json
 {
@@ -4072,7 +4153,11 @@ watched series and per rule no series matches:
      "file": "", "state": "WARN",
      "message": "rule 2 (origin *-stage): no series matches",
      "size": 0, "copies": 0, "evaluated": "2026-10-04T12:00:00Z"}
-  ]
+  ],
+  "units": {"running": 3, "waiting": 2, "oldest_wait": 140},
+  "queue": {"entries": 7, "oldest_id": "20261004T115500Z-0a1b2c3d",
+            "oldest_received": "2026-10-04T11:55:00Z", "oldest_age": 300},
+  "workspaces": {"leftover": 0, "updated": "2026-10-04T12:00:00Z"}
 }
 ```
 
@@ -4094,6 +4179,28 @@ minute). The `watch` section is replaced by each evaluation; a storage
 without rules has no records. lukd reads a `status.json` of an older
 release (an array of pipeline entries) and writes the object from then
 on.
+
+`units` and `queue` are written with every `status.json` and at least
+on every janitor pass (about every minute):
+
+- `units`: `running` the step units of lukd run that started (the `s`
+  frame) and did not end, `waiting` the steps waiting for a unit slot of
+  lukd run (connected, no `s` frame yet; see `limits.units.max` under
+  Jobs with other users), `oldest_wait` the seconds the longest of them
+  has waited so far (0 without one). Nested jobs are not counted.
+- `queue`: `entries` the committed queue entries whose pipelines have
+  not all ended, over every queue directory; `oldest_id`,
+  `oldest_received` and `oldest_age` (seconds since its `received`) of
+  the oldest of them by acceptance order, omitted without one.
+  `oldest_age` is how long files wait unprocessed: the basis of an
+  alert on a queue that grows faster than lukd processes it.
+
+`workspaces` repeats `/run/luk/workspaces.json` (see Jobs with other
+users, Workspace), read on every janitor pass: `leftover` the
+workspaces lukd run could not remove, `updated` when the count last
+changed; absent while the file does not exist. Any `leftover` above 0
+is meant to alert at once: in a healthy pipeline it never happens (a
+stuck job or an escaped container).
 
 For the pipelines lukd reports facts only. Their thresholds ("expect
 every 24h, at least 300M") live in the checkmk check, generated by
@@ -4202,15 +4309,15 @@ listen:
 - `eab` (CAs that require an external account binding, for example
   ZeroSSL, Google): `kid` and the HMAC key, base64url as the CA prints
   it (standard base64 is accepted), either inline as `key` or in
-  `key_file` (one line; a relative path resolves against `root`; read
+  `key_file` (one line; a relative path resolves against `<root>/data`; read
   at load, so it must be readable by `luk`, like the configuration).
   The running file keeps the key's sha256, never the key.
 - One account per directory: the account key is created on first use
   and shared by every acme listener with that `directory`, which must
   therefore agree on `email` and `eab` (a validation error otherwise).
   Different directories (staging next to production) are independent.
-- Cache: `<root>/acme/<directory host and path>/` (for example
-  `/var/lib/luk/acme/acme-v02.api.letsencrypt.org_directory/`), created
+- Cache: `<root>/data/acme/<directory host and path>/` (for example
+  `/var/lib/luk/data/acme/acme-v02.api.letsencrypt.org_directory/`), created
   by the receive role with mode 0700: `account.key` and `<name>.pem`
   (key and chain), files 0600. Staging and production never mix. Keep
   the cache across reinstalls: an empty cache means a new account and
@@ -4276,17 +4383,18 @@ listen:
 
 #### `lukd tls acme`
 
-The commands work on the cache directories under `<root>/acme/` and talk
+The commands work on the cache directories under `<root>/data/acme/` and talk
 to the running receive role only through files there (no socket, no
-signal). Run as root they run again as the owner of `<root>/acme` (the
+signal). Run as root they run again as the owner of `<root>/data/acme` (the
 service user), as `lukd queue` does for root; any other user gets `lukd
-tls acme must run as root or as <owner> (owner of <root>/acme)`. Both
+tls acme must run as root or as <owner> (owner of <root>/data/acme)`. Both
 `lukd tls acme ...` as root and `runuser -u luk -- lukd tls acme ...` work.
-`<root>/acme` lies in a directory of the service user, so a symlink there
-is refused (`lukd tls acme: <root>/acme is a symlink`), never followed.
-While `<root>/acme` does not exist they run again as the owner of
-`<root>` instead: root never creates or writes a cache file itself in a
-directory the service user could replace meanwhile.
+`<root>/data/acme` is a directory of the service user (see Service, State),
+so a symlink there is refused (`lukd tls acme: <root>/data/acme is a
+symlink`), never followed. While `<root>/data/acme` does not exist they run
+again as the owner of `<root>/data` instead: root never creates or
+writes a cache file itself in a directory the service user could replace
+meanwhile.
 
 - `lukd tls acme ls [--json]`: every certificate of every cache
   directory: name, the listeners using it per the current configuration
@@ -4360,12 +4468,12 @@ systemctl enable --now lukd
   the evaluation of the watch rules. `SIGHUP` reloads the configuration (see Reload); the
   queue directories of new endpoints are watched from then on.
 
-Both roles write their liveness file `<root>/status/<role>/alive.json`
+Both roles write their liveness file `<root>/data/status/<role>/alive.json`
 (see Status).
 
 Each role runs once per `root`: `lukd receive` holds a `flock` on
-`<root>/.lukd-receive.lock`, `lukd process` on
-`<root>/.lukd-process.lock`, for its lifetime; a second instance
+`<root>/data/receive.lock`, `lukd process` on
+`<root>/data/process.lock`, for its lifetime; a second instance
 refuses to start (`another lukd runs the <role> role on <root>`).
 
 Both roles touch the storages: receive claims once files and removes
@@ -4392,15 +4500,35 @@ at 0 and every catalog is rebuilt). A base must be on a local filesystem
   or others); `identity.key` owned `root:luk`, mode 0640, created by the
   package (see Identity key); `password.d/` owned `root:luk`, mode 0750,
   its files 0640 (see Encryption).
-- State: `/var/lib/luk` (`quota.json` of the quotas and `accepted.json`
-  of the acceptance order among it), shared by
-  both role units and created by tmpfiles.d (`deploy/luk.tmpfiles.conf`, installed as
-  `/etc/tmpfiles.d/luk.conf`).
-  `lukd` creates the subdirectories (`tls`, `queue/<endpoint>`, `gpg-cache`,
-  `storage/<name>` with its `.db/` and `file/`, `acme/<directory>` with
-  mode 0700, secret queues with mode 0700) at start and refuses to start
-  when one is not writable, or when a storage base holds anything else
-  (see Layout under Storage). `/run/luk/volatile` of the volatile secrets comes from
+- State: the `root` (default `/var/lib/luk`), shared by both role units.
+  It must lie on btrfs: both roles check `statfs` of `<root>`
+  (`BTRFS_SUPER_MAGIC`) and refuse to start otherwise (`root <root>: not
+  a btrfs filesystem`), and `lukd check` reports it; the inputs and
+  results of the run steps are clones (`FICLONE`) on it. tmpfiles.d
+  (`deploy/luk.tmpfiles.conf`, installed as `/etc/tmpfiles.d/luk.conf`)
+  creates the root and its two entries, nothing else:
+
+  ```
+  /var/lib/luk/      root:luk   0750  the root
+    data/            luk:luk    0750  everything lukd writes
+    root/            root:root  0711  root's: the workspaces of lukd run (root/job/)
+  ```
+
+  The service user is the owner of `<root>/data`: lukd run, the commands
+  that run again as the service user (`lukd queue`, `lukd check` as
+  root, `lukd tls acme`) and the checks of the configuration take it
+  from there. `<root>` is root's, so the service user can neither rename
+  nor replace `<root>/root`. A `root` other than the default needs the
+  same three lines in a tmpfiles.d snippet with its path.
+  `lukd` creates what it writes below `<root>/data` itself, as it needs
+  it: the locks and running files of the roles (`<role>.lock`,
+  `<role>.running.json`), `accepted.json` and `quota.json` directly in
+  it, and the directories `status/<role>`, `work/`, `tls/`, `gpg-cache/`,
+  `acme/<directory>` (mode 0700), `queue/<endpoint>` and
+  `storage/<name>` with its `.db/` and `file/` (for the relative paths
+  of the configuration), secret queues with mode 0700. It refuses to
+  start when one is not writable, or when a storage base holds anything
+  else (see Layout under Storage). `/run/luk/volatile` of the volatile secrets comes from
   tmpfiles.d too; both role units have it in `ReadWritePaths` (see
   Volatile secrets). So does `/run/luk/nonces` (`luk:luk`, 0700) of the
   nonce cache (`auth.nonces`), in `ReadWritePaths=-/run/luk/nonces` of
@@ -4420,16 +4548,14 @@ Drop-ins by unit:
 | grant | lukd-receive | lukd-process |
 |---|---|---|
 | storage base or secret queue outside `/var/lib/luk` and `/run/luk/volatile` (`ReadWritePaths`) | yes | yes |
-| place a run program writes to (`ReadWritePaths`) | | yes |
-| docker socket (`SupplementaryGroups=docker`) | | yes |
-| GPG home or keys of run programs (`ReadWritePaths`, `BindReadOnlyPaths`) | | yes |
-| resource limits of pipelines (`MemoryMax`, `CPUQuota`, `TasksMax`) | | yes |
+| resource limits of the process role (`MemoryMax`, `CPUQuota`, `TasksMax`) | | yes |
 
-#### Sandbox of `run` steps
+#### Sandbox of lukd process
 
-A `run` program is a child of `lukd process`: it runs in
-the same cgroup, as the same user, with the same systemd sandbox. The unit
-is the single place that decides what a pipeline program may do:
+`lukd process` runs the store and encrypt steps itself; `run` programs
+and jobs never run inside it: each runs in a transient unit of its own,
+as another user, through `lukd run` (see Jobs with other users). The unit
+of the process role decides what lukd itself may do:
 
 - user `luk` and its groups only; `NoNewPrivileges=yes` makes `sudo` and
   setuid binaries fail;
@@ -4437,11 +4563,10 @@ is the single place that decides what a pipeline program may do:
   `ReadWritePaths` (`/var/lib/luk` and `/run/luk/volatile` by default),
   `/dev`, `/proc`, `/sys`;
 - `ProtectHome=read-only`: `/home`, `/root`, `/run/user` are read-only;
-- `PrivateTmp=yes`: `/tmp` is private to the service (shared by `lukd` and
-  its programs, not with the host);
+- `PrivateTmp=yes`: `/tmp` is private to the service;
 - no capability (`CapabilityBoundingSet=`);
 - the keys of the receive role are out of reach although both roles run
-  as `luk`: `InaccessiblePaths=` hides `<root>/tls`, `<root>/acme` and
+  as `luk`: `InaccessiblePaths=` hides `<root>/data/tls`, `<root>/data/acme` and
   `/run/luk/nonces` (default paths; another `root` or tls files elsewhere
   need theirs in a drop-in), `SystemCallFilter=~@debug` forbids ptrace and
   `process_vm_readv`, and `PrivatePIDs=yes` (systemd 257) gives the role
@@ -4449,20 +4574,18 @@ is the single place that decides what a pipeline program may do:
   receive` itself is non-dumpable (`PR_SET_DUMPABLE` 0), so no other
   process of `luk` may attach to it or read its memory;
 - network access is not restricted;
-- CPU, memory and task limits of the unit apply to `lukd` and all its
-  programs together.
+- CPU, memory and task limits of the unit apply to the process role; the
+  units of the run steps run in `system.slice`, outside them.
 
 Anything more is granted explicitly in a drop-in (examples in
-`deploy/lukd-process.service.d/` and in the comments of
-`deploy/lukd-process.service`), never by changing the shipped unit. A
+`deploy/lukd-process.service.d/`), never by changing the shipped unit. A
 drop-in lives in `/etc/systemd/system/lukd-process.service.d/` (storage
 bases also in `lukd-receive.service.d/`) and is applied with `systemctl
 daemon-reload && systemctl restart lukd`. Examples:
 
 ```ini
 # /etc/systemd/system/lukd-process.service.d/storage.conf
-# A storage base (also in lukd-receive.service.d/) or a place a run
-# program writes to, outside /var/lib/luk.
+# A storage base (also in lukd-receive.service.d/) outside /var/lib/luk.
 # The directory must exist and be writable by luk:
 #   install -d -o luk -g luk -m 0750 /storage
 [Service]
@@ -4470,87 +4593,100 @@ ReadWritePaths=/storage
 ```
 
 ```ini
-# /etc/systemd/system/lukd-process.service.d/docker.conf
-# A run program that delegates heavy work (a MariaDB restore,
-# mariabackup) to a container through the docker socket.
-[Service]
-SupplementaryGroups=docker
-```
-
-```ini
 # /etc/systemd/system/lukd-process.service.d/limits.conf
-# Keep a heavy pipeline from starving uploads and downloads.
+# Keep heavy store and encrypt steps from starving uploads and downloads.
 [Service]
 MemoryMax=4G
 CPUQuota=200%
 TasksMax=512
 ```
 
-```ini
-# /etc/systemd/system/lukd-process.service.d/gpg.conf
-# A GPG home a run program encrypts or signs with; gpg writes lock files
-# and the trustdb there. Files are still subject to normal permissions.
-[Service]
-ReadWritePaths=/home/backup/.gnupg
-```
-
-```ini
-# /etc/systemd/system/lukd-process.service.d/read.conf
-# Read-only access to a path outside the defaults (for example a key a
-# run program needs).
-[Service]
-BindReadOnlyPaths=/etc/site/backup/keys
-```
-
 Check the effective sandbox with `systemctl cat lukd-process` and
-`systemd-analyze security lukd-process`. Heavy or privileged work
-(restoring a database, anything needing root) belongs in a container or a
-separate service that the `run` program talks to, not in the lukd units.
+`systemd-analyze security lukd-process`. Heavy work belongs in a `run`
+step, work that needs credentials or another user in a job of run.d,
+work that needs root in a separate service a job talks to; never in the
+lukd units.
 
 #### Jobs with other users (lukd run)
 
-A `run` program or a `relay` step may need what `luk` must not have:
-credentials of a bucket, a user with access to a backup host, a group that owns a target
-directory. `lukd run` is a small root helper that runs such work as a
-job the admin allowlisted, as the user the admin chose, on the step's own
-work directory. No polkit and no sudo are involved.
+Every `run` step and every job runs through `lukd run`, a small root
+helper, as a transient unit with a workspace of its own: a `run` program
+as a dynamic user, a job the admin allowlisted (the job of a `run: {job}`
+step, of a `relay` step, or a nested job of `luk-job run`) as the user
+the admin chose. A job may need what `luk` must not have: credentials of
+a bucket, a user with access to a backup host, a group that owns a
+target directory. Files reach a unit and leave it as open descriptors;
+the unit never sees anything of lukd but its workspace. No polkit and no
+sudo are involved.
 
 - Units: `deploy/lukd-run.socket` (`ListenStream=/run/luk/run.sock`,
-  `root:luk` 0660, `Accept=yes`, at most 16 connections) and
+  `root:luk` 0660, `Accept=yes`, `MaxConnections=1024` as a backstop; the
+  limit of running units is `limits.units.max` of `run.yaml`, below) and
   `deploy/lukd-run@.service` (root, one instance per connection, the
   connection on stdin and stdout, stderr to the journal,
-  `ExecStart=/usr/bin/lukd run`, sandboxed: read-only file
-  system, `AF_UNIX` only, `CapabilityBoundingSet=CAP_DAC_READ_SEARCH` to
-  check the work directories, `ProtectProc=invisible` (processes of
-  other users hidden), `RuntimeDirectory=lukd-run` 0700 with
-  `RuntimeDirectoryPreserve=yes` for the state locks, see below;
-  `MemoryMax=128M`, `TasksMax=64` and `RuntimeMaxSec=15d` as a
-  backstop: they bound the helper, not the job, which systemd-run starts
-  as a transient unit of its own in `system.slice`).
-  `/run/luk` comes from tmpfiles.d (`deploy/luk.tmpfiles.conf`,
-  `root:luk` 0750). Enable with `systemctl enable --now lukd-run.socket`.
+  `ExecStart=/usr/bin/lukd run`, sandboxed: read-only file system,
+  `AF_UNIX` only, no capability (`CapabilityBoundingSet=`),
+  `ProtectProc=invisible` (processes of other users hidden),
+  `RuntimeDirectory=lukd-run` 0700 with `RuntimeDirectoryPreserve=yes`
+  for the locks, see below; `MemoryMax=128M`, `TasksMax=64` and
+  `RuntimeMaxSec=15d` as a backstop: they bound the helper, not the unit
+  it starts, which systemd-run starts as a transient unit of its own in
+  `system.slice`). `/run/luk` comes from tmpfiles.d
+  (`deploy/luk.tmpfiles.conf`, `root:luk` 0750). Enable with `systemctl
+  enable --now lukd-run.socket`. `deploy/lukd-run-prune.service` and
+  `deploy/lukd-run-prune.timer` remove leftover workspaces (see
+  Workspace below).
 - `lukd-process` (and `lukd`) need no drop-in: `ProtectSystem=strict`
   leaves `/run` read-only, and connecting to a socket is not a write to
-  the file system. `lukd-receive` never runs jobs and has
+  the file system. `lukd-receive` never runs units and has
   `InaccessiblePaths=-/run/luk/run.sock`.
 - `lukd-receive` and `lukd-run@` hide the passwords of the encrypt steps
   (`InaccessiblePaths=-/etc/site/lukd/password.d`, see Encryption).
 - Global settings, optional: `/etc/site/lukd/run.yaml`
   (`deploy/run.yaml.example`), owned `root:root`, mode 0600:
-  - `root`: work directories must live under `<root>/work`; default
-    `/var/lib/luk`. Compared as written (see Request flow), so it must
-    be the same path as the lukd `root`; `lukd check` run as root warns
-    when it is not.
-  - `peer`: the only user allowed to connect (`SO_PEERCRED` of the
-    connection); default the owner of `root`.
+  - `root`: the lukd root; default `/var/lib/luk`. It must be the same
+    path as the lukd `root` (every unit gets it as an empty tmpfs, see
+    Sandbox of a unit); `lukd check` run as root warns when it is not.
+    The workspaces live in `<root>/root/job`: lukd run creates `job/`
+    itself on demand (`root:root` 0711). `<root>/root` and `job/` must
+    pass the rule of the directories above run.d (below): every directory
+    from `/` down to them owned by root and not writable by group or
+    others (`<root>` itself is `root:luk` 0750, `<root>/root` `root:root`
+    0711 from tmpfiles.d).
+  - The only user allowed to connect (`SO_PEERCRED` of the connection)
+    is the service user, the owner of `<root>/data`; there is no setting
+    for it. When `<root>/data` is owned by root or is a symlink (checked
+    with `lstat`), lukd run closes every connection without an answer
+    and logs the reason.
   - `config`: the main file of the lukd configuration, an absolute
-    path; default `/etc/site/lukd/config.yaml`. It decides which
-    pipelines may run a job (see Pipelines of a job below) and names
-    the paths a job must not see (see Sandbox of a job); `lukd
-    check` run as root warns when it is not the checked file, and when
-    it is but lukd run would refuse it.
-  - `hide`: absolute paths, further ones a job must not see (see
-    Sandbox of a job); default none.
+    path; default `/etc/site/lukd/config.yaml`. It decides what each
+    step runs (see What a step runs below) and names the paths a unit
+    must not see (see Sandbox of a unit); `lukd check` run as root
+    warns when it is not the checked file, and when it is but lukd run
+    would refuse it.
+  - `hide`: absolute paths, further ones a unit must not see (see
+    Sandbox of a unit); default none.
+  - `limits.units.max`: the units of steps (`run`, `run: {job}`,
+    `relay`) running at once, at least 1, default 16. Each step holds
+    its connection for its whole run. A step request over the limit
+    waits in lukd run for a free slot (an exclusive `flock` on one of
+    `/run/lukd-run/slot/<n>.lock`, `<n>` from 1 to the limit, polled),
+    its unit not yet started, without a limit, as an upload waits for
+    `queue.concurrency`: the wait does not count toward the pipeline
+    `timeout`, which measures work only and starts when the unit starts
+    (the `s` frame, see Frames). A burst of uploads so lengthens the
+    queue instead of losing uploads; the waiting steps and the age of
+    the oldest unprocessed upload show in `status.json` (see Status),
+    and the operator decides (a higher `limits.units.max`, another
+    `queue.concurrency`), knowing that files wait unprocessed longer.
+    When lukd process closes the connection meanwhile (a stop of lukd),
+    lukd run gives up without starting the unit. A nested job takes no
+    slot: it runs inside a step that holds one, one at a time, so at
+    most twice the limit of units run, and a step never waits for a slot
+    its own nested job needs. `lukd check` warns when the sum of
+    `queue.concurrency` of the pipelines with a `run` or `relay` step
+    exceeds `limits.units.max` (it reads `run.yaml` only when run as
+    root): steps would then wait in lukd run rather than in the queue.
 - Jobs: `/etc/site/lukd/run.d/<job>.yaml`, one job per file
   (`deploy/run.d/s3-upload.yaml.example`). The job name is the file base
   name, `[a-z0-9][a-z0-9._-]*`. Files not ending in `.yaml`, dotfiles and
@@ -4574,254 +4710,353 @@ work directory. No polkit and no sudo are involved.
     -p User=<name>`, see below).
   - `group` (optional, needs `user`): replaces the primary group of the
     user (`--gid`).
-  - `groups` (optional): extra supplementary groups. The job always gets
-    the primary group of the peer (normally `luk`, the group of the work
-    directories) as a supplementary group, so it can read the inputs and
-    `meta.json` without any setting; `groups` adds to it
-    (`-p SupplementaryGroups=`, the peer's group first, duplicates
-    dropped). The group of the work directory itself is not used: `luk`
-    could change it to any group it is a member of. The user keeps its own
-    primary and supplementary groups.
-  - `command` (required): a clean absolute path; it gets the work
-    directory as its only argument, in `LUK_WORK` and as its current
-    directory.
+  - `groups` (optional): extra supplementary groups
+    (`-p SupplementaryGroups=`, duplicates dropped). The user keeps its
+    own primary and supplementary groups. A unit gets no group of the
+    peer: its workspace is its own.
+  - `command` (required): a clean absolute path; it gets the workspace
+    as its only argument, in `LUK_WORK` and as its current directory.
   - `credentials`: `name: path` entries passed as systemd
     `LoadCredential=name:path`; the job reads them from
     `$CREDENTIALS_DIRECTORY/<name>`, the files themselves stay root-only.
   - `timeout`: `RuntimeMaxSec` of the job, at least `1s` and under 7
     days (no step waits longer, see the pipeline `timeout`); default
-    `1h`.
+    `1h`. The step of a `run: {job}` or `relay` step also ends at the
+    pipeline `timeout`, whichever comes first.
   - `env`: fixed environment. Every `LUK_*` name is reserved (a
     config error): lukd run sets them, see Environment and state below.
   - `pipelines`: removed, a config error of the job (`pipelines:
     removed: list the job in jobs of the run step of the lukd
-    configuration, a relay step allows its own job`); the pipelines of
-    a job come from the lukd configuration (see Pipelines of a job).
+    configuration, a relay step allows its own job`); the steps that may
+    run a job come from the lukd configuration (see What a step runs).
   - `state` (optional): `locked` or `shared`, a state directory kept
     between runs, one per job and pipeline; absent means none. See
     Environment and state below.
-- Pipelines of a job: the pipelines of the lukd configuration with a
-  step `relay: <job>` and those with a `run` step whose `jobs` lists
-  `<job>`. lukd run reads them per connection, and only when the
-  request gets that far, from the `config` of `run.yaml` and the
-  `*.yaml` of `config.d` next to it (dotfiles left out), parsing only
-  `pipeline.<name>.steps[]` (`run`, `relay`, `jobs`) and nothing the
-  files name (keys, passwords); the rest of the configuration is
-  lukd's to validate. A request whose work directory belongs to another
-  pipeline is refused (`job <job>: pipeline <p> not allowed`) before
-  the work directory is looked at and before any lock, state directory
-  or dynamic user exists for it, so `luk` cannot make root create them
-  for names of its choosing. The files are read as the run.d files are:
-  owned by root, not writable by group or others, regular (opened with
-  `O_NOFOLLOW|O_NONBLOCK`, so a symlink or a FIFO is refused), at most
-  1 MiB each, at most 256 snippets, `config.d` a directory (not a
-  symlink) with the same owner and mode rules, and every directory from
-  `/` down to it as above `run.d`. A missing main file (or a missing
-  directory above it) allows no pipeline. A refused file, a malformed
-  one (YAML that does not parse, a `relay` or `jobs` of the wrong type,
-  a second document), a step with both `run` and `relay` or a pipeline
-  defined in two files refuses the whole configuration: no pipeline may
-  run a job, and the reason goes to the journal; `lukd check` run as
-  root reports it as a warning. The files are the ones on disk, not the configuration
-  lukd runs with: an edit counts at the next connection, before a
-  reload of lukd.
-- Request flow: `luk-job run --job NAME` connects and sends one JSON
-  line `{"job": NAME, "work": <work>, "env": {NAME: value, ...}}`: valid
-  UTF-8, at most 32 KiB with the newline, exactly one flat object
-  (`job` and `work` strings, both required, `env` an optional object of
-  at most 16 string values; an unknown or repeated key, a nested or
-  non-string value and data after the object make it malformed).
-  `lukd run` refuses a peer other than `peer` (closing without an
-  answer), then a request that is malformed, names an unknown or
-  disabled job, or whose work directory is not accepted:
-  - Lexically, before anything on disk is looked at: an absolute,
-    clean path (no `.` or `..` element, no repeated or trailing slash)
-    `<root>/work/<id>/<pipeline>/<step>` with `<root>` the `root` of
-    `run.yaml` as written (exactly these three levels, the id a queue
-    entry id `YYYYMMDDTHHMMSSZ-<8 hex digits>`, the pipeline a valid
-    pipeline name, `[A-Za-z0-9_.-]` not starting with a dot or a dash, at
-    most 128 bytes, the step a decimal number from 1 without leading
-    zeros), without a control character, white space, `$` or `%`. Then
-    the pipeline must be one of the pipelines of the job (above).
-  - On disk: `<root>` is opened as configured (it may be a symlink, it
-    is root's setting); `work`, `<id>`, `<pipeline>` and `<step>` are
-    opened one by one below it with `O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK`,
-    so a symlink (also `<root>/work` itself, which `luk` owns), a FIFO or
-    anything else but a directory is refused without following or
-    blocking; `<step>` must be owned by the peer. Symlinks are never
-    resolved, and lukd run opens nothing inside the work directory (no
-    `meta.json`, no `in/`).
-  - Every refused work directory gets the same answer, `lukd run: work
-    directory refused`, whatever the reason; the reason (with the path
-    and the error of the system call) goes to the journal of
-    `lukd-run@.service` only, so the answer tells `luk` nothing about
-    paths root can see.
-  The pipeline name comes from the path; the request has no field for
-  it. It runs
-  the job as `systemd-run --wait --collect --pipe --quiet
-  --expand-environment=no --unit=lukd-run-<job>-<random>
+  - `privileged` (optional, needs `user`): `true` runs the job without
+    `NoNewPrivileges=yes`, for the setuid `newuidmap` of rootless podman
+    (see Containers). Every setuid binary of the host then works in that
+    job (`sudo` as far as the sudoers allow the job user, `su`,
+    `newuidmap`). Every other unit has `NoNewPrivileges=yes`:
+    `privileged` on a job without `user` is a config error of the job
+    (`privileged needs user`), and a `run` program never gets it.
+- What a step runs: the `run` program of a `run: <program>` step, the job
+  of a `run: {job}` or `relay` step, and as nested jobs the jobs listed
+  in `jobs` of a `run: <program>` step. lukd run reads them per
+  connection, and only when the request gets that far, from the `config`
+  of `run.yaml` and the `*.yaml` of `config.d` next to it (dotfiles left
+  out), parsing only `pipeline.<name>.timeout` and
+  `pipeline.<name>.steps[]` (`run`, `env`, `relay`, `jobs`) and nothing
+  the files name (keys, passwords); the rest of the configuration is
+  lukd's to validate. A step request for a step that is neither a `run`
+  nor a `relay` step (`pipeline <p> step <n>: not a run or relay step`)
+  and a nested job its step does not list in `jobs` (`job <job>: not
+  allowed for pipeline <p> step <n>`) are refused before any slot, lock,
+  workspace, state directory or dynamic user exists for it, so `luk`
+  cannot make root create them for names of its choosing. A `run`
+  program must be a clean absolute path with the path rules of
+  `command` (see Sandbox of a unit). The files are read as the run.d
+  files are: owned by root, not writable by group or others, regular
+  (opened with `O_NOFOLLOW|O_NONBLOCK`, so a symlink or a FIFO is
+  refused), at most 1 MiB each, at most 256 snippets, `config.d` a
+  directory (not a symlink) with the same owner and mode rules, and
+  every directory from `/` down to it as above `run.d`. A missing main
+  file (or a missing directory above it) allows no step. A refused file,
+  a malformed one (YAML that does not parse, a `run`, `relay`, `env` or
+  `jobs` of the wrong type, a second document), a step with both `run`
+  and `relay` or a pipeline defined in two files refuses the whole
+  configuration: no step may run, and the reason goes to the journal;
+  `lukd check` run as root reports it as a warning. The files are the
+  ones on disk, not the configuration lukd runs with: an edit counts at
+  the next connection, before a reload of lukd.
+- Request flow: lukd process connects and sends one JSON line, with the
+  channel of the unit attached to it (`SCM_RIGHTS`, exactly one
+  descriptor, a Unix socket; see Channel of a unit). A step:
+  `{"pipeline": P, "step": N, "id": ID, "env": {NAME: value, ...}}`; a
+  nested job of that step adds `"job": NAME`. Valid UTF-8, at most 32
+  KiB with the newline, exactly one flat object (`pipeline` and `id`
+  strings and `step` a number, all required, `job` an optional string,
+  `env` an optional object of at most 16 string values; an unknown or
+  repeated key, a nested or non-string value, data after the object and
+  a request without its one descriptor make it malformed). There is no
+  path in the request. `lukd run` refuses a peer other than the service
+  user (closing without an answer), then a request that is malformed, whose
+  `pipeline` is not a valid pipeline name (`[A-Za-z0-9_.-]`, not
+  starting with a dot or a dash, at most 128 bytes), whose `step` is not
+  a number from 1, whose `id` is not a queue entry id
+  (`YYYYMMDDTHHMMSSZ-<8 hex digits>`), that the configuration does not
+  allow (above), or that names an unknown or disabled job. The program
+  of a `run` step comes from the configuration, never from the request.
+  It runs the unit as `systemd-run --wait --collect --pipe --quiet
+  --expand-environment=no --unit=<unit>
   (--uid=<user> | -p DynamicUser=yes -p User=<dynamic user>)
-  --working-directory=<work> [--gid=<group>]
-  -p SupplementaryGroups=<peer group> [<groups>] -p PrivateTmp=yes
-  -p ProtectProc=invisible -p InaccessiblePaths=-<config dir>
-  -p InaccessiblePaths=-/run/luk [-p InaccessiblePaths=-<path> ...]
-  -p TemporaryFileSystem=<root>:ro -p BindPaths=<work>:<work>:norbind
+  --working-directory=<workspace> [--gid=<group>]
+  [-p SupplementaryGroups=<groups>] [-p NoNewPrivileges=yes]
+  -p PrivateTmp=yes -p ProtectProc=invisible
+  -p InaccessiblePaths=-<config dir> -p InaccessiblePaths=-/run/luk
+  [-p InaccessiblePaths=-<path> ...] -p TemporaryFileSystem=<root>:ro
+  -p BindPaths=<workspace>:<workspace>:norbind
+  -p ExecStartPre=+<lukd> run workspace create <root> <unit>
+  -p ExecStopPost=+<lukd> run workspace remove <root> <unit>
   [-p StateDirectory=lukd-run/<job>/<pipeline> -p StateDirectoryMode=0700]
-  -p LoadCredential=... -p RuntimeMaxSec=<timeout> [--setenv=K=V ...]
-  --setenv=LUK_WORK=<work> ... --setenv=LUK_ORIGIN=<origin>
-  --setenv=LUK_JOB=<job> --setenv=LUK_TMP=/var/tmp
+  [-p LoadCredential=...] -p RuntimeMaxSec=<timeout> [--setenv=K=V ...]
+  --setenv=LUK_WORK=<workspace> ... --setenv=LUK_ORIGIN=<origin>
+  --setenv=TMPDIR=<workspace>/tmp [--setenv=LUK_JOB=<job>]
   [--setenv=LUK_STATE=/var/lib/lukd-run/<job>/<pipeline>]
-  <lukd> run check-work <root> <work> <dev> <ino> -- <command> <work>`
-  (`--expand-environment=no` needs systemd 254 or
-  later; the lukd package requires systemd 257 for `PrivatePIDs=`), a transient unit outside
-  both the lukd and the lukd run sandbox, and streams the job's stdout and
-  stderr back. `<work>` is the work path of the request as checked
-  (never resolved): the job's argument, its `LUK_WORK` and its current
-  directory, as for a `run` program. The check is at request time, and
-  `luk` owns `<root>`, `<root>/work` and `<root>/work/<id>`: it can swap
-  one of them for a symlink before systemd binds `<work>` into the unit,
-  and systemd binds whatever the path then resolves to, for every
-  process of the unit on its own. So the process of the job checks
-  again from inside its namespace before it becomes the command (see
-  Sandbox of a job): a work directory that is not the one checked fails
-  the job before its command starts.
-  `<peer group>` is the primary group
-  of the peer (passwd), by name, or the numeric gid when it has no name or
-  one that is not a plain account name.
-- Sandbox of a job: the job runs as another user with credentials of
-  its own, but with the peer's group, so it would read whatever that
-  group reads. Its unit hides all of that:
+  <lukd> run workspace run <workspace> -- <command> <workspace>`, with
+  the channel as its stdin (`--expand-environment=no` needs systemd 254
+  or later; the lukd package requires systemd 257 for `PrivatePIDs=`), a
+  transient unit outside both the lukd and the lukd run sandbox, and
+  streams the unit's stdout and stderr back. lukd run never reads from
+  the channel. `<unit>` is `lukd-run-<job>-<random>` for a job and
+  `lukd-step-<pipeline>-<step>-<random>` for a `run` program (lowercase,
+  every character outside `[a-z0-9-]` replaced by `-`, `<random>` 12 hex
+  digits); `<workspace>` is `<root>/root/job/<unit>`; `<command>` is the
+  `run` program or the `command` of the job; `<timeout>` is the pipeline
+  `timeout` for a `run` program and the job `timeout` for a job;
+  `NoNewPrivileges=yes` is left out only for a job with
+  `privileged`.
+- Workspace: a btrfs subvolume per unit, `<root>/root/job/<unit>`, owned
+  by the user of the unit, mode 0700. Every btrfs operation is an ioctl
+  or system call of lukd itself (`statfs` for the magic,
+  `BTRFS_IOC_SUBVOL_CREATE_V2`, `BTRFS_IOC_TREE_SEARCH`,
+  `BTRFS_IOC_SNAP_DESTROY_V2`, `FICLONE`): no btrfs-progs, and root runs
+  no external program for it.
+  - `workspace create` (`ExecStartPre=+`, root, outside the sandbox) runs
+    after systemd allocated the user of the unit: a dynamic user exists
+    from the start of its unit, before `ExecStartPre`. It reads the UID
+    and GID of the unit from systemd (`systemctl show -p UID -p GID
+    --value <unit>`), never from the environment. It opens `<root>/root`
+    element by element from `/` with `O_DIRECTORY|O_NOFOLLOW` and checks
+    the rule above (owned by root, not writable by group or others),
+    creates `job/` below it when missing (`mkdirat`, `root:root` 0711)
+    and opens and checks it the same way, checks with `statfs` that it
+    lies on btrfs, creates the subvolume `<unit>` from that descriptor
+    (`BTRFS_IOC_SUBVOL_CREATE_V2`) and sets its owner and mode (`fchown`,
+    `fchmod` 0700), nothing else: the wrapper creates what lies inside,
+    as the user of the unit. A failure ends the unit before its command
+    starts, with the reason in the journal of the unit. `BindPaths=` of
+    the workspace is applied when the main process starts, after
+    `workspace create`.
+  - `workspace remove` (`ExecStopPost=+`, root) runs once the unit
+    stopped, also after a failure or a timeout kill. systemd runs
+    `ExecStopPost=` only after every process of the cgroup ended (the
+    stop sequence `stop`, `stop-sigterm`, `stop-sigkill`, `stop-post`,
+    with `KillMode=control-group`), so the mount namespace of the unit,
+    the only place the workspace is bound, is gone by then: a requirement
+    of the unit, which therefore keeps `KillMode=control-group`. It
+    deletes every subvolume the job created inside the workspace first,
+    leaves first, then the workspace itself: the nested ones are the
+    `ROOT_REF` items of the tree of tree roots below the id of the
+    workspace (`BTRFS_IOC_TREE_SEARCH`), each deleted by its id
+    (`BTRFS_IOC_SNAP_DESTROY_V2` with `BTRFS_SUBVOL_SPEC_BY_ID`), the
+    workspace from the descriptor of `<root>/root/job`. No file is read
+    and no tree of the job is walked. btrfs frees the space of a deleted
+    subvolume asynchronously, a moment later.
+  - A subvolume that is still mounted cannot be deleted (`EBUSY`): a
+    process stuck in uninterruptible I/O (state D) keeps the namespace of
+    the unit alive, and a job of the group `docker` may have bound its
+    workspace into a container that lives in the cgroup of the daemon.
+    `workspace remove` then logs `workspace not removed` (WARN, with the
+    unit and the error), leaves the subvolume and raises the count of
+    leftover workspaces at once (below).
+  - `<lukd> run workspace prune <root>` (root, `lukd-run-prune.service`,
+    pulled in by `lukd.service` at start and run every 15 minutes by
+    `lukd-run-prune.timer`) removes, as `workspace remove` does, every
+    workspace of `<root>/root/job` named like a unit (`lukd-run-*`,
+    `lukd-step-*`) whose unit is not active (`systemctl show -p
+    ActiveState --value <unit>.service` is `inactive` or `failed`, or the
+    unit is not loaded); any other entry is logged and left alone.
+  - The count of leftover workspaces lives in `/run/luk/workspaces.json`
+    (`root:luk` 0640, `{"leftover": N, "updated": "<UTC time>"}`,
+    replaced atomically under an exclusive `flock` on
+    `/run/lukd-run/workspaces.lock`): a failed `workspace remove` adds
+    one at once, and prune writes the number it still could not remove,
+    so only prune lowers it, when it cleans up. lukd process reports it
+    in `status.json` (`workspaces`, see Status). Any value above 0 is
+    meant to alert at once: in a healthy pipeline it never happens (a
+    stuck job or an escaped container).
+- Channel of a unit: lukd process creates it with
+  `socketpair(AF_UNIX, SOCK_SEQPACKET)`, sends one end with the request
+  and keeps the other; the unit gets it as the stdin of its main process,
+  the wrapper. Each packet is one JSON object ending in a newline (a JSON
+  line), at most 64 KiB, with at most one descriptor (`SCM_RIGHTS`),
+  present only on a frame that carries a file:
+  - lukd process to the wrapper: `{"t": "meta"}` with `meta.json`, then
+    `{"t": "in", "name": <name>}` with each file of the set and each
+    per-file meta file, then `{"t": "go"}`.
+  - The wrapper to lukd process, once the command ended: `{"t":
+    "status", "status": N, "fail": <text>}` (the exit status and the text
+    of `fail`, empty when none), then `{"t": "out", "name": <name>}` with
+    each top-level entry of `out/`, or a `{"t": "refuse", "name": <name>,
+    "reason": <reason>}` and no further result, then `{"t": "end"}`.
+  - A nested job (`luk-job run`): the wrapper sends `{"t": "job", "job":
+    NAME}`, `{"t": "in", "name": <name>}` with each `--file` and `{"t":
+    "go"}`; lukd process answers with `{"t": "o", "data": <base64>}` and
+    `{"t": "e", "data": <base64>}` for the output of the job, `{"t":
+    "out", "name": <name>}` with each of its results, and `{"t": "exit",
+    "status": N}`, or `{"t": "refused", "reason": <reason>}`. lukd
+    process asks lukd run for the job over a connection of its own, with
+    a channel of its own to the job's wrapper, and passes the
+    descriptors on in both directions without reading them.
+  - Limits: names follow the `out/` rules; at most 1024 `in` and 1024
+    `out` frames per run; lukd process checks every received descriptor
+    with `fstat` (a regular file) and its name before it clones it.
+    After the `status` frame the wrapper only opens and sends, so every
+    further frame must come within 1 minute of the one before (`run
+    <program>: no result for 1m`); the pipeline `timeout` holds
+    throughout. A channel that ends before `end` fails the step (`run
+    <program>: channel closed before the results`).
+  - A received descriptor stays valid after the unit ended and after its
+    file was deleted with the workspace: the wrapper exits after `end`
+    without waiting for an answer, `workspace remove` runs at once, and
+    lukd process clones the results at its own pace. Both sides clone a
+    received file (`FICLONE`), or copy it with `copy_file_range` on
+    `EXDEV`, `EOPNOTSUPP` or `EINVAL`, decided per file at runtime (an
+    input from a storage on another filesystem than the root), under a
+    temporary name, and rename it once complete.
+- The wrapper, `<lukd> run workspace run <workspace> -- <command>
+  <workspace>`, is the main process of the unit and runs as its user, in
+  its sandbox: it creates `in/`, `out/`, `tmp/` (0700) and `.luk/` (0700,
+  the socket `run.sock` of `luk-job run` in it), receives `meta.json` and
+  the inputs and clones them into the workspace (mode 0400), then starts
+  the command as a child (not with `exec`) with stdin `/dev/null` and its
+  own stdout and stderr, relays the requests of `luk-job run` (one at a
+  time) while it waits, and sends the results once the command ended.
+  An error before the command starts (an input it cannot clone) goes to
+  stderr as `lukd: job not started: <reason>`, reaches lukd process as
+  output of the unit, and the wrapper exits 1. The job can interfere
+  with its wrapper, which runs as the same user: that changes nothing,
+  since whatever the wrapper sends is what the job could have put in
+  `out/`, and lukd process validates all of it.
+- Sandbox of a unit: a unit runs as another user, with credentials of
+  its own, and must see nothing of lukd but its workspace:
   - `<config dir>`, the directory of `config` of `run.yaml` (default
     `/etc/site/lukd`), is inaccessible as a whole: the identity key,
     `password.d`, `gpg.d`, `ssh.d`, `config.yaml` and `config.d`,
     `run.yaml` and run.d, and every other file there. `LoadCredential=`
     still reads a credential from it, since systemd reads the
-    credentials as root before it sets up the namespace of the job.
-  - `/run/luk` is inaccessible: the socket of lukd run, the nonce cache
-    and the volatile secrets.
+    credentials as root before it sets up the namespace of the unit.
+  - `/run/luk` is inaccessible: the socket of lukd run, the nonce cache,
+    the volatile secrets and `workspaces.json`.
   - `<root>` is an empty read-only tmpfs (the TLS and ACME keys, the
-    WKD key cache, the status, the storages, the queues and the other
-    work directories are gone) with only `<work>` bound back
-    (non-recursively), read-write and at the same path, so `LUK_WORK`,
-    `LUK_IN`, `LUK_OUT`, `LUK_META`, the argument and the current
-    directory stay valid. `LUK_ROOT` names the tmpfs.
+    WKD key cache, the status, the storages, the queues, the work
+    directories and the other workspaces are gone) with only
+    `<workspace>` bound back (non-recursively), read-write and at the
+    same path, so `LUK_WORK`, `LUK_IN`, `LUK_OUT`, `LUK_META`, `LUK_TMP`,
+    the argument and the current directory stay valid.
   - Every other path of the lukd configuration that holds data or
     secrets is inaccessible as well, read per connection with the
-    pipelines (`config` and its `config.d`, see Pipelines of a job):
-    its `root` (default `/var/lib/luk`) and, when absolute, `auth.nonces`,
+    pipelines (`config` and its `config.d`, see What a step runs): its
+    `root` (default `/var/lib/luk`) and, when absolute, `auth.nonces`,
     `gpg.keys`, the `tls.cert`, `tls.key` and `tls.eab.key_file` of
     every listener, the `path` and `secret.path` of every endpoint and
-    the `base` of every storage (a relative one lies under `root`).
+    the `base` of every storage (a relative one lies under `<root>/data`).
     So are the paths of `hide` in `run.yaml` (absolute, for anything
     the configuration does not name). A path under `<root>`, `<config
     dir>`, `/run/luk` or another hidden path adds nothing.
-  - The unit starts `<lukd> run check-work <root> <work> <dev> <ino> --
-    <command> <work>`: `<lukd>` is the binary of lukd run, `<dev>` and
-    `<ino>` the device and inode of `<work>` as lukd run checked it. In
-    the namespace of the job and as its user, it opens `<root>`
-    (following a symlink, as lukd run does) and every element below it
-    with `O_PATH|O_NOFOLLOW` (no privileges needed). Unless each is a
-    directory and `<work>` is the checked one, it exits 1 with `lukd:
-    job not started: <reason>` on stderr, which reaches the peer as
-    the output of the job, and the command never runs. Otherwise it
-    executes `<command> <work>` in its own place: the same process (the
-    main PID of the unit), the same namespace, no window after the
-    check. The job sees only its own argv (`<command> <work>`) and the
-    environment of the unit.
-  - `ProtectProc=invisible`: the processes of other users (lukd, its
-    `run` programs, other jobs) are hidden in `/proc`.
+  - `<root>/root/job` and the workspace are root's to create and remove, and
+    the parent is root's: the user of the unit cannot rename or swap
+    them (a static user owns its workspace but not its parent), so
+    nothing is checked again inside the unit.
+  - `ProtectProc=invisible`: the processes of other users (lukd, other
+    units) are hidden in `/proc`.
+  - `NoNewPrivileges=yes` on every unit (`sudo` and setuid binaries
+    fail), except a job with `privileged`.
   - The `-` of `InaccessiblePaths=` skips a missing path; the bind of
-    `<work>` has none, so a work directory gone before the start fails
-    the job.
-  - The job sees the rest of the system as its user and groups allow,
+    `<workspace>` has none, so a workspace missing at the start fails
+    the unit.
+  - The unit sees the rest of the system as its user and groups allow,
     `/tmp` and `/var/tmp` private (`PrivateTmp=yes`), and its state
-    directory.
+    directory. It gets no group of the peer.
   - Not confined: a job whose groups reach a service that acts for it
     on the host. The sandbox does not hold for a job in the group
     `docker`: through the daemon it can bind any host path into a
-    container, and a path it hands to the daemon (such as `LUK_WORK`) is
-    resolved on the host, without the check above.
-  - `command`, the work directory, the state directory and `<lukd>` must
-    lie outside every hidden path (`<work>` is the one exception under
-    `<root>`); `<root>`, `<config dir>`, `<work>`, `<lukd>` and every
-    hidden path that adds a property must be clean absolute paths other
-    than `/` without white space, a control character, a quote, a
-    backslash, a colon, `$` or `%` (systemd-run splits, unquotes or
-    expands them in a property); `<root>`, `<config dir>` and a hidden
-    path that adds a property must not be a system directory (`/etc`, `/usr`, `/var`, `/var/lib`, `/run`,
-    `/srv`, `/opt`, `/home`, `/tmp` and the like), which the job cannot
-    do without. Otherwise the request is refused as `job <job>:
-    unavailable`, the reason in the journal.
+    container, its workspace or not, root-equivalent.
+  - `command`, a `run` program, the state directory and `<lukd>` must
+    lie outside every hidden path (`<workspace>` is the one exception
+    under `<root>`); `<root>`, `<config dir>`, `<workspace>`, `<lukd>`
+    and every hidden path that adds a property must be clean absolute
+    paths other than `/` without white space, a control character, a
+    quote, a backslash, a colon, `$` or `%` (systemd-run splits,
+    unquotes or expands them in a property); `<root>`, `<config dir>`
+    and a hidden path that adds a property must not be a system
+    directory (`/etc`, `/usr`, `/var`, `/var/lib`, `/run`, `/srv`,
+    `/opt`, `/home`, `/tmp` and the like), which the unit cannot do
+    without. Otherwise the request is refused as `job <job>:
+    unavailable` (`pipeline <p> step <n>: unavailable` for a `run`
+    program), the reason in the journal.
 - Deadlines: the request must arrive, and a refusal be read, within 5
   seconds of the connection; a peer that sends nothing, half a line or
-  does not read the refusal is cut off then. A job waiting for its state
-  lock has no deadline (the peer may close). Once the job starts, the
-  whole exchange (its output and the exit frame) must end within the job
-  `timeout` plus 2 minutes: a peer that stops reading makes the writes
-  fail by then, which counts as a closed peer (the unit is stopped, see
-  below), so it cannot hold one of the 16 connections.
-- Frames: 1 byte type (`o` stdout, `e` stderr, `x` exit), 4 byte
-  big-endian payload length, the payload (at most 1 MiB; the `x` payload
-  is the decimal exit status and ends the exchange). A refusal is an `e`
-  frame `lukd run: <reason>` and `x` 1. When the peer closes the
-  connection before the exit frame (step timeout, stop of lukd), `lukd
-  run` stops the transient unit (`systemctl stop`), kills `systemd-run`,
-  stops the unit again when the first stop failed (the unit not loaded
-  yet), and ends only once the unit is inactive with no job pending
-  (`systemctl show -p ActiveState -p Job`), polled for at most the job
-  `timeout` plus 2 minutes (`RuntimeMaxSec` ends the unit by then).
-- The boundary: `luk` picks only a job name, its own work directory and
-  the values of the free-form metadata variables (`LUK_SENDER`,
-  `LUK_ENDPOINT`, `LUK_FILE`, `LUK_NAME`, `LUK_TAGS`, `LUK_HOSTNAME`,
-  `LUK_ORIGIN`, filtered as in Step environment). The command, the user,
+  does not read the refusal is cut off then. A step waiting for a slot
+  or a job waiting for its state lock has no deadline (the peer may
+  close). Once the unit starts, the whole exchange (its output and the
+  exit frame) must end within its `RuntimeMaxSec` plus 2 minutes: a peer
+  that stops reading makes the writes fail by then, which counts as a
+  closed peer (the unit is stopped, see below), so it cannot hold a
+  connection.
+- Frames: 1 byte type (`s` started, `o` stdout, `e` stderr, `x` exit),
+  4 byte big-endian payload length, the payload (at most 1 MiB; `s` is
+  empty and comes once, when a step holds its slot (a nested job: once
+  its request is accepted), before a state lock and the start of the
+  unit; the pipeline `timeout` of the step counts from it; the `x`
+  payload is the decimal exit status of the unit and ends the
+  exchange). A
+  refusal is an `e` frame `lukd run: <reason>` and `x` 1. When the peer
+  closes the connection before the exit frame (step timeout, stop of
+  lukd), `lukd run` stops the transient unit (`systemctl stop`), kills
+  `systemd-run`, stops the unit again when the first stop failed (the
+  unit not loaded yet), and ends only once the unit is inactive with no
+  job pending (`systemctl show -p ActiveState -p Job`), polled for at
+  most its `RuntimeMaxSec` plus 2 minutes (`RuntimeMaxSec` ends the unit
+  by then).
+- The boundary: `luk` picks only a pipeline, a step, an upload id, a
+  nested job of that step, the values of the free-form metadata variables
+  (`LUK_SENDER`, `LUK_ENDPOINT`, `LUK_FILE`, `LUK_NAME`, `LUK_TAGS`,
+  `LUK_HOSTNAME`, `LUK_ORIGIN`, filtered as in Step environment) and the
+  files it sends over the channel. The program, the command, the user,
   the group, the credentials, the rest of the environment and the
-  timeout come from root's files and the checked path. A job treats the
-  work directory and those metadata values as untrusted input: `luk`
-  owns the directory and may change it while the job runs, and it
-  writes the values (they normally repeat the upload's meta, but nothing
-  but the filter holds `luk` to that; `LUK_FILE` always names a file of
-  `<work>/in/`, not necessarily an existing one).
-- Read access to the work directory comes from its group, the peer's
-  primary group the job gets (work directories are 0750, inputs and
-  `meta.json` 0440). Results go to `out/` only when the job user may write
-  there; usually a job just delivers the inputs elsewhere and the `run`
-  program writes `out/`.
-- A dynamic user (no `user`) is allocated by systemd for the run of the
-  job and released after it. Its name is fixed per job and pipeline,
-  `lukd-<job>-<pipeline>-<hash>`: `<job>-<pipeline>` lowercased, every
-  run of characters outside `[a-z0-9_-]` replaced by `_` and cut so the
-  name stays within 31 characters, `<hash>` the first 8 hex digits of
-  sha256 of `<job>/<pipeline>` (the hash keeps names apart that the
-  readable part would merge, such as job `a-b` on pipeline `c` and job
-  `a` on pipeline `b-c`). systemd derives the UID from the name and
-  first tries the UID that owns the existing state directory, so the
-  runs of one pair normally get the same UID and the state directory
-  needs no recursive chown; two pairs never share a user.
-  `DynamicUser=yes` implies `ProtectSystem=strict`,
-  `ProtectHome=read-only`, `PrivateTmp=yes`, `NoNewPrivileges=yes`,
-  `RestrictSUIDSGID=yes` and `RemoveIPC=yes`: the job reads the system
-  (as hidden by the sandbox above) and the work directory but writes
-  only its own `/tmp` and `/var/tmp`, which are removed with the unit,
-  its state directory and the work directory where its groups may
-  (`out/`, when the `run` program opens it to the group). That fits
-  jobs that deliver the inputs elsewhere (an upload to S3, rsync to
-  another host, a notification); a job that writes other local files
-  needs a `user`.
+  timeout come from root's files. A unit treats its inputs and those
+  metadata values as untrusted input: `luk` writes them (they normally
+  repeat the upload's meta, but nothing but the filter holds `luk` to
+  that; `LUK_FILE` always names a file of `<workspace>/in/`, not
+  necessarily an existing one).
+- A dynamic user is allocated by systemd for the run of the unit and
+  released after it. Its name is fixed per job and pipeline,
+  `lukd-<job>-<pipeline>-<hash>`, and per step of a `run` program,
+  `lukd-<pipeline>-<step>-<hash>`: the readable part (`<job>-<pipeline>`
+  or `<pipeline>-<step>`) lowercased, every run of characters outside
+  `[a-z0-9_-]` replaced by `_` and cut so the name stays within 31
+  characters, `<hash>` the first 8 hex digits of sha256 of
+  `<job>/<pipeline>` or of `step:<pipeline>/<step>` (the hash keeps names
+  apart that the readable part would merge, such as job `a-b` on
+  pipeline `c` and job `a` on pipeline `b-c`, or job `p` on pipeline `1`
+  and step 1 of pipeline `p`; a job name has no colon). systemd derives
+  the UID from the name and first tries the UID that owns the existing
+  state directory, so the runs of one job and pipeline normally get the
+  same UID and the state directory needs no recursive chown; two of
+  them never share a user. `DynamicUser=yes` implies
+  `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=yes`,
+  `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes` and `RemoveIPC=yes`: the
+  unit reads the system (as hidden by the sandbox above) but writes only
+  its workspace, its own `/tmp` and `/var/tmp`, which are removed with
+  the unit, and its state directory. That fits `run` programs and jobs
+  that deliver the inputs elsewhere (an upload to S3, rsync to another
+  host, a notification); a job that writes other local files needs a
+  `user`.
 
-Environment and state of every job, reserved like `LUK_WORK` (an `env`
+Environment and state of every unit, reserved like `LUK_WORK` (an `env`
 key `LUK_*` is a config error):
 
 - The metadata variables of the Step environment (`LUK_WORK` to
-  `LUK_ORIGIN`): the path-bound ones derived by lukd run from the
-  checked work directory (also the argument and the current directory)
-  and `run.yaml` (`LUK_ROOT` is its `root`), the free-form ones from the
+  `LUK_ORIGIN`): the workspace-bound ones set by lukd run from the
+  workspace (also the argument and the current directory), the
+  step-bound ones from the checked request, the free-form ones from the
   request after the filter; a name lukd run derives or sets itself is
-  never taken from the request. They come after the job's `env`.
-- `LUK_JOB`: the job name.
-- `LUK_TMP`: `/var/tmp`, scratch space on disk for this run. Every job
-  gets `-p PrivateTmp=yes` (implied for a dynamic user, explicit with
-  `user`): `/tmp` and `/var/tmp` are private to the unit and removed
-  when the job ends.
+  never taken from the request. They come after the job's or step's
+  `env`. `TMPDIR` equals `LUK_TMP`. Every unit gets `-p PrivateTmp=yes`
+  (implied for a dynamic user, explicit with `user`): `/tmp` and
+  `/var/tmp` are private to the unit and removed when it ends.
+- `LUK_JOB`: the job name (jobs only).
 - `LUK_STATE`: only for a job with `state`:
   `/var/lib/lukd-run/<job>/<pipeline>`, from
   `StateDirectory=lukd-run/<job>/<pipeline>` (`StateDirectoryMode=0700`).
@@ -4845,12 +5080,35 @@ key `LUK_*` is a config error):
   `/run/lukd-run` is the `RuntimeDirectory=` of `lukd-run@.service`
   (root, 0700), writable despite `ProtectSystem=strict`; with
   `RuntimeDirectoryPreserve=yes` it stays when an instance stops, since
-  the instances (one per connection) share it, and a reboot empties it.
+  the instances (one per connection) share it and its slot locks, and a
+  reboot empties it.
 - `state: shared`: no lock; concurrent runs share the directory and the
   job handles that itself.
-- The `job start` line of the journal names the job, unit, user (the
-  dynamic user name for a job without `user`), work directory and
-  pipeline, and `state=locked|shared` when the job has `state`.
+- The `job start` line of the journal names the job (none for a `run`
+  program), unit, user (the dynamic user name without `user`),
+  workspace, pipeline and step, and `state=locked|shared` when the job
+  has `state`.
+
+Containers. The order of preference for work that needs a container
+runtime:
+
+1. None: a plain command in the unit, when no runtime is needed.
+2. Rootless podman, the supported container runtime of jobs: a job of
+   run.d with a static `user` that has a home and subuid and subgid
+   ranges (`/etc/subuid`, `/etc/subgid`), `state: shared` holding the
+   podman storage so images persist between runs, and `privileged:
+   true` (the setuid `newuidmap` fails under `NoNewPrivileges=yes` with
+   `write to uid_map failed`); the host needs the packages `podman`,
+   `uidmap` and `passt`. Images come from a registry (the unit has
+   network). The job uses `podman run` and `podman exec` with the
+   workspace as a volume; the root of the container maps to the job
+   user, so what the container writes into the workspace is the job
+   user's and travels back like any result. Binding a hidden path into
+   a container fails. Not for a dynamic user (no subuid range, no home)
+   nor for a `run` program.
+3. `groups: [docker]`: possible by configuration, the worst case and not
+   recommended: root-equivalent through the daemon, not confined (see
+   Sandbox of a unit).
 
 Example: an upload to S3 with credentials `luk` never sees.
 
@@ -4906,7 +5164,7 @@ luk-job run --job s3-upload
 luk-job output --file "$(luk-job input)"
 ```
 
-A pipeline that only hands its set to a job needs no script: a `relay`
+A pipeline that only hands its set to a job needs no program: a `relay`
 step makes lukd itself ask `lukd run` for the job.
 
 ```yaml
@@ -4914,22 +5172,24 @@ pipeline:
   offsite:
     endpoint: [backup]
     steps:
-      - relay: s3-upload     # lukd asks lukd run to run job s3-upload on this step's work directory
+      - relay: s3-upload     # lukd asks lukd run to run job s3-upload as this step
       - store: archive       # gets the same input
 ```
 
 - lukd prepares the step work directory exactly as for a `run` step
   (`in/`, an empty `out/`, `meta.json`, owned by `luk`), connects to
-  `/run/luk/run.sock` and sends `{"job": <job>, "work": <work>, "env":
-  {<metadata>}}`, as `luk-job run` does, the metadata being the free-form
-  variables a `run` step there would get. A relay step takes no `env` (the
-  environment of the job comes from its run.d file and the Step
-  environment) and no `tee` (it always passes its set on).
+  `/run/luk/run.sock` and sends the step request with the channel
+  (`{"pipeline": <p>, "step": <n>, "id": <id>, "env": {<metadata>}}`,
+  see Request flow), the metadata being the free-form variables a `run`
+  step there would get; the job gets the set in its workspace. A relay
+  step takes no `env` (the environment of the job comes from its run.d
+  file and the Step environment) and no `tee` (it always passes its set
+  on).
 - The next step gets the input set of the relay step unchanged (the
   files and their per-file meta, the upload itself when it is the first
-  step), as after a `tee` run step; it may be the last step. The job only
-  reads the work directory (group read access); any entry in `out/`
-  fails the step (`relay <job>: relay step wrote out/<name>`).
+  step), as after a `tee` run step; it may be the last step. Any entry in
+  the job's `out/` fails the step (`relay <job>: relay step wrote
+  out/<name>`).
 - The job's stdout and stderr are the step output, kept like the output
   of a `run` program (`<work>/log`, at most 1 MiB; the last 4 KiB in the
   step error and the log): logged with the failure when the step fails,
@@ -4946,17 +5206,39 @@ pipeline:
   names stay those of the steps before it), but a link replace and the
   transfer dedup (store steps only) exclude it, since a delivery cannot
   be undone.
-- `lukd check` warns about a relayed job or a job in `jobs` of a `run`
-  step without a file in `/etc/site/lukd/run.d` when it can read that
-  directory, about one whose file it can read but that does not load
-  (with the reason, e.g. `pipelines: removed`), about a valid job that
-  no `relay` step and no `jobs` name (`unused`) and about any other
-  readable job file that does not load. It never requires any of them:
-  run.d is root's and changes without a reload.
 
-`luk-job run` stays for `run` programs that call several jobs or do work
-around them, like the program above that passes its input on with
-`luk-job output` after the job.
+A job that produces the set of the next step runs as a `run: {job}`
+step, for example a database dump job with credentials of its own that
+writes the dump into its `out/`:
+
+```yaml
+pipeline:
+  devdb:
+    endpoint: [backup]
+    steps:
+      - run: {job: db-dump}  # the job's out/ becomes the set of the next step
+      - store: publish
+```
+
+The step is a `run` step in every rule (the Step contract, `out/`
+validation, a link replace, the transfer dedup); its errors name the job
+(`run job <job>: exit status N`).
+
+- `lukd check` warns about a job of a `relay` or `run: {job}` step or in
+  `jobs` of a `run` step without a file in `/etc/site/lukd/run.d` when it
+  can read that directory, about one whose file it can read but that
+  does not load (with the reason, e.g. `pipelines: removed`), about a
+  valid job that no step names (`unused`) and about any other readable
+  job file that does not load. It never requires any of them: run.d is
+  root's and changes without a reload. Run as root it also warns when
+  the sum of `queue.concurrency` of the pipelines with a `run` or
+  `relay` step exceeds `limits.units.max` of `run.yaml` (`queue.concurrency
+  of run steps <sum> exceeds limits.units.max <max>: steps wait in lukd
+  run`).
+
+`luk-job run` (a nested job) stays for a `run` program that needs
+another user's job in the middle of its work, like the program above
+that passes its input on with `luk-job output` after the job.
 
 ## Client
 
@@ -5829,26 +6111,31 @@ disk. Test on lukd.vm / luk.vm.
 
 ### Phase 3 - run steps
 
-- Work directory `<root>/work/<id>/<pipeline>/<step>/` with `in/`,
-  `out/`, `meta.json` (`{"server", "client", "pipeline", "step",
+- Work directory `<root>/data/work/<id>/<pipeline>/<step>/` of lukd with
+  `in/`, `out/`, `meta.json` (`{"server", "client", "pipeline", "step",
   "produced"}`) and `log`. `in/` holds the current file set: step 1 the
   upload payload named by `file` (the id when empty); later steps the
   previous `out/`. `in/<name>.meta.json` carries the per-file meta from
   the step that produced it.
-- The program runs as the lukd user with a clean environment: `PATH`
-  (system default), `LANG=C.UTF-8`, the step's `env`, then the `LUK_*`
-  variables (last, so `env` cannot override them). Argument: the work
-  directory. It gets its own process group; on `timeout` (pipeline key,
-  default 1h, applied to each run step separately, must be under 7 days)
-  the group gets SIGTERM, then SIGKILL after 10s unless it is gone by then.
-  Once the program has exited, what is left of its group is killed, so
-  nothing writes to `out/` after validation. stdout and stderr go to `log`
-  (capped at 1 MiB); the last 4 KiB go into the failure log line and status
-  unless the program wrote a `fail` file. The `LUK_*` variables, the
-  in/ and out/ rules, the exit status and the `fail` file are the Step
-  contract (Pipelines); `luk-job` is the helper for programs.
-- Stopping lukd (the unit uses `KillMode=mixed`) kills running run steps
-  and leaves their uploads in the queue: the pipeline is interrupted, not
+- The program runs through `lukd run` in a transient unit, as a dynamic
+  user, in a workspace of its own (`<root>/root/job/<unit>`, a btrfs
+  subvolume) that gets `meta.json` and the files of `in/` as clones
+  through descriptors and hands the files of its `out/` back the same
+  way. Environment: `PATH` (system default), `LANG=C.UTF-8`, the step's
+  `env`, then the `LUK_*` variables (last, so `env` cannot override
+  them). Argument: the workspace. On `timeout` (pipeline key, default 1h,
+  applied to each run step separately, must be under 7 days) lukd closes
+  the connection to `lukd run`, which stops the unit; systemd kills
+  every process of its cgroup and removes the workspace. stdout and
+  stderr go to `log` (capped at 1 MiB); the last 4 KiB go into the
+  failure log line and status unless the program wrote a `fail` file.
+  The `LUK_*` variables, the in/ and out/ rules, the exit status and the
+  `fail` file are the Step contract (Pipelines); `luk-job` is the helper
+  for programs; the unit, the workspace and the channel are Jobs with
+  other users (Service).
+- Stopping lukd (the unit uses `KillMode=mixed`) closes the connections
+  of the running run steps, so `lukd run` stops their units, and leaves
+  their uploads in the queue: the pipeline is interrupted, not
   failed, and runs again from its first step at the next start. A store
   retried that way is idempotent for the same file (same id, `produced`,
   size and sha256), also when the earlier try was rotated into a version
@@ -5934,7 +6221,7 @@ disk. Test on lukd.vm / luk.vm.
 
 ### Phase 5 - status
 
-- lukd keeps `<root>/status/process/status.json` (atomic writes, loaded at start), one
+- lukd keeps `<root>/data/status/process/status.json` (atomic writes, loaded at start), one
   entry per (pipeline, sender) under `pipelines`: `pipeline`, `sender`,
   `tags`, `last_id`, `last_received`, `last_accepted`, `last_success`, `last_failure`,
   `failed_step`, `error` (last failure, up to 4 KiB), `size`; and the
@@ -5981,13 +6268,14 @@ disk. Test on lukd.vm / luk.vm.
   and points to `lukd queue ls / rm`). Only `rm` or expiry clears it.
 - Commands (read the config given by `-c` for `root` and the queue
   directories, work on files and may run while lukd runs). The files must
-  stay owned by the service user, so they run as the owner of the `root`
-  directory: run as root, `lukd queue` runs itself again with the uid, the
-  gid of `root` and the groups of that user (environment `LUKD_REEXEC=1`
-  prevents a loop) and exits with its status; run as the owner it
-  proceeds; any other user gets `lukd queue must run as root or as <owner>
-  (owner of <root>)` and exit status 1; a `root` that is a symlink is
-  refused. `lukd status` and `lukd check`
+  stay owned by the service user, so they run as the owner of
+  `<root>/data` (the service user; `<root>` itself is root's): run as
+  root, `lukd queue` runs itself again with the uid, the gid of
+  `<root>/data` and the groups of that user (environment
+  `LUKD_REEXEC=1` prevents a loop) and exits with its status; run as the
+  owner it proceeds; any other user gets `lukd queue must run as root or
+  as <owner> (owner of <root>/data)` and exit status 1; a `root` or
+  `<root>/data` that is a symlink is refused. `lukd status` and `lukd check`
   only read and run as anyone who can read the files.
   - `lukd queue ls [--json]`: the records, oldest first, one row per
     pipeline: id, endpoint, sender, pipeline, state (`ok`, `failed`,
