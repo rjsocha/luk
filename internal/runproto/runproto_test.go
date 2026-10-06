@@ -133,15 +133,17 @@ func TestReadRequest(t *testing.T) {
 	}
 }
 
-// The largest request a client sends with a sanitized environment (values
-// of at most 1 KiB, a handful of names) and a work path of PATH_MAX fits
-// MaxRequest even when every byte needs escaping.
+// The largest request a client sends with a sanitized environment (six
+// free-form values of at most 1 KiB, LUK_FILE <work>/in/<name>) and a
+// work path of PATH_MAX fits MaxRequest even when every byte needs
+// escaping.
 func TestLargestRequestFits(t *testing.T) {
-	env := map[string]string{}
-	for i := range 8 {
+	work := "/" + strings.Repeat(`\`, 4095)
+	env := map[string]string{"LUK_FILE": work + "/in/" + strings.Repeat(`\`, 255)}
+	for i := range 6 {
 		env["LUK_NAME_"+strconv.Itoa(i)] = strings.Repeat(`"`, 1<<10)
 	}
-	b := Request{Job: strings.Repeat("j", 64), Work: "/" + strings.Repeat(`\`, 4095), Env: env}.Encode()
+	b := Request{Job: strings.Repeat("j", 64), Work: work, Env: env}.Encode()
 	if len(b) > MaxRequest {
 		t.Fatalf("%d bytes", len(b))
 	}

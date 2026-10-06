@@ -241,6 +241,22 @@ func TestVarsPathBound(t *testing.T) {
 	}
 }
 
+// The 1 KiB cap is for the free-form values: a long root keeps every
+// path-bound variable and LUK_FILE.
+func TestVarsLongRoot(t *testing.T) {
+	root := "/" + strings.Repeat("r", 2*MaxMetaValue)
+	w := root + "/work/20261006T100000Z-0a1b2c3d/offsite/2"
+	sent := map[string]string{"LUK_FILE": w + "/in/db.sql", "LUK_NAME": "db.sql", "LUK_TAGS": strings.Repeat("t", MaxMetaValue+1)}
+	want := []string{
+		"LUK_WORK=" + w, "LUK_IN=" + w + "/in", "LUK_OUT=" + w + "/out", "LUK_META=" + w + "/meta.json",
+		"LUK_ID=20261006T100000Z-0a1b2c3d", "LUK_PIPELINE=offsite", "LUK_FILE=" + w + "/in/db.sql",
+		"LUK_NAME=db.sql", "LUK_ROOT=" + root, "LUK_STEP=2",
+	}
+	if got := Vars(w, root, sent); !slices.Equal(got, want) {
+		t.Fatalf("\n got %q\nwant %q", got, want)
+	}
+}
+
 func TestMetaOfEnv(t *testing.T) {
 	w := newWork(t, upload("db.sql", "db1", "daily"), "db.sql")
 	env := workEnv(t, w)

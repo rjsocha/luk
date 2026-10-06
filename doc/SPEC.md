@@ -2993,11 +2993,13 @@ The variables:
 
 The metadata variables pass one filter, the same in lukd, `luk-job run`
 and lukd run: only the seven names above; a value of valid UTF-8 without
-a control character (C0 such as NUL and newline, DEL, C1) and of at
-most 1 KiB; `LUK_NAME` empty or a valid file name; `LUK_FILE` exactly
-`<work>/in/<valid file name>`. Any other name in a request is ignored.
-A variable that fails the filter is left unset, for a `run` program and
-a job alike; so is a path-bound variable with such a value. An exec
+a control character (C0 such as NUL and newline, DEL, C1); `LUK_NAME`
+empty or a valid file name; `LUK_FILE` exactly `<work>/in/<valid file
+name>`; the other five at most 1 KiB (the cap is not applied to
+`LUK_FILE` or to the path-bound variables, so a long `root` loses none
+of them). Any other name in a request is ignored. A variable that fails
+the filter is left unset, for a `run` program and a job alike; so is a
+path-bound variable with such a value. An exec
 environment cannot carry a NUL, systemd refuses most other control
 characters in an environment value (the job would not start), and a
 newline or a tab it accepts would reach the job raw. lukd refuses

@@ -46,7 +46,8 @@ type WorkMeta struct {
 // derives every other LUK_* variable itself.
 var MetaNames = []string{"LUK_SENDER", "LUK_ENDPOINT", "LUK_FILE", "LUK_NAME", "LUK_TAGS", "LUK_HOSTNAME", "LUK_ORIGIN"}
 
-// MaxMetaValue caps the value of a metadata variable.
+// MaxMetaValue caps the value of a free-form metadata variable (not
+// LUK_FILE, whose form CleanMeta fixes).
 const MaxMetaValue = 1 << 10
 
 // varOrder is the order of the LUK_* metadata variables; the names not in
@@ -57,24 +58,24 @@ var varOrder = []string{
 }
 
 // safeValue reports whether v can be the value of a variable: valid UTF-8
-// without a control character, at most MaxMetaValue bytes. Neither an
-// exec environment nor a systemd-run --setenv carries a NUL, and a newline
-// or another control character would reach the job's environment raw.
+// without a control character. Neither an exec environment nor a
+// systemd-run --setenv carries a NUL, and a newline or another control
+// character would reach the job's environment raw.
 func safeValue(v string) bool {
-	return len(v) <= MaxMetaValue && utf8.ValidString(v) && !wire.HasControl(v)
+	return utf8.ValidString(v) && !wire.HasControl(v)
 }
 
 // CleanMeta is what of env may reach a step or a job of the work
 // directory work as metadata: only the names of MetaNames with a safe
 // value (see safeValue), LUK_NAME a valid file name or empty, LUK_FILE
-// <work>/in/<a valid file name>. Everything else is dropped. lukd and the
-// clients of lukd run apply it to what they derive, lukd run to what it
-// receives.
+// <work>/in/<a valid file name>, the free-form others at most
+// MaxMetaValue bytes. Everything else is dropped. lukd and the clients of
+// lukd run apply it to what they derive, lukd run to what it receives.
 func CleanMeta(work string, env map[string]string) map[string]string {
 	m := map[string]string{}
 	for _, k := range MetaNames {
 		v, ok := env[k]
-		if !ok || !safeValue(v) {
+		if !ok || !safeValue(v) || k != "LUK_FILE" && len(v) > MaxMetaValue {
 			continue
 		}
 		switch k {

@@ -23,7 +23,8 @@ const (
 	DefaultSocket = "/run/luk/run.sock"
 	// MaxRequest caps the request line, newline included. A client's
 	// request (a job name, a work path, the metadata environment with
-	// values of at most 1 KiB) fits it even when every byte is escaped.
+	// free-form values of at most 1 KiB and LUK_FILE under the work path)
+	// fits it even when every byte is escaped.
 	MaxRequest = 32 << 10
 	// MaxEnv caps the entries of the environment of a request.
 	MaxEnv = 16
