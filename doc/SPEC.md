@@ -4198,7 +4198,9 @@ on every janitor pass (about every minute):
 `workspaces` repeats `/run/luk/workspaces/count.json` (see Jobs with other
 users, Workspace), read on every janitor pass: `leftover` the
 workspaces lukd run could not remove, `updated` when the count last
-changed; absent while the file does not exist. Any `leftover` above 0
+changed; absent while the file does not exist. A file that exists but
+cannot be read or parsed gives `leftover` 0, an empty `updated` and
+`error` with the reason (logged as WARN), never a silent 0. Any `leftover` above 0
 is meant to alert at once: in a healthy pipeline it never happens (a
 stuck job or an escaped container).
 
