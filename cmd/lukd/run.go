@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"net"
@@ -93,9 +94,10 @@ func peerUID(c *net.UnixConn) (uint32, error) {
 }
 
 // relayWarnings names the relay steps of cfg whose job has no file in dir,
-// the run.d of lukd run, or whose readable and valid file does not list
-// the pipeline. dir is root's and changes without a reload, so it is
-// never required: an unreadable dir or file gives no warning.
+// the run.d of lukd run, whose readable file does not load (with the
+// reason) or whose valid file does not list the pipeline. dir is root's
+// and changes without a reload, so it is never required: an unreadable
+// dir or file gives no warning.
 func relayWarnings(cfg *config.Config, dir string) []string {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -116,10 +118,12 @@ func relayWarnings(cfg *config.Config, dir string) []string {
 	var w []string
 	for _, pn := range slices.Sorted(maps.Keys(cfg.Pipeline)) {
 		for i, s := range cfg.Pipeline[pn].Steps {
-			switch j := jobs.OK[s.Relay]; {
+			switch j, bad := jobs.OK[s.Relay], jobs.Bad[s.Relay]; {
 			case s.Relay == "":
 			case !have[s.Relay]:
 				w = append(w, fmt.Sprintf("pipeline %s: step %d: relay job %s has no file in %s", pn, i+1, s.Relay, dir))
+			case bad != nil && !errors.Is(bad, fs.ErrPermission):
+				w = append(w, fmt.Sprintf("pipeline %s: step %d: relay job %s: %v", pn, i+1, s.Relay, bad))
 			case j != nil && !slices.Contains(j.Pipelines, pn):
 				w = append(w, fmt.Sprintf("pipeline %s: step %d: relay job %s does not list the pipeline in its pipelines", pn, i+1, s.Relay))
 			}

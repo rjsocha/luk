@@ -101,7 +101,7 @@ func TestCheckWarnsRelayWithoutJobFile(t *testing.T) {
 	writeIdentity(t, cfgPath)
 	jobs := t.TempDir()
 	for _, f := range []string{"s3-upload.yaml", "notify.yaml~", "notify.yaml.dpkg-old", ".notify.yaml"} {
-		if err := os.WriteFile(filepath.Join(jobs, f), nil, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(jobs, f), []byte("command: /opt/luk/s3\npipelines: [archive]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -145,6 +145,34 @@ func TestCheckWarnsRelayPipelineNotListed(t *testing.T) {
 	out, errOut, err := runCheck(t, "--no-running", "-c", cfgPath)
 	want := "warning: pipeline archive: step 1: relay job s3-upload does not list the pipeline in its pipelines\n"
 	if err != nil || out != "ok\n" || errOut != want {
+		t.Fatalf("%q %q %v", out, errOut, err)
+	}
+}
+
+// A job file that exists but does not load (a run.d of before
+// pipelines: was required) is named with the reason.
+func TestCheckWarnsRelayJobInvalid(t *testing.T) {
+	cfgPath, _ := statusConfig(t)
+	text, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relays := strings.Replace(string(text), "steps: [{store: archive}]", "steps: [{relay: s3-upload}, {store: archive}]", 1)
+	if err := os.WriteFile(cfgPath, []byte(relays), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	writeIdentity(t, cfgPath)
+	jobs := t.TempDir()
+	os.Chmod(jobs, 0o755)
+	if err := os.WriteFile(filepath.Join(jobs, "s3-upload.yaml"), []byte("command: /opt/luk/s3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := runJobs
+	t.Cleanup(func() { runJobs = old })
+	runJobs = jobs
+	out, errOut, err := runCheck(t, "--no-running", "-c", cfgPath)
+	want := "warning: pipeline archive: step 1: relay job s3-upload: "
+	if err != nil || out != "ok\n" || !strings.HasPrefix(errOut, want) || !strings.Contains(errOut, "pipelines") || strings.Count(errOut, "\n") != 1 {
 		t.Fatalf("%q %q %v", out, errOut, err)
 	}
 }

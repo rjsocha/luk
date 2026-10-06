@@ -109,7 +109,7 @@ func rootCmd() *cobra.Command {
 			"state, storage bases) then runs again as the owner of the root.\n" +
 			"A relay step whose job has no file in " + rund.DefaultJobs + " is a warning when\n" +
 			"that directory is readable, and so is one whose readable job file does not\n" +
-			"list the pipeline in its pipelines.",
+			"load (with the reason) or does not list the pipeline in its pipelines.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(cfgPath)

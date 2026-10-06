@@ -4781,10 +4781,11 @@ pipeline:
   transfer dedup (store steps only) exclude it, since a delivery cannot
   be undone.
 - `lukd check` warns about a relayed job without a file in
-  `/etc/site/lukd/run.d` when it can read that directory, and about one
-  whose file it can read and that does not list the pipeline in
-  `pipelines`. It never requires either: run.d is root's and changes
-  without a reload.
+  `/etc/site/lukd/run.d` when it can read that directory, about one
+  whose file it can read but that does not load (with the reason, e.g.
+  `pipelines: required`), and about one whose file does not list the
+  pipeline in `pipelines`. It never requires any of them: run.d is
+  root's and changes without a reload.
 
 `luk-job run` stays for `run` programs that call several jobs or do work
 around them, like the program above that passes its input on with
