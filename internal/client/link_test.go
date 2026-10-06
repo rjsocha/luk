@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"luk/internal/channel"
@@ -125,17 +127,41 @@ func TestLinkListAll(t *testing.T) {
 		t.Fatalf("all after c2: %+v %v", a, err)
 	}
 
-	// A server that answers a cursor already followed, or a next page
-	// without entries, would never end: an error.
-	for name, bad := range map[string]map[string]wire.LinkListAnswer{
-		"repeated": {"": {Links: []wire.LinkEntry{{URL: "u1"}}, Next: "c1"}, "c1": {Links: []wire.LinkEntry{{URL: "u2"}}, Next: "c1"}},
-		"loop":     {"": {Links: []wire.LinkEntry{{URL: "u1"}}, Next: "c1"}, "c1": {Links: []wire.LinkEntry{{URL: "u2"}}, Next: "c2"}, "c2": {Links: []wire.LinkEntry{{URL: "u3"}}, Next: "c1"}},
-		"empty":    {"": {Links: []wire.LinkEntry{}, Next: "c1"}},
+	// A server that answers a cursor already followed, a next that is not
+	// the cursor of the last entry of its page, or a next page without
+	// entries is an error, each with its own message.
+	l := func(u, c string) wire.LinkEntry { return wire.LinkEntry{URL: u, Cursor: c} }
+	for name, c := range map[string]struct {
+		pages map[string]wire.LinkListAnswer
+		want  string
+	}{
+		"repeated": {map[string]wire.LinkListAnswer{"": {Links: []wire.LinkEntry{l("u1", "c1")}, Next: "c1"}, "c1": {Links: []wire.LinkEntry{l("u2", "c1")}, Next: "c1"}}, "repeats the page after"},
+		"loop":     {map[string]wire.LinkListAnswer{"": {Links: []wire.LinkEntry{l("u1", "c1")}, Next: "c1"}, "c1": {Links: []wire.LinkEntry{l("u2", "c2")}, Next: "c2"}, "c2": {Links: []wire.LinkEntry{l("u3", "c1")}, Next: "c1"}}, "repeats the page after"},
+		"empty":    {map[string]wire.LinkListAnswer{"": {Links: []wire.LinkEntry{}, Next: "c1"}}, "empty page"},
+		"not last": {map[string]wire.LinkListAnswer{"": {Links: []wire.LinkEntry{l("u1", "c1"), l("u2", "c2")}, Next: "c1"}}, "not the cursor of its last link"},
 	} {
-		pages = bad
-		if a, err := LinkListAll(context.Background(), o, LinkQuery{}); err == nil || !strings.Contains(err.Error(), "link list") {
+		pages = c.pages
+		if a, err := LinkListAll(context.Background(), o, LinkQuery{}); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %+v %v", name, a, err)
 		}
+	}
+}
+
+// A server that answers ever new cursors stops LinkListAll at
+// maxLinkListAll links.
+func TestLinkListAllEndless(t *testing.T) {
+	srv := chantest.New(t)
+	var n atomic.Int64
+	srv.Op = func(channel.Request, []byte) *chantest.Answer {
+		c := fmt.Sprint("c", n.Add(1))
+		return &chantest.Answer{Status: http.StatusOK, Body: wire.LinkListAnswer{Links: []wire.LinkEntry{{URL: "u", Cursor: c}}, Next: c}}
+	}
+	defer func(m int) { maxLinkListAll = m }(maxLinkListAll)
+	maxLinkListAll = 5
+	o := Options{URL: srv.URL + "/drop", Pins: mustPins(t, srv.Pin()), Signer: newSigner(t)}
+	a, err := LinkListAll(context.Background(), o, LinkQuery{})
+	if err == nil || !strings.Contains(err.Error(), "more than 5 links") || n.Load() != 6 {
+		t.Fatalf("%+v %v after %d pages", a, err, n.Load())
 	}
 }
 

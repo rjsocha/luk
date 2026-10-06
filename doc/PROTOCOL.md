@@ -754,20 +754,23 @@ Answers:
   "permanent_url", "shared", "cursor"}], "next"}`, one page of the links
   of the signer on the endpoint; `links` is `[]` for none.
   - Order: newest first by acceptance order, then by upload id
-    (descending), then by the key of the URL (the first 16 bytes of its
-    sha256, lowercase hex, ascending); the same order for every page, and
-    no two entries share a place in it.
+    (descending), then by the key of the stored name (the first 16 bytes
+    of the sha256 of `<storage>/<name>`, lowercase hex, ascending); the
+    same order for every page, and no two entries share a place in it. A
+    negative accepted seq counts as 0.
   - `limit` is the most entries of the page: absent, 0 or above 1000
     means 1000 (the cap of a page); negative is 422 `bad limit <n>`.
   - `cursor` of an entry is opaque: base64url without padding of
-    `<accepted ns>.<accepted seq>.<url key>.<upload id>` (not the URL).
+    `<accepted ns>.<accepted seq>.<key>.<upload id in lowercase hex>`
+    (an empty id included); it carries no secret and not the URL.
     `after` (a cursor) starts the page strictly after that place in the
-    order, also when its entry is gone; a malformed cursor is 400 `bad cursor "<cursor>"`. `next`
-    is the cursor of the last entry when more follow, absent on the last
-    page. A client walks the list with one request (and one session) per
-    page, `after` set to the `next` of the page before, and stops at a
-    page without `next`; a `next` it already followed means a server
-    that never ends the list.
+    order, also when its entry is gone; a malformed cursor is 400 `bad
+    cursor "<cursor>"`. `next` is the cursor of the last entry when more
+    follow, absent on the last page. A client walks the list with one
+    request (and one session) per page, `after` set to the `next` of the
+    page before, and stops at a page without `next`; a `next` other than
+    the cursor of the last entry, or one it already followed, means a
+    server that never ends the list.
   - `any: true` adds, in the same order, the files of access `any` of
     other identities the signer may download, marked `"shared": true`,
     when the endpoint's `private.list` admits the signer; without `any`

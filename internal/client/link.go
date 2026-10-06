@@ -154,10 +154,15 @@ func LinkList(ctx context.Context, o Options, q LinkQuery) (*wire.LinkListAnswer
 	return a, nil
 }
 
+// maxLinkListAll caps the links LinkListAll collects; tests lower it.
+var maxLinkListAll = 1000000
+
 // LinkListAll asks for the pages of q one after the other, each its own
 // request, from q.After to the last page, and returns their entries as
-// one answer without Next. A next the server already gave, or a page
-// with a next but no entries, is an error: such a list would not end.
+// one answer without Next. A next that is not the cursor of the last
+// entry of its page, a next the server already gave, a page with a next
+// but no entries and more than maxLinkListAll links are errors: such a
+// list would not end.
 func LinkListAll(ctx context.Context, o Options, q LinkQuery) (*wire.LinkListAnswer, error) {
 	all := &wire.LinkListAnswer{Links: []wire.LinkEntry{}}
 	seen := map[string]bool{q.After: true}
@@ -170,10 +175,14 @@ func LinkListAll(ctx context.Context, o Options, q LinkQuery) (*wire.LinkListAns
 		switch {
 		case a.Next == "":
 			return all, nil
-		case seen[a.Next]:
-			return nil, fmt.Errorf("link list: the server repeats the page after %q", a.Next)
 		case len(a.Links) == 0:
 			return nil, fmt.Errorf("link list: the server answers an empty page with next %q", a.Next)
+		case a.Next != a.Links[len(a.Links)-1].Cursor:
+			return nil, fmt.Errorf("link list: the server answers next %q, not the cursor of its last link", a.Next)
+		case seen[a.Next]:
+			return nil, fmt.Errorf("link list: the server repeats the page after %q", a.Next)
+		case len(all.Links) > maxLinkListAll:
+			return nil, fmt.Errorf("link list: the server lists more than %d links", maxLinkListAll)
 		}
 		seen[a.Next] = true
 		q.After = a.Next

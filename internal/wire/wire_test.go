@@ -2,6 +2,7 @@ package wire
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -314,31 +315,32 @@ func TestLinkMetaList(t *testing.T) {
 	}
 }
 
-// A cursor is base64url of the acceptance order, the key of the URL and
-// the id; only the form Encode writes parses.
+// A cursor is base64url of the acceptance order, the key of the stored
+// name and the id in hex; only the form Encode writes parses, and every
+// id, also an empty or a long one or one of any bytes, round-trips.
 func TestLinkCursor(t *testing.T) {
-	key := LinkKey("https://d.example/d/a")
-	if len(key) != 32 || key == LinkKey("https://d.example/d/b") {
+	key := LinkKey("drop", "a")
+	if len(key) != 32 || key == LinkKey("drop", "b") || key == LinkKey("drop/a", "") {
 		t.Fatalf("key %q", key)
 	}
-	c := LinkCursor{NS: 1791288000123456789, Seq: 3, Key: key, ID: "20261006T120000Z-0a1b2c3d"}
+	const id = "20261006T120000Z-0a1b2c3d"
+	c := LinkCursor{NS: 1791288000123456789, Seq: 3, Key: key, ID: id}
 	s := c.Encode()
-	if want := base64.RawURLEncoding.EncodeToString([]byte("1791288000123456789.3." + key + ".20261006T120000Z-0a1b2c3d")); s != want {
+	if want := base64.RawURLEncoding.EncodeToString([]byte("1791288000123456789.3." + key + "." + hex.EncodeToString([]byte(id)))); s != want {
 		t.Fatalf("%s, want %s", s, want)
 	}
-	if got, err := ParseLinkCursor(s); err != nil || got != c {
-		t.Fatalf("%+v %v", got, err)
-	}
-	if got, err := ParseLinkCursor(LinkCursor{Key: key, ID: "x.y"}.Encode()); err != nil || got != (LinkCursor{Key: key, ID: "x.y"}) {
-		t.Fatalf("zero order: %+v %v", got, err)
+	for _, c := range []LinkCursor{c, {Key: key}, {NS: -5, Key: key, ID: "x.y\n\xff\x00"}, {Key: key, ID: strings.Repeat("é", 300)}} {
+		if got, err := ParseLinkCursor(c.Encode()); err != nil || got != c {
+			t.Errorf("%+v: %+v %v", c, got, err)
+		}
 	}
 	b64 := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	for _, bad := range []string{
-		"", "!!", b64("1.2."+key+".x") + "=", base64.StdEncoding.EncodeToString([]byte("1.2." + key + ".x>?")),
-		b64("1.2.x"), b64("1.2." + key), b64("1.2." + key + "."), b64("x.2." + key + ".id"), b64("1.x." + key + ".id"),
-		b64("01.2." + key + ".id"), b64("+1.2." + key + ".id"), b64("1.-2." + key + ".id"),
-		b64("1.2." + strings.ToUpper(key) + ".id"), b64("1.2." + key[1:] + ".id"),
-		b64("1.2." + key + ".a\nb"), b64("1.2." + key + "." + strings.Repeat("a", 200)),
+		"", "!!", b64("1.2."+key+".78") + "=", base64.StdEncoding.EncodeToString([]byte("1.2." + key + ".78>?")),
+		b64("1.2.78"), b64("1.2." + key), b64("x.2." + key + ".78"), b64("1.x." + key + ".78"),
+		b64("01.2." + key + ".78"), b64("+1.2." + key + ".78"), b64("1.-2." + key + ".78"),
+		b64("1.2." + strings.ToUpper(key) + ".78"), b64("1.2." + key[1:] + ".78"),
+		b64("1.2." + key + ".7"), b64("1.2." + key + ".7G"), b64("1.2." + key + ".7A"), b64("1.2." + key + ".78.79"),
 	} {
 		if c, err := ParseLinkCursor(bad); err == nil {
 			t.Errorf("%q accepted: %+v", bad, c)

@@ -583,14 +583,14 @@ func TestLinkLsPages(t *testing.T) {
 
 	// Text: the hint of the next page on stderr, unless --quiet or --all.
 	code, out, errs := runLuk(t, "link", "ls", "-e", "drop", "-k", e.key, "--limit", "2")
-	if code != 0 || strings.Count(out, "\n") != 3 || errs != "more: luk link ls -e drop --limit 2 --after "+page.Next+"\n" {
+	if code != 0 || strings.Count(out, "\n") != 3 || errs != "more: luk link ls -e drop -k "+e.key+" --limit 2 --after "+page.Next+"\n" {
 		t.Fatalf("text: exit %d %q %q", code, out, errs)
 	}
 	// The hint repeats what shapes the list: the endpoint (also the
 	// default of the config, or a URL, quoted for a shell), --any and a
 	// --limit given; the hinted command gets the next page.
 	mustRun(t, "config", "default", "-e", "drop")
-	if code, _, errs := runLuk(t, "link", "ls", "-k", e.key, "--any", "--limit", "1"); code != 0 || errs != "more: luk link ls -e drop --any --limit 1 --after "+full.Links[0].Cursor+"\n" {
+	if code, _, errs := runLuk(t, "link", "ls", "-k", e.key, "--any", "--limit", "1"); code != 0 || errs != "more: luk link ls -e drop -k "+e.key+" --any --limit 1 --after "+full.Links[0].Cursor+"\n" {
 		t.Fatalf("default endpoint: exit %d %q", code, errs)
 	}
 	cfg, _, err := client.LoadMerged()
@@ -602,10 +602,12 @@ func TestLinkLsPages(t *testing.T) {
 		t.Fatalf("%v %v", pins, err)
 	}
 	epURL := raw + "#" + pins[0]
-	if code, _, errs := runLuk(t, "link", "ls", "-k", e.key, "-e", epURL, "--limit", "1"); code != 0 || errs != "more: luk link ls -e '"+epURL+"' --limit 1 --after "+full.Links[0].Cursor+"\n" {
+	if code, _, errs := runLuk(t, "link", "ls", "-k", e.key, "-e", epURL, "--limit", "1"); code != 0 || errs != "more: luk link ls -e '"+epURL+"' -k "+e.key+" --limit 1 --after "+full.Links[0].Cursor+"\n" {
 		t.Fatalf("URL endpoint: exit %d %q", code, errs)
 	}
-	if code, _, errs := runLuk(t, "link", "ls", "-k", e.key, "--limit", "1", "--after", page.Next); code != 0 || errs != "more: luk link ls -e drop --limit 1 --after "+full.Links[2].Cursor+"\n" {
+	// A key of the config is not repeated, as it is the one used again.
+	mustRun(t, "config", "endpoint", "key", "-e", "drop", "-k", e.key)
+	if code, _, errs := runLuk(t, "link", "ls", "--limit", "1", "--after", page.Next); code != 0 || errs != "more: luk link ls -e drop --limit 1 --after "+full.Links[2].Cursor+"\n" {
 		t.Fatalf("after: exit %d %q", code, errs)
 	}
 	if code, out, errs := runLuk(t, "link", "ls", "-e", "drop", "-k", e.key, "--limit", "2", "-q"); code != 0 || strings.Count(out, "\n") != 3 || errs != "" {

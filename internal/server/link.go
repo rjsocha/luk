@@ -298,10 +298,10 @@ var maxLinkPage = wire.MaxLinkPage
 // files of access any others uploaded through ep that the protect expose
 // serves it, not once, marked shared; without it private.list is not
 // looked at. One order for all: newest first by acceptance order, then
-// by id, then by the key of the URL. The page holds the entries after the cursor after
-// (from the newest without one), at most limit (none: maxLinkPage) and
-// never more than maxLinkPage; Next is the cursor of its last entry when
-// more follow.
+// by id, then by the key of the stored name. The page holds the entries
+// after the cursor after (from the newest without one), at most limit
+// (none: maxLinkPage) and never more than maxLinkPage; Next is the cursor
+// of its last entry when more follow.
 func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Identity, now time.Time, limit int, after *wire.LinkCursor, others bool) (int, any, error) {
 	storages := []string{ep.Storage}
 	if ep.Secret != nil {
@@ -315,7 +315,7 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 		e     wire.LinkEntry
 	}
 	// rank orders a before b (negative) in the list: newest first, then
-	// by id, then by the key of the URL (wire.LinkKey).
+	// by id, then by the key of the stored name (wire.LinkKey).
 	rank := func(a, b item) int {
 		return cmp.Or(b.order.Compare(a.order), strings.Compare(b.id, a.id), strings.Compare(a.key, b.key))
 	}
@@ -360,7 +360,9 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 			if !ok {
 				return nil
 			}
-			it := item{order: sc.Order(), id: sc.ID, key: wire.LinkKey(u)}
+			// A negative seq counts as 0, as a cursor carries it.
+			it := item{order: sc.Order(), id: sc.ID, key: wire.LinkKey(sn, rel)}
+			it.order.Seq = max(it.order.Seq, 0)
 			if after != nil && rank(it, item{order: queue.Acceptance{NS: after.NS, Seq: after.Seq}, id: after.ID, key: after.Key}) <= 0 {
 				return nil
 			}
