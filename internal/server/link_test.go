@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -46,6 +47,10 @@ type linkReq struct {
 	action string
 	link   string
 	ttl    string
+	// limit, after and any are the list fields of the link meta.
+	limit int
+	after string
+	any   bool
 	// meta, when set, is the upload meta of a replace; body its content.
 	meta  *wire.Meta
 	body  []byte
@@ -78,7 +83,7 @@ func (f *fixture) link(t *testing.T, r linkReq) *httptest.ResponseRecorder {
 	if r.meta != nil {
 		metaS, err = wire.EncodeMeta(*r.meta)
 	} else {
-		metaS, err = wire.EncodeLinkMeta(wire.LinkMeta{TTL: r.ttl})
+		metaS, err = wire.EncodeLinkMeta(wire.LinkMeta{TTL: r.ttl, Limit: r.limit, After: r.after, Any: r.any})
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -647,7 +652,7 @@ func TestLinkHostMatch(t *testing.T) {
 	linkAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: "http://lukd.test:8080/d/" + name}), http.StatusOK)
 }
 
-const listLinks = `respond: url, storage: drop, link: {replace: ['*'], list: ['*']}}`
+const listLinks = `respond: url, storage: drop, link: {remove: ['*'], ttl: ['*'], replace: ['*'], list: ['*']}}`
 
 // listFixture has link list on /drop and on /drop2 (storing into the same
 // storage), and a second identity other allowed on both.
@@ -693,7 +698,7 @@ func (f *fixture) setSidecar(t *testing.T, link string, fn func(*store.Sidecar))
 func TestLinkList(t *testing.T) {
 	other := newSigner(t)
 	f := listFixture(t, other)
-	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); a.Links == nil || len(a.Links) != 0 || a.Truncated {
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); a.Links == nil || len(a.Links) != 0 || a.Next != "" {
 		t.Fatalf("empty: %+v", a)
 	}
 	older := f.drop(t, f.user, wire.Meta{File: "a.txt", Mutable: true}, "hello")
@@ -712,7 +717,7 @@ func TestLinkList(t *testing.T) {
 	f.settle(t)
 
 	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
-	if len(a.Links) != 2 || a.Truncated {
+	if len(a.Links) != 2 || a.Next != "" {
 		t.Fatalf("%+v", a)
 	}
 	n, o := a.Links[0], a.Links[1]
@@ -729,11 +734,113 @@ func TestLinkList(t *testing.T) {
 	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, path: "/drop2", action: wire.LinkList})); len(a.Links) != 1 || a.Links[0].URL != viaDrop2 {
 		t.Errorf("drop2: %+v", a)
 	}
+	if n.Cursor == "" || o.Cursor == "" || n.Cursor == o.Cursor {
+		t.Errorf("cursors %q %q", n.Cursor, o.Cursor)
+	}
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList, limit: 1})); len(a.Links) != 1 || a.Links[0].URL != newer || a.Next != a.Links[0].Cursor {
+		t.Errorf("limit 1: %+v", a)
+	}
+}
 
-	defer func(m int) { maxLinkList = m }(maxLinkList)
-	maxLinkList = 1
-	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); len(a.Links) != 1 || a.Links[0].URL != newer || !a.Truncated {
-		t.Errorf("truncated: %+v", a)
+// listPages pages through the list of r with limit n and returns the
+// entries in the order of the pages; every page but the last is full and
+// has next, the cursor of its last entry.
+func listPages(t *testing.T, f *fixture, r linkReq, n int) []wire.LinkEntry {
+	t.Helper()
+	r.action, r.limit = wire.LinkList, n
+	var all []wire.LinkEntry
+	for range 100 {
+		a := listAnswer(t, f.link(t, r))
+		all = append(all, a.Links...)
+		if a.Next == "" {
+			if len(a.Links) > n {
+				t.Fatalf("last page of %d", len(a.Links))
+			}
+			return all
+		}
+		if len(a.Links) != n || a.Next != a.Links[n-1].Cursor {
+			t.Fatalf("page %+v", a)
+		}
+		r.after = a.Next
+	}
+	t.Fatal("no last page")
+	return nil
+}
+
+// TestLinkListPages: one order for every page, newest first by acceptance
+// order, then by id; pages after a cursor continue it without a gap or a
+// repeat, also between entries of equal acceptance order.
+func TestLinkListPages(t *testing.T) {
+	f := listFixture(t, newSigner(t))
+	var urls []string
+	for i := range 7 {
+		urls = append(urls, f.drop(t, f.user, wire.Meta{File: fmt.Sprintf("f%d", i)}, fmt.Sprint(i)))
+	}
+	// Five of them accepted in the same instant, two of those also with the
+	// same seq: the id orders them.
+	for i, u := range urls[1:6] {
+		f.setSidecar(t, u, func(sc *store.Sidecar) { sc.Accepted, sc.AcceptedSeq = 1791288000000000000, i/2 })
+	}
+	full := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
+	if len(full.Links) != 7 || full.Next != "" {
+		t.Fatalf("full: %+v", full)
+	}
+	order := func(l wire.LinkEntry) (queueOrder [2]int64, id string) {
+		c, err := wire.ParseLinkCursor(l.Cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return [2]int64{c.NS, int64(c.Seq)}, c.ID
+	}
+	for i := 1; i < len(full.Links); i++ {
+		po, pid := order(full.Links[i-1])
+		o, id := order(full.Links[i])
+		if po[0] < o[0] || po[0] == o[0] && (po[1] < o[1] || po[1] == o[1] && pid <= id) {
+			t.Fatalf("not newest first at %d: %v %s, %v %s", i, po, pid, o, id)
+		}
+	}
+	for _, n := range []int{1, 2, 3, 7, 8} {
+		got := listPages(t, f, linkReq{signer: f.user}, n)
+		if len(got) != 7 {
+			t.Fatalf("limit %d: %d entries", n, len(got))
+		}
+		for i := range got {
+			if got[i] != full.Links[i] {
+				t.Errorf("limit %d, entry %d: %+v, want %+v", n, i, got[i], full.Links[i])
+			}
+		}
+	}
+	// After an entry: the rest of the order; after the last: none.
+	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList, after: full.Links[2].Cursor, limit: 2}))
+	if len(a.Links) != 2 || a.Links[0] != full.Links[3] || a.Links[1] != full.Links[4] || a.Next != full.Links[4].Cursor {
+		t.Fatalf("after 2: %+v", a)
+	}
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList, after: full.Links[6].Cursor})); len(a.Links) != 0 || a.Links == nil || a.Next != "" {
+		t.Fatalf("after the last: %+v", a)
+	}
+	// A cursor of a removed entry still places the page.
+	linkAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: full.Links[3].URL}), http.StatusOK)
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList, after: full.Links[3].Cursor, limit: 1})); len(a.Links) != 1 || a.Links[0] != full.Links[4] {
+		t.Fatalf("after a removed entry: %+v", a)
+	}
+}
+
+// TestLinkListLimit: a page holds at most limit entries, and never more
+// than the server cap; no limit is the cap.
+func TestLinkListLimit(t *testing.T) {
+	f := listFixture(t, newSigner(t))
+	for i := range 3 {
+		f.drop(t, f.user, wire.Meta{}, fmt.Sprint(i))
+	}
+	defer func(m int) { maxLinkPage = m }(maxLinkPage)
+	maxLinkPage = 2
+	for _, limit := range []int{0, 2, 5, wire.MaxLinkPage + 1} {
+		if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList, limit: limit})); len(a.Links) != 2 || a.Next != a.Links[1].Cursor {
+			t.Errorf("limit %d: %+v", limit, a)
+		}
+	}
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList, limit: 1})); len(a.Links) != 1 || a.Next == "" {
+		t.Errorf("limit 1: %+v", a)
 	}
 }
 
@@ -757,6 +864,11 @@ func TestLinkListRequest(t *testing.T) {
 		{"with a link", linkReq{action: wire.LinkList, link: link}, http.StatusBadRequest, "link list takes an empty Luk-Link"},
 		{"wrong method", linkReq{action: wire.LinkList, method: http.MethodDelete}, http.StatusMethodNotAllowed, "needs method GET"},
 		{"with ttl", linkReq{action: wire.LinkList, ttl: "1d"}, http.StatusUnprocessableEntity, "list takes no ttl"},
+		{"negative limit", linkReq{action: wire.LinkList, limit: -1}, http.StatusUnprocessableEntity, "bad limit -1"},
+		{"malformed cursor", linkReq{action: wire.LinkList, after: "not a cursor"}, http.StatusBadRequest, `bad cursor \"not a cursor\"`},
+		{"cursor of other bytes", linkReq{action: wire.LinkList, after: base64.RawURLEncoding.EncodeToString([]byte("1.x.id"))}, http.StatusBadRequest, "bad cursor"},
+		{"remove with list fields", linkReq{action: wire.LinkRemove, link: link, limit: 1}, http.StatusUnprocessableEntity, "remove takes no limit, after or any"},
+		{"ttl with list fields", linkReq{action: wire.LinkTTL, link: link, ttl: "1d", any: true}, http.StatusUnprocessableEntity, "ttl takes no limit, after or any"},
 		{"remove without a link", linkReq{action: wire.LinkRemove}, http.StatusBadRequest, "go together"},
 		{"upload namespace", linkReq{action: wire.LinkList, ns: wire.Namespace}, http.StatusUnauthorized, "namespace"},
 		{"stranger", linkReq{action: wire.LinkList, signer: newSigner(t)}, http.StatusUnauthorized, ""},

@@ -120,8 +120,20 @@ func TestCompleteFixedAndFree(t *testing.T) {
 		{[]string{"send", "--parallel", ""}, nil, ":4"},
 		{[]string{"get", "--parallel", ""}, nil, ":4"},
 		{[]string{"config", "endpoint", "add", "--pin", ""}, nil, ":4"},
+		{[]string{"link", "ls", "--limit", ""}, nil, ":4"},
+		{[]string{"link", "ls", "--after", ""}, nil, ":4"},
 	} {
 		wantCompletion(t, c.args, c.want, c.directive)
+	}
+}
+
+func TestCompleteLinkLsFlags(t *testing.T) {
+	tempConfig(t)
+	got, dir := complete(t, "link", "ls", "--")
+	for _, f := range []string{"--any", "--limit", "--after", "--all", "--cursor", "--quiet"} {
+		if !slices.ContainsFunc(got, func(c string) bool { return strings.HasPrefix(c, f+"\t") }) {
+			t.Errorf("link ls --: no %s in %q %s", f, got, dir)
+		}
 	}
 }
 

@@ -59,7 +59,7 @@ func TestOpNoAnswer(t *testing.T) {
 	lo := Options{URL: srv.URL + "/drop", Pins: o.Pins, Signer: o.Signer}
 	_, err = Link(context.Background(), LinkOptions{Options: lo, Link: "https://h/d/a", Action: wire.LinkRemove})
 	wantNoAnswer(t, "link remove", err, opWait)
-	_, err = LinkList(context.Background(), lo)
+	_, err = LinkList(context.Background(), lo, LinkQuery{})
 	wantNoAnswer(t, "link list", err, opWait)
 	u, _ := url.Parse(srv.URL)
 	_, err = ListEndpoints(context.Background(), u, o.Pins, o.Signer)

@@ -82,7 +82,21 @@ func (s *Server) handleLink(r *http.Request, sn *snapshot, l *listener, ep *conf
 		if lm.TTL != "" {
 			return 0, nil, fail(http.StatusUnprocessableEntity, "list takes no ttl")
 		}
-		return s.linkList(sn.cfg, ep, id, now)
+		if lm.Limit < 0 {
+			return 0, nil, fail(http.StatusUnprocessableEntity, "bad limit %d", lm.Limit)
+		}
+		var after *wire.LinkCursor
+		if lm.After != "" {
+			c, err := wire.ParseLinkCursor(lm.After)
+			if err != nil {
+				return 0, nil, fail(http.StatusBadRequest, "%v", err)
+			}
+			after = &c
+		}
+		return s.linkList(sn.cfg, ep, id, now, lm.Limit, after, lm.Any)
+	}
+	if lm.Limit != 0 || lm.After != "" || lm.Any {
+		return 0, nil, fail(http.StatusUnprocessableEntity, "%s takes no limit, after or any", action)
 	}
 	t, err := resolveLink(sn.cfg, link)
 	if err != nil {
@@ -274,17 +288,21 @@ func (s *Server) linkReplace(r *http.Request, cs *chanSession, sn *snapshot, t *
 	return s.openUpload(cs, r, u, max)
 }
 
-// maxLinkList caps a list answer; tests lower it.
-var maxLinkList = wire.MaxLinkList
+// maxLinkPage caps a page of a list answer; tests lower it.
+var maxLinkPage = wire.MaxLinkPage
 
-// linkList answers the links of id on ep: the files of the respond
-// storage of ep, and of its secret storage, uploaded through ep by id, not
-// expired; claimed once files are out of the data tree. An identity of
-// private.list also gets the files of access any others uploaded through
-// ep that the protect expose serves it, not once, marked shared. Newest
-// first, at most maxLinkList: the own links first, the shared ones up to
-// the remainder.
-func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Identity, now time.Time) (int, any, error) {
+// linkList answers a page of the links of id on ep: the files of the
+// respond storage of ep, and of its secret storage, uploaded through ep by
+// id, not expired; claimed once files are out of the data tree. With
+// others (any in the request), an identity of private.list also gets the
+// files of access any others uploaded through ep that the protect expose
+// serves it, not once, marked shared; without it private.list is not
+// looked at. One order for all: newest first by acceptance order, then
+// by id, then by URL. The page holds the entries after the cursor after
+// (from the newest without one), at most limit (none: maxLinkPage) and
+// never more than maxLinkPage; Next is the cursor of its last entry when
+// more follow.
+func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Identity, now time.Time, limit int, after *wire.LinkCursor, others bool) (int, any, error) {
 	storages := []string{ep.Storage}
 	if ep.Secret != nil {
 		storages = append(storages, ep.Secret.Storage)
@@ -294,6 +312,11 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 		order queue.Acceptance
 		id    string
 		e     wire.LinkEntry
+	}
+	// rank orders a before b (negative) in the list: newest first, then
+	// by id; equal for one upload.
+	rank := func(a, b item) int {
+		return cmp.Or(b.order.Compare(a.order), strings.Compare(b.id, a.id))
 	}
 	var items []item
 	for _, sn := range storages {
@@ -316,11 +339,12 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 				}
 			}
 		}
-		// The protect allow of the respond storage, when id may see the
-		// any files of others (private.list); never of the secret storage.
+		// The protect allow of the respond storage, when id asks for the
+		// any files of others and may see them (private.list); never of
+		// the secret storage.
 		var allow []string
 		share := false
-		if x := cfg.Expose[st.Protect]; sn == ep.Storage && st.Protect != "" && x != nil && x.Auth.SSH != nil && auth.Allowed(id, ep.Private.List) {
+		if x := cfg.Expose[st.Protect]; others && sn == ep.Storage && st.Protect != "" && x != nil && x.Auth.SSH != nil && auth.Allowed(id, ep.Private.List) {
 			allow, share = x.Auth.SSH.Allow, true
 		}
 		err := l.Walk(func(rel string, sc store.Sidecar) error {
@@ -331,23 +355,27 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 			if sc.AliasOf != "" || sc.Endpoint != ep.Name || !own && !shared || expiredAt(sc.Expires, now) {
 				return nil
 			}
+			it := item{order: sc.Order(), id: sc.ID}
+			if after != nil && rank(it, item{order: queue.Acceptance{NS: after.NS, Seq: after.Seq}, id: after.ID}) <= 0 {
+				return nil
+			}
 			u, ok := s.fileURL(cfg, sn, rel, sc.Client.Access)
 			if !ok {
 				return nil
 			}
-			e := wire.LinkEntry{
+			it.e = wire.LinkEntry{
 				URL: u, File: sc.Client.File, Size: sc.Size, Received: sc.Received, Expires: sc.Expires,
 				Once: sc.Client.Once, Mutable: sc.Client.Mutable, Portal: sc.Client.Portal, Access: sc.Client.Access, Updated: sc.Updated,
-				Shared: shared,
+				Shared: shared, Cursor: wire.LinkCursor{NS: it.order.NS, Seq: it.order.Seq, ID: sc.ID}.Encode(),
 			}
 			if p := ep.Permanent; p != nil && own && sn == ep.Storage && sc.Client.Permanent != "" && sc.PermanentPath == p.Path {
 				cur := current[p.Path+"/"+sc.Client.Permanent]
 				if _, _, ok := p.Entry(sc.Client.Permanent); ok && cur.Current == rel && cur.ID == sc.ID {
-					e.Permanent = sc.Client.Permanent
-					e.PermanentURL, _ = s.fileURL(cfg, sn, p.Path+"/"+sc.Client.Permanent, "")
+					it.e.Permanent = sc.Client.Permanent
+					it.e.PermanentURL, _ = s.fileURL(cfg, sn, p.Path+"/"+sc.Client.Permanent, "")
 				}
 			}
-			items = append(items, item{sc.Order(), sc.ID, e})
+			items = append(items, it)
 			return nil
 		})
 		if err != nil {
@@ -356,29 +384,19 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 		}
 	}
 	slices.SortFunc(items, func(a, b item) int {
-		return cmp.Or(b.order.Compare(a.order), strings.Compare(b.id, a.id), strings.Compare(a.e.URL, b.e.URL))
+		return cmp.Or(rank(a, b), strings.Compare(a.e.URL, b.e.URL))
 	})
-	// The cap keeps the own links first; the shared entries fill the
-	// remainder, newest first.
-	owned := 0
-	for _, it := range items {
-		if !it.e.Shared {
-			owned++
-		}
+	if limit == 0 || limit > maxLinkPage {
+		limit = maxLinkPage
 	}
 	a := &wire.LinkListAnswer{Links: []wire.LinkEntry{}}
-	room := max(maxLinkList-owned, 0)
-	for _, it := range items {
-		if it.e.Shared && room == 0 || len(a.Links) == maxLinkList {
-			a.Truncated = true
-			continue
-		}
-		if it.e.Shared {
-			room--
-		}
+	for _, it := range items[:min(limit, len(items))] {
 		a.Links = append(a.Links, it.e)
 	}
-	s.log.Info("link list", "sender", id.Name, "endpoint", ep.Name, "storage", strings.Join(storages, ","), "links", len(a.Links))
+	if len(items) > limit {
+		a.Next = a.Links[len(a.Links)-1].Cursor
+	}
+	s.log.Info("link list", "sender", id.Name, "endpoint", ep.Name, "storage", strings.Join(storages, ","), "links", len(a.Links), "any", others, "more", a.Next != "")
 	return http.StatusOK, a, nil
 }
 

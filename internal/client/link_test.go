@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -29,7 +30,7 @@ func TestLinkThroughChannel(t *testing.T) {
 		return &chantest.Answer{Status: http.StatusOK, Body: wire.LinkAnswer{URL: req.Header.Get(wire.HeaderLink), Removed: true}}
 	}
 	o := Options{URL: srv.URL + "/drop", Pins: mustPins(t, srv.Pin()), Signer: newSigner(t)}
-	ls, err := LinkList(context.Background(), o)
+	ls, err := LinkList(context.Background(), o, LinkQuery{})
 	if err != nil || len(ls.Links) != 1 || ls.Links[0].URL != "https://h/d/a" {
 		t.Fatalf("list: %+v %v", ls, err)
 	}
@@ -65,7 +66,7 @@ func TestLinkThroughChannel(t *testing.T) {
 	}
 	other, _ := channel.GenerateKey()
 	o.Pins = mustPins(t, channel.Words(other.Public))
-	_, err = LinkList(context.Background(), o)
+	_, err = LinkList(context.Background(), o, LinkQuery{})
 	var pm *PinMismatchError
 	if !errors.As(err, &pm) {
 		t.Fatalf("wrong pin: %v", err)
@@ -74,8 +75,67 @@ func TestLinkThroughChannel(t *testing.T) {
 		t.Fatalf("wrong pin: %v", err)
 	}
 	o.Pins = nil
-	if _, err := LinkList(context.Background(), o); !errors.Is(err, ErrNoPin) {
+	if _, err := LinkList(context.Background(), o, LinkQuery{}); !errors.Is(err, ErrNoPin) {
 		t.Fatalf("no pin: %v", err)
+	}
+}
+
+// The meta of a list page carries the query; LinkListAll follows next
+// page by page, each in a channel of its own, until a page has none.
+func TestLinkListAll(t *testing.T) {
+	srv := chantest.New(t)
+	var mu sync.Mutex
+	var metas []wire.LinkMeta
+	pages := map[string]wire.LinkListAnswer{
+		"":   {Links: []wire.LinkEntry{{URL: "u1", Cursor: "c1"}, {URL: "u2", Cursor: "c2"}}, Next: "c2"},
+		"c2": {Links: []wire.LinkEntry{{URL: "u3", Cursor: "c3"}, {URL: "u4", Cursor: "c4"}}, Next: "c4"},
+		"c4": {Links: []wire.LinkEntry{{URL: "u5", Cursor: "c5"}}},
+	}
+	srv.Op = func(req channel.Request, _ []byte) *chantest.Answer {
+		m, err := wire.DecodeLinkMeta(req.Header.Get(wire.HeaderMeta))
+		if err != nil {
+			t.Error(err)
+		}
+		mu.Lock()
+		metas = append(metas, m)
+		mu.Unlock()
+		return &chantest.Answer{Status: http.StatusOK, Body: pages[m.After]}
+	}
+	o := Options{URL: srv.URL + "/drop", Pins: mustPins(t, srv.Pin()), Signer: newSigner(t)}
+	a, err := LinkList(context.Background(), o, LinkQuery{Limit: 2, After: "c2", Any: true})
+	if err != nil || len(a.Links) != 2 || a.Next != "c4" || metas[0] != (wire.LinkMeta{Limit: 2, After: "c2", Any: true}) {
+		t.Fatalf("page: %+v %v %+v", a, err, metas)
+	}
+	metas = nil
+	a, err = LinkListAll(context.Background(), o, LinkQuery{Limit: 2, Any: true})
+	var urls []string
+	for _, l := range a.Links {
+		urls = append(urls, l.URL)
+	}
+	if err != nil || strings.Join(urls, " ") != "u1 u2 u3 u4 u5" || a.Next != "" || len(metas) != 3 || srv.Count(channel.KindOp) != 4 {
+		t.Fatalf("all: %+v %v %+v", a, err, metas)
+	}
+	for i, after := range []string{"", "c2", "c4"} {
+		if metas[i] != (wire.LinkMeta{Limit: 2, After: after, Any: true}) {
+			t.Errorf("page %d: %+v", i, metas[i])
+		}
+	}
+	// From a cursor: the pages after it.
+	if a, err := LinkListAll(context.Background(), o, LinkQuery{After: "c2"}); err != nil || len(a.Links) != 3 || a.Links[0].URL != "u3" {
+		t.Fatalf("all after c2: %+v %v", a, err)
+	}
+
+	// A server that answers a cursor already followed, or a next page
+	// without entries, would never end: an error.
+	for name, bad := range map[string]map[string]wire.LinkListAnswer{
+		"repeated": {"": {Links: []wire.LinkEntry{{URL: "u1"}}, Next: "c1"}, "c1": {Links: []wire.LinkEntry{{URL: "u2"}}, Next: "c1"}},
+		"loop":     {"": {Links: []wire.LinkEntry{{URL: "u1"}}, Next: "c1"}, "c1": {Links: []wire.LinkEntry{{URL: "u2"}}, Next: "c2"}, "c2": {Links: []wire.LinkEntry{{URL: "u3"}}, Next: "c1"}},
+		"empty":    {"": {Links: []wire.LinkEntry{}, Next: "c1"}},
+	} {
+		pages = bad
+		if a, err := LinkListAll(context.Background(), o, LinkQuery{}); err == nil || !strings.Contains(err.Error(), "link list") {
+			t.Errorf("%s: %+v %v", name, a, err)
+		}
 	}
 }
 

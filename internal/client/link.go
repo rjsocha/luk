@@ -117,10 +117,19 @@ func linkReplace(ctx context.Context, o LinkOptions, method string) (*wire.LinkA
 	return a, nil
 }
 
-// LinkList asks the endpoint o.URL through the channel for the links of
-// the signer there; only URL, Pins and Signer of o count.
-func LinkList(ctx context.Context, o Options) (*wire.LinkListAnswer, error) {
-	metaS, err := wire.EncodeLinkMeta(wire.LinkMeta{})
+// LinkQuery is what a link list asks for: at most Limit entries (0: as
+// many as the server gives), those after the cursor After, and with Any
+// the shared entries too (private.list).
+type LinkQuery struct {
+	Limit int
+	After string
+	Any   bool
+}
+
+// LinkList asks the endpoint o.URL through the channel for one page of
+// the links of the signer there; only URL, Pins and Signer of o count.
+func LinkList(ctx context.Context, o Options, q LinkQuery) (*wire.LinkListAnswer, error) {
+	metaS, err := wire.EncodeLinkMeta(wire.LinkMeta{Limit: q.Limit, After: q.After, Any: q.Any})
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +148,36 @@ func LinkList(ctx context.Context, o Options) (*wire.LinkListAnswer, error) {
 	if err := json.Unmarshal(resp.Body, a); err != nil {
 		return nil, fmt.Errorf("bad answer (%d): %w", resp.Status, err)
 	}
+	if a.Links == nil {
+		a.Links = []wire.LinkEntry{}
+	}
 	return a, nil
+}
+
+// LinkListAll asks for the pages of q one after the other, each its own
+// request, from q.After to the last page, and returns their entries as
+// one answer without Next. A next the server already gave, or a page
+// with a next but no entries, is an error: such a list would not end.
+func LinkListAll(ctx context.Context, o Options, q LinkQuery) (*wire.LinkListAnswer, error) {
+	all := &wire.LinkListAnswer{Links: []wire.LinkEntry{}}
+	seen := map[string]bool{q.After: true}
+	for {
+		a, err := LinkList(ctx, o, q)
+		if err != nil {
+			return nil, err
+		}
+		all.Links = append(all.Links, a.Links...)
+		switch {
+		case a.Next == "":
+			return all, nil
+		case seen[a.Next]:
+			return nil, fmt.Errorf("link list: the server repeats the page after %q", a.Next)
+		case len(a.Links) == 0:
+			return nil, fmt.Errorf("link list: the server answers an empty page with next %q", a.Next)
+		}
+		seen[a.Next] = true
+		q.After = a.Next
+	}
 }
 
 // LinkHost is the host a link mapping is kept under: the lowercase host of

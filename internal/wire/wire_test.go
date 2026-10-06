@@ -299,6 +299,47 @@ func TestLinkMeta(t *testing.T) {
 	}
 }
 
+// The list fields of a link meta round-trip; their values are checked by
+// lukd after the signature.
+func TestLinkMetaList(t *testing.T) {
+	s, err := EncodeLinkMeta(LinkMeta{Limit: 50, After: "abc", Any: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := base64.RawURLEncoding.EncodeToString([]byte(`{"limit":50,"after":"abc","any":true}`)); s != want {
+		t.Fatalf("%s, want %s", s, want)
+	}
+	if m, err := DecodeLinkMeta(s); err != nil || m != (LinkMeta{Limit: 50, After: "abc", Any: true}) {
+		t.Fatalf("%+v %v", m, err)
+	}
+}
+
+// A cursor is base64url of the acceptance order and the id; only the
+// form EncodeLinkCursor writes parses.
+func TestLinkCursor(t *testing.T) {
+	c := LinkCursor{NS: 1791288000123456789, Seq: 3, ID: "20261006T120000Z-0a1b2c3d"}
+	s := c.Encode()
+	if want := base64.RawURLEncoding.EncodeToString([]byte("1791288000123456789.3.20261006T120000Z-0a1b2c3d")); s != want {
+		t.Fatalf("%s, want %s", s, want)
+	}
+	if got, err := ParseLinkCursor(s); err != nil || got != c {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if got, err := ParseLinkCursor(LinkCursor{ID: "x"}.Encode()); err != nil || got != (LinkCursor{ID: "x"}) {
+		t.Fatalf("zero order: %+v %v", got, err)
+	}
+	b64 := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	for _, bad := range []string{
+		"", "!!", b64("1.2.x") + "=", base64.StdEncoding.EncodeToString([]byte("1.2.x>?")),
+		b64("1.2"), b64("1.2."), b64("x.2.id"), b64("1.x.id"), b64("01.2.id"), b64("+1.2.id"), b64("1.-2.id"),
+		b64("1.2.a\nb"), b64("1.2." + strings.Repeat("a", 200)),
+	} {
+		if c, err := ParseLinkCursor(bad); err == nil {
+			t.Errorf("%q accepted: %+v", bad, c)
+		}
+	}
+}
+
 func TestValidateReplace(t *testing.T) {
 	n := int64(1)
 	ok := Meta{Portal: PortalDirect, Source: SourceFile, File: "a", Type: "text/plain", Size: &n, SHA256: strings.Repeat("0", 64)}

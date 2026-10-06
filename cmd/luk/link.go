@@ -160,9 +160,13 @@ replace prints the URL; --json prints the server answer instead. Exit codes as f
 	return cmd
 }
 
+// defaultLinkPage is the page size luk link ls asks for without --limit.
+const defaultLinkPage = 100
+
 func newLinkLsCmd(out io.Writer) *cobra.Command {
-	var endpoint, key string
-	var asJSON bool
+	var endpoint, key, after string
+	var asJSON, anyOf, all, withCursor, quiet bool
+	var limit int
 	cmd := &cobra.Command{
 		Use:   "ls",
 		Short: "List your links on an endpoint",
@@ -173,26 +177,38 @@ in lukd). The request goes to --endpoint, else to the default endpoint.
 
 Columns: NAME (the file name sent, - without one), SIZE, SENT and EXPIRES in
 local time (never: no expiry), FLAGS (once, mutable, reveal or download,
-private or any, shared, permanent) and URL (luk:// for a private file);
-newest first. An identity of private.list in lukd also gets the files of
-access any others sent that it may download, with the flag shared:
-read-only, link --rm, --ttl and --file refuse them. Nothing is printed when there is no link. The current version of a
-permanent name (luk send --permanent) is a link of its own with the flag
-permanent; after the table a block per permanent name, by name:
-"permanent NAME", its permanent URL ("url") and the URL of its current
-version ("version", as in the table).
+private or any, shared, permanent), URL (luk:// for a private file) and,
+with --cursor, CURSOR; newest first. With --any, an identity of
+private.list in lukd also gets the files of access any others sent that it
+may download, with the flag shared: read-only, link --rm, --ttl and --file
+refuse them; without private.list --any lists your links only. Nothing is
+printed when there is no link. The current version of a permanent name
+(luk send --permanent) is a link of its own with the flag permanent; after
+the table a block per permanent name whose current version is in the
+table, by name: "permanent NAME", its permanent URL ("url") and the URL
+of its current version ("version", as in the table).
+
+The list comes in pages of --limit links (default 100, at most 1000), each
+link with an opaque cursor; --after CURSOR starts the page after that
+link. When more links follow, the text output ends with "more: luk link ls
+--after CURSOR" on stderr (not with --quiet); --all fetches every page, one
+request each, and prints them as one list.
 
 --json prints one object: "links" (name, size, sent, expires, updated,
-flags, url, permanent: the name a link is the current version of, and
-shared: true for a file of another identity) and
-"permanent" (name, url, version_url: the url of its link), both always
-present; a list cut at 10000 links has "truncated": true, noted on stderr
-otherwise.`,
+flags, url, permanent: the name a link is the current version of, shared:
+true for a file of another identity, and cursor), "permanent" (name, url,
+version_url: the url of its link), both always present, and "next" (the
+cursor of the last link) when more links follow.`,
 		Example: `  luk link ls
   luk link ls -e drop --json
-  luk link ls --json | jq -r '.permanent[] | "\(.name) \(.url)"'`,
+  luk link ls --all --any
+  luk link ls --limit 20 --after MTc5MTI4ODAwMDAwMDAwMDAwMC4wLjIwMjYxMDA2VDEyMDAwMFotMGExYjJjM2Q
+  luk link ls --all --json | jq -r '.permanent[] | "\(.name) \(.url)"'`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if limit < 1 || limit > wire.MaxLinkPage {
+				return usageError{fmt.Errorf("--limit: want 1 to %d", wire.MaxLinkPage)}
+			}
 			cfg, _, err := client.LoadMerged()
 			if err != nil {
 				return usageError{err}
@@ -207,7 +223,12 @@ otherwise.`,
 			}
 			ctx, stop := interruptContext()
 			defer stop()
-			a, err := client.LinkList(ctx, client.Options{URL: url, Pins: pins, Signer: signer})
+			o, q := client.Options{URL: url, Pins: pins, Signer: signer}, client.LinkQuery{Limit: limit, After: after, Any: anyOf}
+			list := client.LinkList
+			if all {
+				list = client.LinkListAll
+			}
+			a, err := list(ctx, o, q)
 			if err != nil {
 				return unknownKeyHint(err, agentKeys)
 			}
@@ -217,27 +238,37 @@ otherwise.`,
 				enc.SetIndent("", "  ")
 				return enc.Encode(ls)
 			}
-			if a.Truncated {
-				fmt.Fprintf(cmd.ErrOrStderr(), "luk: the server lists the newest %d links only\n", len(a.Links))
+			if err := printLinks(out, ls, time.Local, withCursor); err != nil {
+				return err
 			}
-			return printLinks(out, ls, time.Local)
+			if ls.Next != "" && !quiet {
+				fmt.Fprintf(cmd.ErrOrStderr(), "more: luk link ls --after %s\n", client.Printable(ls.Next))
+			}
+			return nil
 		},
 	}
 	f := cmd.Flags()
 	f.StringVarP(&endpoint, "endpoint", "e", "", "endpoint name from the config, or a URL (default: config \"default\")")
 	f.StringVarP(&key, "key", "k", "", "private key file (uses PATH-cert.pub when present), a .pub file of an agent key, or SHA256:... fingerprint of an agent key")
 	f.BoolVar(&asJSON, "json", false, "print the server answer as JSON")
-	completeFlags(cmd, map[string]cobra.CompletionFunc{"endpoint": completeEndpoint, "key": completeKey})
+	f.BoolVar(&anyOf, "any", false, "also list the files of access any others sent that you may download (private.list)")
+	f.IntVar(&limit, "limit", defaultLinkPage, fmt.Sprintf("links per page, 1 to %d", wire.MaxLinkPage))
+	f.StringVar(&after, "after", "", "start after the link of this cursor (the next of a page)")
+	f.BoolVar(&all, "all", false, "fetch every page")
+	f.BoolVar(&withCursor, "cursor", false, "add the CURSOR column")
+	f.BoolVarP(&quiet, "quiet", "q", false, "print no hint of the next page on stderr")
+	completeFlags(cmd, map[string]cobra.CompletionFunc{"endpoint": completeEndpoint, "key": completeKey, "limit": completeNone, "after": completeNone})
 	return cmd
 }
 
 // linkList is the output of luk link ls --json: the links, newest first,
-// and the permanent names published by the signer, by name; a permanent
-// name joins the link of its current version by VersionURL == URL.
+// the permanent names published by the signer whose current version is
+// among them, by name, and the cursor of the next page; a permanent name
+// joins the link of its current version by VersionURL == URL.
 type linkList struct {
 	Links     []linkItem      `json:"links"`
 	Permanent []permanentItem `json:"permanent"`
-	Truncated bool            `json:"truncated,omitempty"`
+	Next      string          `json:"next,omitempty"`
 }
 
 type linkItem struct {
@@ -253,6 +284,8 @@ type linkItem struct {
 	// Shared: a file of access any of another identity (private.list),
 	// read-only.
 	Shared bool `json:"shared,omitempty"`
+	// Cursor is the place of the link in the list (luk link ls --after).
+	Cursor string `json:"cursor"`
 }
 
 type permanentItem struct {
@@ -265,10 +298,10 @@ type permanentItem struct {
 // a permanent name is its current version; an older one listed as a
 // version of the same name is a plain link.
 func newLinkList(a *wire.LinkListAnswer) linkList {
-	out := linkList{Links: []linkItem{}, Permanent: []permanentItem{}, Truncated: a.Truncated}
+	out := linkList{Links: []linkItem{}, Permanent: []permanentItem{}, Next: a.Next}
 	seen := map[[2]string]bool{}
 	for _, l := range a.Links {
-		it := linkItem{Name: l.File, Size: l.Size, Sent: l.Received, Expires: l.Expires, Updated: l.Updated, Flags: []string{}, URL: l.URL}
+		it := linkItem{Name: l.File, Size: l.Size, Sent: l.Received, Expires: l.Expires, Updated: l.Updated, Flags: []string{}, URL: l.URL, Cursor: l.Cursor}
 		if l.Once {
 			it.Flags = append(it.Flags, "once")
 		}
@@ -300,21 +333,30 @@ func newLinkList(a *wire.LinkListAnswer) linkList {
 	return out
 }
 
-// printLinks writes the links as aligned columns, times in loc, then a
-// block per permanent name; nothing for no links.
-func printLinks(w io.Writer, ls linkList, loc *time.Location) error {
+// printLinks writes the links as aligned columns, times in loc, with the
+// CURSOR column when withCursor, then a block per permanent name; nothing
+// for no links.
+func printLinks(w io.Writer, ls linkList, loc *time.Location, withCursor bool) error {
 	if len(ls.Links) == 0 {
 		return nil
 	}
 	p := client.Printable
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSIZE\tSENT\tEXPIRES\tFLAGS\tURL")
+	head := "NAME\tSIZE\tSENT\tEXPIRES\tFLAGS\tURL"
+	if withCursor {
+		head += "\tCURSOR"
+	}
+	fmt.Fprintln(tw, head)
 	for _, l := range ls.Links {
 		exp := "never"
 		if l.Expires != "" {
 			exp = localTime(l.Expires, loc)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", p(cmp.Or(l.Name, "-")), client.HumanBytes(l.Size), p(localTime(l.Sent, loc)), p(exp), p(cmp.Or(strings.Join(l.Flags, ","), "-")), p(l.URL))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s", p(cmp.Or(l.Name, "-")), client.HumanBytes(l.Size), p(localTime(l.Sent, loc)), p(exp), p(cmp.Or(strings.Join(l.Flags, ","), "-")), p(l.URL))
+		if withCursor {
+			fmt.Fprintf(tw, "\t%s", p(l.Cursor))
+		}
+		fmt.Fprintln(tw)
 	}
 	if err := tw.Flush(); err != nil {
 		return err

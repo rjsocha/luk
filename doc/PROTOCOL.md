@@ -702,7 +702,7 @@ the headers `Luk-Link` and `Luk-Link-Action`.
 | `remove` | `DELETE` | the link URL | `{}` |
 | `ttl` | `PATCH` | the link URL | `{"ttl": "3d"}` (or `max`) |
 | `replace` | `PUT` | the link URL | the upload meta of the new content |
-| `list` | `GET` | empty | `{}` |
+| `list` | `GET` | empty | `{"limit": 100, "after": "<cursor>", "any": true}`, each optional |
 
 Headers: `Luk-Link`, `Luk-Link-Action` and those of 5.1 (`Luk-Meta` is
 required, `{}` being `e30`). Canonical text, namespace `luk-link@v2`:
@@ -723,8 +723,10 @@ luk-link@v2
 - `Luk-Link` is signed as sent: the full URL as the upload answer or the
   list gave it (`https://...`, `luk://...`, with its fragment); its line
   is empty for `list`.
-- The meta of `remove`, `ttl` and `list` is a JSON object with the only
-  field `ttl`, required for `ttl` and refused for the others (422).
+- The meta of `remove`, `ttl` and `list` is a JSON object of `ttl`,
+  required for `ttl` and refused for the others (422), and of the list
+  fields `limit`, `after` and `any`, refused for `remove` and `ttl` (422);
+  any other field makes the meta invalid (401).
 - The meta of `replace` describes the new content only: `file`, `source`,
   `type`, `size`, `sha256` and `portal: "direct"`; any other field set is
   422. The link keeps its tags, ttl, access and the rest.
@@ -749,9 +751,25 @@ Answers:
   COMPLETE answers 202 `{"url", "id", "size", "sha256"}`.
 - `list`: 200 `{"links": [{"url", "file", "size", "received", "expires",
   "once", "mutable", "portal", "access", "updated", "permanent",
-  "permanent_url"}], "truncated": true}`, the links of the signer on the
-  endpoint, newest first, at most 10000 (`truncated` then); `links` is
-  `[]` for none.
+  "permanent_url", "shared", "cursor"}], "next"}`, one page of the links
+  of the signer on the endpoint; `links` is `[]` for none.
+  - Order: newest first by acceptance order, then by upload id
+    (descending), then by URL; the same order for every page.
+  - `limit` is the most entries of the page: absent, 0 or above 1000
+    means 1000 (the cap of a page); negative is 422 `bad limit <n>`.
+  - `cursor` of an entry is opaque: base64url without padding of
+    `<accepted ns>.<accepted seq>.<upload id>`. `after` (a cursor) starts
+    the page strictly after that place in the order, also when its entry
+    is gone; a malformed cursor is 400 `bad cursor "<cursor>"`. `next`
+    is the cursor of the last entry when more follow, absent on the last
+    page. A client walks the list with one request (and one session) per
+    page, `after` set to the `next` of the page before, and stops at a
+    page without `next`; a `next` it already followed means a server
+    that never ends the list.
+  - `any: true` adds, in the same order, the files of access `any` of
+    other identities the signer may download, marked `"shared": true`,
+    when the endpoint's `private.list` admits the signer; without `any`
+    `private.list` is not consulted and only the signer's own links come.
 
 ### 5.4 Endpoint listing
 

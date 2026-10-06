@@ -613,7 +613,7 @@ list of entries in the `allow` syntax (key names, `<ca>:<glob>`,
 | `link.remove`, `link.ttl`, `link.list` | the link action (see Links) |
 | `link.replace` | the link action `replace` and `--mutable` uploads |
 | `private.owner`, `private.any` | `--private` and `--private --any` uploads (see Private files) |
-| `private.list` | the files of access `any` of others in the link `list`, read-only (see Private files) |
+| `private.list` | the files of access `any` of others in the link `list` with `any` (`luk link ls --any`), read-only (see Private files) |
 | `secret.allow` | `--secret` uploads into the volatile storage (see Volatile secrets) |
 | `pretty.allow` | `--pretty-url` (see `endpoint.<n>.pretty`) |
 | `backup.hostname.any`, `backup.hostname.principal` | which `backup.hostname` (`--backup`) the signer may send (below) |
@@ -1267,7 +1267,7 @@ Luk-Signature:   <SSHSIG blob, base64 std, one line>
 | `remove` | `DELETE` | `{}` | none |
 | `ttl` | `PATCH` | `{"ttl": "3d"}` | none |
 | `replace` | `PUT` | the upload meta of the new content | the new content, in parts (see Uploads in parts) |
-| `list` | `GET` | `{}` | none |
+| `list` | `GET` | `{"limit": 100, "after": "<cursor>", "any": true}` (each optional) | none |
 
 The signature is SSHSIG, namespace `luk-link@v2`, over the canonical text
 (lines joined by `\n`, no trailing newline):
@@ -1292,9 +1292,11 @@ as a link request and a link signature never as an upload (401). The
 timestamp, clock skew, server start, nonce cache (shared with uploads),
 `Host` and `allow` checks are those of an upload (Server verification).
 
-- `remove`, `ttl` and `list` meta: a JSON object; only `ttl` is known (a
-  positive duration or `max`, as in the upload meta), and it is required for
-  `ttl` and refused for `remove` and `list` (422).
+- `remove`, `ttl` and `list` meta: a JSON object of `ttl` (a positive
+  duration or `max`, as in the upload meta), required for `ttl` and
+  refused for `remove` and `list` (422), and the list fields `limit`,
+  `after` and `any`, refused for `remove` and `ttl` (422 `<action> takes
+  no limit, after or any`); any other field is 401 (an invalid meta).
 - `replace` meta: the upload meta of the new content (`file`, `source`,
   `type`, `size` and `sha256` when known, as `luk send` builds it), with
   `portal: "direct"`. `tags`, `ttl`, `once`, `pretty_url`,
@@ -1392,33 +1394,53 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   `replace`). Replaces are not ordered by acceptance: of two replaces of
   one link, the content of the one processed last stays.
 
-- `list`: the files of the respond storage of the endpoint (the link
-  storage) and of its secret storage (see Volatile secrets) whose sidecar has `endpoint` equal to the endpoint receiving
-  the request and `owner_key` equal to the signer's, not expired; claimed
+- `list`: one page of the files of the respond storage of the endpoint
+  (the link storage) and of its secret storage (see Volatile secrets)
+  whose sidecar has `endpoint` equal to the endpoint receiving the
+  request and `owner_key` equal to the signer's, not expired; claimed
   (`once`) files and aliases are not listed. 200 `{"links": [{"url",
   "file", "size", "received", "expires", "once", "mutable", "portal",
-  "access", "updated", "permanent", "permanent_url", "shared"}, ...]}`, newest first (by acceptance order, see Acceptance order; `file`,
-  `expires`, `access` and `updated` omitted when empty, `links` is `[]`
-  for none). The current version of a permanent name the endpoint
-  allocates (the one `current/meta.json` names) has `permanent` (the
-  name) and `permanent_url` (its permanent URL); both are omitted for
-  any other file, an older version not removed yet included. The `url` of a private file is its `luk://` URL, as the
-  upload answered it (see Private files). At most 10000
-  entries: the newest, with `"truncated": true`. Sidecars that cannot be
-  read are left out and logged. Logged as `link list`.
-  A signer `private.list` admits (see Private files) also gets, in the
-  same walk and order, the files of access `any` other identities sent
-  through the endpoint into its respond storage (never the secret
-  storage) that the protect expose of that storage serves it (its
-  `auth.ssh.allow` admits the signer), not expired and not `once` (a
-  viewer must not claim a file meant for someone else); these have
-  `"shared": true` (omitted for the signer's own links) and no
-  `permanent`. `link.list` is still needed. A shared entry stays
-  read-only: `remove`, `ttl` and `replace` of it are 404 `link not
-  found`, as for any link of another owner. Files of access `private`
-  of others are never listed. The 10000 cap keeps the signer's own
-  links first; shared entries fill the remainder, newest first, and
-  `"truncated": true` marks any left out.
+  "access", "updated", "permanent", "permanent_url", "shared",
+  "cursor"}, ...], "next"}` (`file`, `expires`, `access` and `updated`
+  omitted when empty, `links` is `[]` for none). The current version of
+  a permanent name the endpoint allocates (the one `current/meta.json`
+  names) has `permanent` (the name) and `permanent_url` (its permanent
+  URL); both are omitted for any other file, an older version not
+  removed yet included. The `url` of a private file is its `luk://` URL,
+  as the upload answered it (see Private files). Sidecars that cannot be
+  read are left out and logged. Logged as `link list` (with the number
+  of links, `any` and whether more follow).
+  - Order: one order for every entry and every page, newest first by
+    acceptance order (`accepted`, `accepted_seq`, see Acceptance order),
+    then by upload id (descending), then by URL. Shared entries take
+    their place in the same order, between the signer's own links.
+  - Pages: meta `limit` is the most entries of the page; absent (or 0)
+    and anything above 1000 is 1000, the cap of a page; a negative one is
+    422 `bad limit <n>`. Each entry has `cursor`: base64url without
+    padding of `<accepted ns>.<accepted_seq>.<id>`, opaque to a client
+    (it carries nothing the entry does not already tell). Meta `after` (a
+    cursor) starts the page with the first entry strictly after that
+    place in the order; the entry it came from need not exist any more.
+    A malformed cursor is 400 `bad cursor "<cursor>"`. `next` is the
+    cursor of the last entry of the page when more entries follow it,
+    absent on the last page. Each page is a request of its own, walking
+    the storage again: an upload accepted meanwhile is newer than every
+    cursor and shows only on a list from the start; a file removed or
+    expired meanwhile is not listed on a later page.
+  - Shared entries: with meta `"any": true`, a signer `private.list`
+    admits (see Private files) also gets, in the same walk and order, the
+    files of access `any` other identities sent through the endpoint into
+    its respond storage (never the secret storage) that the protect
+    expose of that storage serves it (its `auth.ssh.allow` admits the
+    signer), not expired and not `once` (a viewer must not claim a file
+    meant for someone else); these have `"shared": true` (omitted for the
+    signer's own links) and no `permanent`. Without `any`, `private.list`
+    is not consulted and only the signer's own links are listed; with
+    `any` and a signer `private.list` does not admit, the same (no
+    error). `link.list` is still needed. A shared entry stays read-only:
+    `remove`, `ttl` and `replace` of it are 404 `link not found`, as for
+    any link of another owner. Files of access `private` of others are
+    never listed.
 
 Other statuses: an unknown `Luk-Link-Action`, or a remove, ttl or replace
 without `Luk-Link` (or `Luk-Link` without an action), is 400; a `list`
@@ -1604,7 +1626,7 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   grants the signer, never the names or patterns. `luk link ls` lists
   the current version of a name as a link with the flag `permanent`, and
   then a block per permanent name with its permanent URL and the URL of
-  that version (see Client).
+  that version, on the page that holds that version (see Client).
 - Cost: a store, a removal and every maintenance pass of a storage with
   permanent names read every sidecar of the base (O(files)), as aliases
   do; the gate of an upload reads them once.
@@ -1653,8 +1675,8 @@ expose:
   <n> does not accept private uploads of access <mode>
   (private.owner|any)`), also when the list names others.
 - `endpoint.<n>.private.list` (a list of identities, see Capabilities;
-  absent or `[]` is no one): who gets, in `luk link ls` (link `list`, see
-  Links), besides its own links the files of access `any` other
+  absent or `[]` is no one): who gets, in `luk link ls --any` (link
+  `list` with `any`, see Links), besides its own links the files of access `any` other
   identities sent through the endpoint into its respond storage that it
   may download (the protect expose admits it, the same check as for `luk
   get`), not expired and not `once`, marked `shared` and read-only: their link actions stay
@@ -4964,10 +4986,17 @@ luk link URL (--rm | --ttl DURATION|max | -f|--file PATH | --stdin)
                                  exactly one; --progress and --bwlimit as
                                  for send, with --file or --stdin only
 luk link ls [-e|--endpoint NAME|URL] [-k|--key PATH|SHA256:FP] [--json]
+            [--any] [--limit N] [--after CURSOR] [--all] [--cursor]
+            [-q|--quiet]
                                  list your links on the endpoint (see
-                                 Links, list): NAME, SIZE, SENT, EXPIRES,
-                                 FLAGS, URL, then a block per permanent
-                                 name; --json: {"links", "permanent"}
+                                 Links, list), a page of --limit (default
+                                 100, 1 to 1000) after --after, or every
+                                 page with --all; --any adds the shared
+                                 files (private.list): NAME, SIZE, SENT,
+                                 EXPIRES, FLAGS, URL (and CURSOR with
+                                 --cursor), then a block per permanent
+                                 name; --json: {"links", "permanent",
+                                 "next"}
 
 luk config show [--layer global|user]   merged config with the source of
                                  each value and both layer paths; --layer
@@ -5262,22 +5291,41 @@ skip db.sql.gz
 
 `luk link ls` sends a link `list` request to `--endpoint`, else to the
 default endpoint (none: `no endpoint: pass --endpoint or set default in
-the config`, exit 1), signed with the key chosen as for `send`. Output:
-aligned columns `NAME` (the file name sent, `-` without one), `SIZE`
+the config`, exit 1), signed with the key chosen as for `send`. It asks
+for one page of `--limit` links (default 100; outside 1 to 1000 a usage
+error `--limit: want 1 to 1000`, exit 1), from the newest, or after the
+link of `--after CURSOR` (the cursor of a link, or the `next` of a
+page, see Links, list; a malformed one is the 400 of lukd). `--any` asks
+for the shared files too (`any` in the meta: the files of access `any`
+others sent that the signer may download, when `private.list` admits
+it; else just its own links, no error). `--all` follows the pages: it
+asks again after the `next` of each page, one request (and one channel
+session) per page with the same `--limit` and `--any`, from `--after`
+when given, until a page without `next`, and prints all of them as one
+list; a `next` already followed, or a page with `next` but no links, is
+an error (exit 1, the list would not end).
+
+Output: aligned columns `NAME` (the file name sent, `-` without one), `SIZE`
 (binary units: `512 B`, `1.5 KiB`), `SENT` and `EXPIRES` (local time
 `2006-01-02 15:04`; `never` without an expiry), `FLAGS` (`once`, `mutable`,
 then `reveal` or `download`, then `private` or `any`, then `shared` (a
-file of another identity listed through `private.list`, read-only), then
-`permanent`, comma separated; `-` for none) and `URL` (the `luk://` URL of a private
-file), newest first, under a header line; nothing at all for no links
-(exit 0). The current version of a permanent name is a row of its own
+file of another identity listed through `--any` and `private.list`,
+read-only), then `permanent`, comma separated; `-` for none), `URL` (the
+`luk://` URL of a private file) and, with `--cursor`, `CURSOR` (the
+cursor of the link), newest first, under a header line; nothing at all
+for no links (exit 0). The current version of a permanent name is a row of its own
 with the flag `permanent` and its version URL, which is unique. After
-the table, one block per permanent name the signer published, by name,
+the table, one block per permanent name whose current version is a row
+of the table, by name,
 each after a blank line: `permanent <name>`, then `  url      <permanent
 URL>` and `  version  <version URL>` (exactly the `URL` of its row, the
-join key); no block when there is none. The texts are escaped as every
-server text is (see Client). A truncated answer adds `luk: the server
-lists the newest <n> links only` on stderr.
+join key); no block when there is none. A page shows the blocks of the
+names whose current version is on that page, so every name is shown on
+exactly one page of a walk; with `--all` all blocks follow the whole
+list. When more links follow the page (not with `--all`), a line `more:
+luk link ls --after <next>` goes to stderr after the table (none with
+`-q`/`--quiet`); exit 0. The texts are escaped as every server text is
+(see Client).
 
 ```
 $ luk link ls
@@ -5288,6 +5336,14 @@ data.bin   20.0 MiB  2026-10-05 14:04  never    -          https://drop.example.
 permanent example.txt
   url      https://drop.example.com/d/permanent/example.txt
   version  https://drop.example.com/d/raFvNMX3MD4AVzybvdaHe5N6wBbstByy
+$ luk link ls --limit 1
+NAME       SIZE   SENT              EXPIRES  FLAGS      URL
+README.md  160 B  2026-10-05 14:04  never    permanent  https://drop.example.com/d/raFvNMX3MD4AVzybvdaHe5N6wBbstByy
+
+permanent example.txt
+  url      https://drop.example.com/d/permanent/example.txt
+  version  https://drop.example.com/d/raFvNMX3MD4AVzybvdaHe5N6wBbstByy
+more: luk link ls --after MTc5MTIwMTg0MDAwMDAwMDAwMC4wLjIwMjYxMDA1VDEyMDQwMFotMGExYjJjM2Q
 ```
 
 `--json` prints one object, built by the client from the server answer:
@@ -5297,9 +5353,10 @@ permanent example.txt
   "links": [
     {"name": "README.md", "size": 160, "sent": "2026-10-05T12:04:00Z",
      "flags": ["permanent"], "url": "https://drop.example.com/d/raFv...",
-     "permanent": "example.txt"},
+     "permanent": "example.txt", "cursor": "MTc5MTIwMTg0MDAwMDAwMDAwMC4w..."},
     {"name": "data.bin", "size": 20971520, "sent": "2026-10-05T12:04:00Z",
-     "flags": [], "url": "https://drop.example.com/d/Knpa..."}
+     "flags": [], "url": "https://drop.example.com/d/Knpa...",
+     "cursor": "MTc5MTIwMTgzOTAwMDAwMDAwMC4w..."}
   ],
   "permanent": [
     {"name": "example.txt", "url": "https://drop.example.com/d/permanent/example.txt",
@@ -5312,17 +5369,19 @@ permanent example.txt
 and `expires` (RFC 3339 as the server sends them; `expires` omitted
 without an expiry), `updated` (the last replace, omitted when none),
 `flags` (as the `FLAGS` column, `[]` for none), `url`, `permanent`
-(the name the link is the current version of; omitted otherwise), and
+(the name the link is the current version of; omitted otherwise),
 `shared` (`true` for a read-only file of another identity listed through
-`private.list`; omitted for an own link).
-`permanent` (by name): `name`, `url` (the permanent URL) and
-`version_url` (the `url` of its link). Both arrays are always present,
-`[]` when empty; `"truncated": true` marks a list cut at 10000 links. A
+`--any` and `private.list`; omitted for an own link) and `cursor` (always).
+`permanent` (by name, the names whose current version is in `links`):
+`name`, `url` (the permanent URL) and `version_url` (the `url` of its
+link). Both arrays are always present, `[]` when empty. `next` is the
+cursor to pass to `--after` for the next page, present only when more
+links follow (never with `--all`); `--json` prints no hint on stderr. A
 permanent name joins its link by `version_url == url`:
 
 ```
-luk link ls --json | jq -r '.permanent[] | "\(.name) \(.url)"'
-luk link ls --json | jq -r '.permanent as $p | .links[] | select(.permanent) | .url as $u | "\(.name) \($p[] | select(.version_url == $u) | .url)"'
+luk link ls --all --json | jq -r '.permanent[] | "\(.name) \(.url)"'
+luk link ls --all --json | jq -r '.permanent as $p | .links[] | select(.permanent) | .url as $u | "\(.name) \($p[] | select(.version_url == $u) | .url)"'
 ```
 
 Exit codes as for `send`.

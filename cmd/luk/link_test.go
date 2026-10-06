@@ -107,6 +107,12 @@ func (l *logBuf) Write(p []byte) (int, error) {
 	return l.b.Write(p)
 }
 
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 // count is the number of log lines with the message msg.
 func (l *logBuf) count(msg string) int {
 	l.mu.Lock()
@@ -509,7 +515,7 @@ func TestLinkLs(t *testing.T) {
 	}
 	out = mustRun(t, "link", "ls", "-k", e.key, "--json")
 	var ans linkList
-	if err := json.Unmarshal([]byte(out), &ans); err != nil || len(ans.Links) != 2 || ans.Permanent == nil || len(ans.Permanent) != 0 || ans.Truncated {
+	if err := json.Unmarshal([]byte(out), &ans); err != nil || len(ans.Links) != 2 || ans.Permanent == nil || len(ans.Permanent) != 0 || ans.Next != "" {
 		t.Fatalf("json %q %v", out, err)
 	}
 	if !strings.Contains(out, `"permanent": []`) {
@@ -520,16 +526,112 @@ func TestLinkLs(t *testing.T) {
 	}
 }
 
+// TestLinkLsPages: --limit asks for a page, --after for the page after a
+// cursor, --all for every page; the text output hints the next page on
+// stderr, --cursor adds the cursor column, --json carries cursor and next.
+func TestLinkLsPages(t *testing.T) {
+	e := newLukdEnv(t)
+	for i := range 5 {
+		mustRun(t, "send", "-e", "drop", "-k", e.key, "--file", namedFile(t, fmt.Sprintf("f%d.txt", i), fmt.Sprint(i)))
+	}
+	ls := func(args ...string) linkList {
+		t.Helper()
+		var l linkList
+		if err := json.Unmarshal([]byte(mustRun(t, append([]string{"link", "ls", "-e", "drop", "-k", e.key, "--json"}, args...)...)), &l); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	waitUntil(t, "five links listed", func() bool { return len(ls().Links) == 5 })
+	full := ls()
+	if full.Next != "" {
+		t.Fatalf("full: %+v", full)
+	}
+	urls := func(items []linkItem) string {
+		var u []string
+		for _, l := range items {
+			if l.Cursor == "" {
+				t.Errorf("no cursor: %+v", l)
+			}
+			u = append(u, l.URL)
+		}
+		return strings.Join(u, " ")
+	}
+	want := urls(full.Links)
+
+	page := ls("--limit", "2")
+	if len(page.Links) != 2 || page.Next != page.Links[1].Cursor || urls(page.Links) != urls(full.Links[:2]) {
+		t.Fatalf("page: %+v", page)
+	}
+	next := ls("--limit", "2", "--after", page.Next)
+	if urls(next.Links) != urls(full.Links[2:4]) || next.Next != next.Links[1].Cursor {
+		t.Fatalf("next: %+v", next)
+	}
+	if last := ls("--limit", "2", "--after", next.Next); urls(last.Links) != urls(full.Links[4:]) || last.Next != "" {
+		t.Fatalf("last: %+v", last)
+	}
+	raw := mustRun(t, "link", "ls", "-e", "drop", "-k", e.key, "--json", "--limit", "1")
+	if !strings.Contains(raw, `"next": "`+full.Links[0].Cursor+`"`) || !strings.Contains(raw, `"cursor": "`) {
+		t.Fatalf("json: %s", raw)
+	}
+	if all := ls("--all", "--limit", "2"); urls(all.Links) != want || all.Next != "" {
+		t.Fatalf("all: %+v", all)
+	}
+	if all := ls("--all", "--limit", "2", "--after", page.Next); urls(all.Links) != urls(full.Links[2:]) {
+		t.Fatalf("all after: %+v", all)
+	}
+
+	// Text: the hint of the next page on stderr, unless --quiet or --all.
+	code, out, errs := runLuk(t, "link", "ls", "-e", "drop", "-k", e.key, "--limit", "2")
+	if code != 0 || strings.Count(out, "\n") != 3 || errs != "more: luk link ls --after "+page.Next+"\n" {
+		t.Fatalf("text: exit %d %q %q", code, out, errs)
+	}
+	if code, out, errs := runLuk(t, "link", "ls", "-e", "drop", "-k", e.key, "--limit", "2", "-q"); code != 0 || strings.Count(out, "\n") != 3 || errs != "" {
+		t.Fatalf("quiet: exit %d %q %q", code, out, errs)
+	}
+	if code, out, errs := runLuk(t, "link", "ls", "-e", "drop", "-k", e.key, "--limit", "2", "--all"); code != 0 || strings.Count(out, "\n") != 6 || errs != "" {
+		t.Fatalf("all: exit %d %q %q", code, out, errs)
+	}
+	out = mustRun(t, "link", "ls", "-e", "drop", "-k", e.key, "--cursor", "--limit", "1", "-q")
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 || !strings.HasSuffix(strings.Join(strings.Fields(lines[0]), " "), "URL CURSOR") ||
+		!strings.HasSuffix(strings.Join(strings.Fields(lines[1]), " "), full.Links[0].URL+" "+full.Links[0].Cursor) {
+		t.Fatalf("cursor column:\n%s", out)
+	}
+
+	// --any asks for the shared entries; without it lukd is not asked.
+	if n := strings.Count(e.logs.String(), "any=true"); n != 0 {
+		t.Fatalf("any before --any: %d", n)
+	}
+	mustRun(t, "link", "ls", "-e", "drop", "-k", e.key, "--any")
+	if n := strings.Count(e.logs.String(), "any=true"); n != 1 {
+		t.Fatalf("any after --any: %d", n)
+	}
+
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--limit", "0"}, "--limit: want 1 to 1000"},
+		{[]string{"--limit", "1001"}, "--limit: want 1 to 1000"},
+		{[]string{"--after", "not a cursor"}, `bad cursor`},
+	} {
+		if code, _, errs := runLuk(t, append([]string{"link", "ls", "-e", "drop", "-k", e.key}, c.args...)...); code == 0 || !strings.Contains(errs, c.want) {
+			t.Errorf("%v: exit %d %q", c.args, code, errs)
+		}
+	}
+}
+
 func TestPrintLinks(t *testing.T) {
 	cest := time.FixedZone("CEST", 2*3600)
 	var b strings.Builder
-	if err := printLinks(&b, newLinkList(&wire.LinkListAnswer{}), cest); err != nil || b.String() != "" {
+	if err := printLinks(&b, newLinkList(&wire.LinkListAnswer{}), cest, false); err != nil || b.String() != "" {
 		t.Fatalf("empty: %q %v", b.String(), err)
 	}
 	err := printLinks(&b, newLinkList(&wire.LinkListAnswer{Links: []wire.LinkEntry{
 		{URL: "https://d.example/d/long-name", File: "notes.txt", Size: 1536, Received: "2026-10-01T10:00:00Z", Expires: "2026-10-08T10:00:00Z", Once: true, Mutable: true, Portal: wire.PortalReveal},
 		{URL: "https://d.example/d/b", Size: 7, Received: "2026-09-30T22:30:00Z", Portal: wire.PortalDirect},
-	}}), cest)
+	}}), cest, false)
 	want := "NAME       SIZE     SENT              EXPIRES           FLAGS                URL\n" +
 		"notes.txt  1.5 KiB  2026-10-01 12:00  2026-10-08 12:00  once,mutable,reveal  https://d.example/d/long-name\n" +
 		"-          7 B      2026-10-01 00:30  never             -                    https://d.example/d/b\n"
@@ -546,7 +648,7 @@ func TestPrintLinksShared(t *testing.T) {
 		{URL: "luk://s.example/b", File: "b", Size: 1, Received: "2026-10-01T09:00:00Z", Access: wire.AccessAny},
 	}})
 	var b strings.Builder
-	err := printLinks(&b, ls, time.UTC)
+	err := printLinks(&b, ls, time.UTC, false)
 	want := "NAME  SIZE  SENT              EXPIRES  FLAGS       URL\n" +
 		"a     1 B   2026-10-01 10:00  never    any,shared  luk://s.example/a\n" +
 		"b     1 B   2026-10-01 09:00  never    any         luk://s.example/b\n"
@@ -554,10 +656,33 @@ func TestPrintLinksShared(t *testing.T) {
 		t.Fatalf("%v\n%s", err, b.String())
 	}
 	j, err := json.Marshal(ls)
-	want = `{"links":[{"name":"a","size":1,"sent":"2026-10-01T10:00:00Z","flags":["any","shared"],"url":"luk://s.example/a","shared":true},` +
-		`{"name":"b","size":1,"sent":"2026-10-01T09:00:00Z","flags":["any"],"url":"luk://s.example/b"}],"permanent":[]}`
+	want = `{"links":[{"name":"a","size":1,"sent":"2026-10-01T10:00:00Z","flags":["any","shared"],"url":"luk://s.example/a","shared":true,"cursor":""},` +
+		`{"name":"b","size":1,"sent":"2026-10-01T09:00:00Z","flags":["any"],"url":"luk://s.example/b","cursor":""}],"permanent":[]}`
 	if err != nil || string(j) != want {
 		t.Fatalf("%v\n%s", err, j)
+	}
+}
+
+// --cursor adds the CURSOR column after URL; --json always has the cursor
+// of each link and the next of the page.
+func TestPrintLinksCursor(t *testing.T) {
+	ls := newLinkList(&wire.LinkListAnswer{Links: []wire.LinkEntry{
+		{URL: "https://d.example/d/a", File: "a", Size: 1, Received: "2026-10-01T10:00:00Z", Cursor: "MS4wLmE"},
+		{URL: "https://d.example/d/b", File: "b", Size: 1, Received: "2026-10-01T09:00:00Z", Cursor: "Yy\x1b"},
+	}, Next: "Yy\x1b"})
+	var b strings.Builder
+	err := printLinks(&b, ls, time.UTC, true)
+	want := "NAME  SIZE  SENT              EXPIRES  FLAGS  URL                    CURSOR\n" +
+		"a     1 B   2026-10-01 10:00  never    -      https://d.example/d/a  MS4wLmE\n" +
+		"b     1 B   2026-10-01 09:00  never    -      https://d.example/d/b  " + `Yy\x1b` + "\n"
+	if err != nil || b.String() != want {
+		t.Fatalf("%v\n%q\nwant %q", err, b.String(), want)
+	}
+	j, err := json.Marshal(ls)
+	wantJSON := `{"links":[{"name":"a","size":1,"sent":"2026-10-01T10:00:00Z","flags":[],"url":"https://d.example/d/a","cursor":"MS4wLmE"},` +
+		`{"name":"b","size":1,"sent":"2026-10-01T09:00:00Z","flags":[],"url":"https://d.example/d/b","cursor":"Yy\u001b"}],"permanent":[],"next":"Yy\u001b"}`
+	if err != nil || string(j) != wantJSON {
+		t.Fatalf("%v\n%s\nwant\n%s", err, j, wantJSON)
 	}
 }
 
@@ -566,7 +691,7 @@ func TestPrintLinksEscapes(t *testing.T) {
 	var b strings.Builder
 	err := printLinks(&b, newLinkList(&wire.LinkListAnswer{Links: []wire.LinkEntry{
 		{URL: "https://d.example/d/a\x1b[2J", File: "a\tb\nc", Size: 1, Received: "now\r", Expires: "x\x07"},
-	}}), time.UTC)
+	}}), time.UTC, false)
 	want := "NAME     SIZE  SENT   EXPIRES  FLAGS  URL\n" +
 		`a\tb\nc` + "  1 B   " + `now\r` + "  " + `x\a` + "      -      " + `https://d.example/d/a\x1b[2J` + "\n"
 	if err != nil || b.String() != want {

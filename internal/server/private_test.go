@@ -3,12 +3,14 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -365,9 +367,10 @@ func privateListFixture(t *testing.T, mod func(string) string) *privateFixture {
 	})
 }
 
-// TestPrivateList: an identity of private.list gets the any files others
-// sent through the endpoint it may download, marked shared, besides its
-// own links; never the owner-only files of others, nor expired ones.
+// TestPrivateList: an identity of private.list asking with any gets the
+// any files others sent through the endpoint it may download, marked
+// shared, besides its own links; never the owner-only files of others,
+// nor expired ones. Without any it gets its own links only.
 func TestPrivateList(t *testing.T) {
 	f := privateListFixture(t, nil)
 	own := f.drop(t, f.user, wire.Meta{File: "own.txt", Access: wire.AccessAny}, "mine")
@@ -379,7 +382,7 @@ func TestPrivateList(t *testing.T) {
 	f.setSidecar(t, mustURL(t, expired).Path, func(sc *store.Sidecar) { sc.Expires = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339) })
 	f.settle(t)
 
-	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
+	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList, any: true}))
 	got := map[string]wire.LinkEntry{}
 	for _, l := range a.Links {
 		got[l.URL] = l
@@ -393,8 +396,11 @@ func TestPrivateList(t *testing.T) {
 	if l, ok := got[ownPublic]; !ok || l.Shared {
 		t.Errorf("own public file: %+v", l)
 	}
-	if rec := f.link(t, linkReq{signer: f.user, action: wire.LinkList}); !strings.Contains(rec.Body.String(), `"shared": true`) {
+	if rec := f.link(t, linkReq{signer: f.user, action: wire.LinkList, any: true}); !strings.Contains(rec.Body.String(), `"shared": true`) {
 		t.Errorf("answer: %s", rec.Body)
+	}
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); len(a.Links) != 2 || a.Links[0].Shared || a.Links[1].Shared {
+		t.Errorf("without any: %+v", a.Links)
 	}
 
 	// The shared entry stays read-only: no remove, ttl or replace.
@@ -406,8 +412,8 @@ func TestPrivateList(t *testing.T) {
 		t.Fatalf("after: %d %q", rec.Code, rec.Body)
 	}
 
-	// Not on private.list: its own links only.
-	a = listAnswer(t, f.link(t, linkReq{signer: f.other, action: wire.LinkList}))
+	// Not on private.list: its own links only, also with any.
+	a = listAnswer(t, f.link(t, linkReq{signer: f.other, action: wire.LinkList, any: true}))
 	for _, l := range a.Links {
 		if l.Shared || l.URL == own || l.URL == ownPublic {
 			t.Errorf("other: %+v", l)
@@ -427,7 +433,7 @@ func TestPrivateListProtectAllow(t *testing.T) {
 	own := f.drop(t, f.user, wire.Meta{Access: wire.AccessAny}, "mine")
 	f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, "theirs")
 	f.settle(t)
-	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); len(a.Links) != 1 || a.Links[0].URL != own || a.Links[0].Shared {
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList, any: true})); len(a.Links) != 1 || a.Links[0].URL != own || a.Links[0].Shared {
 		t.Fatalf("list: %+v", a.Links)
 	}
 }
@@ -440,7 +446,7 @@ func TestPrivateListOnce(t *testing.T) {
 	theirs := f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, "theirs")
 	own := f.drop(t, f.user, wire.Meta{Access: wire.AccessAny, Once: true}, "mine")
 	f.settle(t)
-	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
+	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList, any: true}))
 	got := map[string]bool{}
 	for _, l := range a.Links {
 		got[l.URL] = l.Shared
@@ -477,29 +483,30 @@ func TestPrivateListSecret(t *testing.T) {
 	}
 	theirs := f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, "theirs")
 	f.settle(t)
-	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
+	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList, any: true}))
 	if len(a.Links) != 1 || a.Links[0].URL != theirs || !a.Links[0].Shared {
 		t.Fatalf("list: %+v", a.Links)
 	}
 }
 
-// TestPrivateListCap: the cap keeps the own links first, the shared
-// entries fill the remainder.
-func TestPrivateListCap(t *testing.T) {
+// TestPrivateListAnyPages: with any, the shared entries take their place
+// in the one order of the list, between the own links, across pages.
+func TestPrivateListAnyPages(t *testing.T) {
 	f := privateListFixture(t, nil)
-	own := f.drop(t, f.user, wire.Meta{Access: wire.AccessAny}, "mine")
-	older := f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, "older")
-	f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, "newer")
-	f.settle(t)
-	defer func(m int) { maxLinkList = m }(maxLinkList)
-	maxLinkList = 1
-	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); len(a.Links) != 1 || a.Links[0].URL != own || !a.Truncated {
-		t.Fatalf("cap 1: %+v", a)
+	var want []string
+	for i := range 3 {
+		want = append(want, f.drop(t, f.user, wire.Meta{Access: wire.AccessAny}, fmt.Sprint("mine", i)))
+		want = append(want, f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, fmt.Sprint("theirs", i)))
 	}
-	maxLinkList = 2
-	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
-	if len(a.Links) != 2 || !a.Truncated || a.Links[1].URL != own || !a.Links[0].Shared || a.Links[0].URL == older {
-		t.Fatalf("cap 2: %+v", a)
+	slices.Reverse(want)
+	got := listPages(t, f.fixture, linkReq{signer: f.user, any: true}, 4)
+	if len(got) != len(want) {
+		t.Fatalf("%d entries: %+v", len(got), got)
+	}
+	for i, l := range got {
+		if l.URL != want[i] || l.Shared != (i%2 == 0) {
+			t.Errorf("%d: %+v, want %s", i, l, want[i])
+		}
 	}
 }
 

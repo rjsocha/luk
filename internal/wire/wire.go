@@ -389,9 +389,14 @@ func LinkCanonicalText(method, host, path, link, action, timestamp, nonce, meta 
 }
 
 // LinkMeta is the meta of a remove, ttl or list link request; a replace sends
-// an upload Meta instead.
+// an upload Meta instead. Limit, After and Any are of a list only: the
+// most entries of the page, the cursor of the entry the page starts
+// after, and whether the shared entries (private.list) are listed too.
 type LinkMeta struct {
-	TTL string `json:"ttl,omitempty"`
+	TTL   string `json:"ttl,omitempty"`
+	Limit int    `json:"limit,omitempty"`
+	After string `json:"after,omitempty"`
+	Any   bool   `json:"any,omitempty"`
 }
 
 func EncodeLinkMeta(m LinkMeta) (string, error) {
@@ -402,8 +407,8 @@ func EncodeLinkMeta(m LinkMeta) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// DecodeLinkMeta decodes the meta of a remove or ttl request strictly; a
-// ttl, when present, is a positive duration or TTLMax.
+// DecodeLinkMeta decodes the meta of a remove, ttl or list request
+// strictly; a ttl, when present, is a positive duration or TTLMax.
 func DecodeLinkMeta(s string) (LinkMeta, error) {
 	var m LinkMeta
 	if err := decodeJSON(s, &m); err != nil {
@@ -734,16 +739,57 @@ type PartsMissing struct {
 	Missing []uint32 `json:"missing"`
 }
 
-// LinkListAnswer is the answer of a link list: the links of the caller on
-// the endpoint, newest first; Truncated when there were more than
-// MaxLinkList.
+// LinkListAnswer is one page of a link list: the links of the caller on
+// the endpoint, newest first; Next is the cursor of the last one when
+// more follow, empty on the last page.
 type LinkListAnswer struct {
-	Links     []LinkEntry `json:"links"`
-	Truncated bool        `json:"truncated,omitempty"`
+	Links []LinkEntry `json:"links"`
+	Next  string      `json:"next,omitempty"`
 }
 
-// MaxLinkList caps the entries of a link list answer.
-const MaxLinkList = 10000
+// MaxLinkPage caps the entries of one page of a link list; a larger limit
+// gets this many.
+const MaxLinkPage = 1000
+
+// maxCursorID caps the id in a link cursor.
+const maxCursorID = 128
+
+// LinkCursor is the place of an entry in the order of a link list: its
+// acceptance order (NS, Seq) and its upload ID. It carries nothing a
+// listing does not show.
+type LinkCursor struct {
+	NS  int64
+	Seq int
+	ID  string
+}
+
+// Encode is the cursor as sent: base64url without padding of
+// "<ns>.<seq>.<id>".
+func (c LinkCursor) Encode() string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(c.NS, 10) + "." + strconv.Itoa(c.Seq) + "." + c.ID))
+}
+
+// ParseLinkCursor reads a cursor Encode wrote; any other form, a negative
+// seq or an id that is empty, too long or not printable ASCII is an
+// error.
+func ParseLinkCursor(s string) (LinkCursor, error) {
+	bad := fmt.Errorf("bad cursor %q", s)
+	b, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return LinkCursor{}, bad
+	}
+	f := strings.SplitN(string(b), ".", 3)
+	if len(f) != 3 || f[2] == "" || len(f[2]) > maxCursorID || strings.IndexFunc(f[2], func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
+		return LinkCursor{}, bad
+	}
+	ns, err1 := strconv.ParseInt(f[0], 10, 64)
+	seq, err2 := strconv.Atoi(f[1])
+	c := LinkCursor{NS: ns, Seq: seq, ID: f[2]}
+	if err1 != nil || err2 != nil || seq < 0 || c.Encode() != s {
+		return LinkCursor{}, bad
+	}
+	return c, nil
+}
 
 // LinkEntry is one link of a list answer.
 type LinkEntry struct {
@@ -764,6 +810,8 @@ type LinkEntry struct {
 	// Shared marks a file of access any another identity sent, listed to
 	// an identity of private.list: it may download it, not manage it.
 	Shared bool `json:"shared,omitempty"`
+	// Cursor is the place of the entry in the list (see LinkCursor).
+	Cursor string `json:"cursor"`
 }
 
 type ErrorResponse struct {
