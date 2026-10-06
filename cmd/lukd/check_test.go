@@ -236,3 +236,47 @@ func TestCheckOwnerPart(t *testing.T) {
 		t.Fatalf("clean: %q %q %v", out, errOut, err)
 	}
 }
+
+// lukd run compares the work path with the root of run.yaml as written:
+// a run.yaml root that is not the lukd root as a string is reported.
+func TestRunRootWarning(t *testing.T) {
+	cfg := &config.Config{Root: "/srv/luk"}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "run.yaml")
+	if w := runRootWarning(cfg, p); w != nil {
+		t.Fatalf("missing run.yaml: %q", w)
+	}
+	for root, want := range map[string]string{
+		"/srv/luk":     "",
+		"/srv/luk/":    "",
+		"/var/lib/luk": p + ": root /var/lib/luk is not the lukd root /srv/luk as written: lukd run refuses every work directory",
+	} {
+		if err := os.WriteFile(p, []byte("root: "+root+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		w := runRootWarning(cfg, p)
+		if want == "" && w != nil || want != "" && (len(w) != 1 || w[0] != want) {
+			t.Errorf("%s: %q", root, w)
+		}
+	}
+}
+
+func TestCheckAsRootWarnsRunRoot(t *testing.T) {
+	cfgPath, root := statusConfig(t)
+	writeIdentity(t, cfgPath)
+	os.Chmod(cfgPath, 0o644)
+	fakeUser(t, true)
+	run := filepath.Join(t.TempDir(), "run.yaml")
+	if err := os.WriteFile(run, []byte("root: "+root+"/other\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := runGlobal
+	runGlobal = run
+	geteuid, reexecAs = func() int { return 0 }, func(uid, gid uint32, groups []uint32) error { return exitCode(0) }
+	t.Cleanup(func() { geteuid, reexecAs, runGlobal = os.Geteuid, reexec, old })
+	_, errOut, _ := runCheck(t, "--no-running", "-c", cfgPath)
+	want := "warning: " + run + ": root " + root + "/other is not the lukd root " + root + " as written: lukd run refuses every work directory\n"
+	if !strings.Contains(errOut, want) {
+		t.Fatalf("%q", errOut)
+	}
+}

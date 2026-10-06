@@ -4493,7 +4493,8 @@ work directory. No polkit and no sudo are involved.
   (`deploy/run.yaml.example`), owned `root:root`, mode 0600:
   - `root`: work directories must live under `<root>/work`; default
     `/var/lib/luk`. Compared as written (see Request flow), so it must
-    be the same path as the lukd `root`.
+    be the same path as the lukd `root`; `lukd check` run as root warns
+    when it is not.
   - `peer`: the only user allowed to connect (`SO_PEERCRED` of the
     connection); default the owner of `root`.
 - Jobs: `/etc/site/lukd/run.d/<job>.yaml`, one job per file

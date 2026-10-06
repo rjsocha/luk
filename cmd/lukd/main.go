@@ -109,7 +109,10 @@ func rootCmd() *cobra.Command {
 			"state, storage bases) then runs again as the owner of the root.\n" +
 			"A relay step whose job has no file in " + rund.DefaultJobs + " is a warning when\n" +
 			"that directory is readable, and so is one whose readable job file does not\n" +
-			"load (with the reason) or does not list the pipeline in its pipelines.",
+			"load (with the reason) or does not list the pipeline in its pipelines.\n" +
+			"Run as root, a root in " + rund.DefaultConfig + " that is not the root of\n" +
+			"the configuration as written is a warning (lukd run would refuse every work\n" +
+			"directory).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(cfgPath)
@@ -129,7 +132,12 @@ func rootCmd() *cobra.Command {
 				}
 				return nil
 			}
-			for _, w := range slices.Concat(cfg.Warnings(), relayWarnings(cfg, runJobs)) {
+			warnings := slices.Concat(cfg.Warnings(), relayWarnings(cfg, runJobs))
+			// run.yaml is root's (mode 0600): only root reads it here.
+			if geteuid() == 0 {
+				warnings = append(warnings, runRootWarning(cfg, runGlobal)...)
+			}
+			for _, w := range warnings {
 				fmt.Fprintln(errw, "warning: "+w)
 			}
 			failed := false

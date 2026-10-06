@@ -22,6 +22,10 @@ import (
 // with.
 var runJobs = rund.DefaultJobs
 
+// runGlobal is the run.yaml of lukd run whose root lukd check compares
+// with the lukd root.
+var runGlobal = rund.DefaultConfig
+
 func runCmd() *cobra.Command {
 	var jobs string
 	cmd := &cobra.Command{
@@ -130,4 +134,20 @@ func relayWarnings(cfg *config.Config, dir string) []string {
 		}
 	}
 	return w
+}
+
+// runRootWarning reports a root of run.yaml p that differs from the root
+// of cfg: lukd run compares the work path with it as written, so it
+// refuses every work directory of this lukd. A missing or unreadable p
+// gives no warning.
+func runRootWarning(cfg *config.Config, p string) []string {
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return nil
+	}
+	g, err := rund.LoadGlobal(p, fi.Sys().(*syscall.Stat_t).Uid)
+	if err != nil || g.Root == cfg.Root {
+		return nil
+	}
+	return []string{fmt.Sprintf("%s: root %s is not the lukd root %s as written: lukd run refuses every work directory", p, g.Root, cfg.Root)}
 }
