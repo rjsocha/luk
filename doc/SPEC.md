@@ -1401,7 +1401,7 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   (`once`) files and aliases are not listed. 200 `{"links": [{"url",
   "file", "size", "received", "expires", "once", "mutable", "portal",
   "access", "updated", "permanent", "permanent_url", "shared",
-  "cursor"}, ...], "next"}` (`file`, `expires`, `access` and `updated`
+  "sender", "cursor"}, ...], "next"}` (`file`, `expires`, `access` and `updated`
   omitted when empty, `links` is `[]` for none). The current version of
   a permanent name the endpoint allocates (the one `current/meta.json`
   names) has `permanent` (the name) and `permanent_url` (its permanent
@@ -1440,8 +1440,9 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
     its respond storage (never the secret storage) that the protect
     expose of that storage serves it (its `auth.ssh.allow` admits the
     signer), not expired and not `once` (a viewer must not claim a file
-    meant for someone else); these have `"shared": true` (omitted for the
-    signer's own links) and no `permanent`. Without `any`, `private.list`
+    meant for someone else); these have `"shared": true` and `"sender"`, the identity
+    that sent the file as `link list` logs it (the sidecar's `sender`: a key
+    name or `<ca>:<key id>`); both omitted for the signer's own links and no `permanent`. Without `any`, `private.list`
     is not consulted and only the signer's own links are listed; with
     `any` and a signer `private.list` does not admit, the same (no
     error). `link.list` is still needed. A shared entry stays read-only:

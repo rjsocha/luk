@@ -179,7 +179,8 @@ in lukd). The request goes to --endpoint, else to the default endpoint.
 Columns: NAME (the file name sent, - without one), SIZE, SENT and EXPIRES in
 local time (never: no expiry), FLAGS (once, mutable, reveal or download,
 private or any, shared, permanent), URL (luk:// for a private file) and,
-with --cursor, CURSOR; newest first. With --any, an identity of
+with --cursor, CURSOR; newest first. With --any a FROM column follows FLAGS:
+who sent a shared file, - for your own. With --any, an identity of
 private.list in lukd also gets the files of access any others sent that it
 may download, with the flag shared: read-only, link --rm, --ttl and --file
 refuse them; without private.list --any lists your links only. Nothing is
@@ -236,6 +237,7 @@ cursor of the last link) when more links follow.`,
 				return unknownKeyHint(err, agentKeys)
 			}
 			ls := newLinkList(a)
+			ls.any = anyOf
 			if asJSON {
 				enc := json.NewEncoder(out)
 				enc.SetIndent("", "  ")
@@ -286,6 +288,8 @@ type linkList struct {
 	Links     []linkItem      `json:"links"`
 	Permanent []permanentItem `json:"permanent"`
 	Next      string          `json:"next,omitempty"`
+	// any adds the FROM column to the text output (luk link ls --any).
+	any bool
 }
 
 type linkItem struct {
@@ -301,6 +305,8 @@ type linkItem struct {
 	// Shared: a file of access any of another identity (private.list),
 	// read-only.
 	Shared bool `json:"shared,omitempty"`
+	// Sender is who sent a shared file (the identity as lukd logs it).
+	Sender string `json:"sender,omitempty"`
 	// Cursor is the place of the link in the list (luk link ls --after).
 	Cursor string `json:"cursor"`
 }
@@ -334,6 +340,7 @@ func newLinkList(a *wire.LinkListAnswer) linkList {
 		if l.Shared {
 			it.Flags = append(it.Flags, "shared")
 			it.Shared = true
+			it.Sender = l.Sender
 		}
 		if k := [2]string{l.Permanent, l.PermanentURL}; l.Permanent != "" && !seen[k] {
 			// The links come newest first.
@@ -359,7 +366,11 @@ func printLinks(w io.Writer, ls linkList, loc *time.Location, withCursor bool) e
 	}
 	p := client.Printable
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	head := "NAME\tSIZE\tSENT\tEXPIRES\tFLAGS\tURL"
+	head := "NAME\tSIZE\tSENT\tEXPIRES\tFLAGS"
+	if ls.any {
+		head += "\tFROM"
+	}
+	head += "\tURL"
 	if withCursor {
 		head += "\tCURSOR"
 	}
@@ -369,7 +380,11 @@ func printLinks(w io.Writer, ls linkList, loc *time.Location, withCursor bool) e
 		if l.Expires != "" {
 			exp = localTime(l.Expires, loc)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s", p(cmp.Or(l.Name, "-")), client.HumanBytes(l.Size), p(localTime(l.Sent, loc)), p(exp), p(cmp.Or(strings.Join(l.Flags, ","), "-")), p(l.URL))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s", p(cmp.Or(l.Name, "-")), client.HumanBytes(l.Size), p(localTime(l.Sent, loc)), p(exp), p(cmp.Or(strings.Join(l.Flags, ","), "-")))
+		if ls.any {
+			fmt.Fprintf(tw, "\t%s", p(cmp.Or(l.Sender, "-")))
+		}
+		fmt.Fprintf(tw, "\t%s", p(l.URL))
 		if withCursor {
 			fmt.Fprintf(tw, "\t%s", p(l.Cursor))
 		}

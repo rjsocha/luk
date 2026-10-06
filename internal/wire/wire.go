@@ -821,6 +821,9 @@ type LinkEntry struct {
 	// Shared marks a file of access any another identity sent, listed to
 	// an identity of private.list: it may download it, not manage it.
 	Shared bool `json:"shared,omitempty"`
+	// Sender is the identity that sent a shared file, as lukd logs it (a
+	// key name, or <ca>:<key id>); empty for an own link.
+	Sender string `json:"sender,omitempty"`
 	// Cursor is the place of the entry in the list (see LinkCursor).
 	Cursor string `json:"cursor"`
 }

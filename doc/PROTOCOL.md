@@ -751,7 +751,7 @@ Answers:
   COMPLETE answers 202 `{"url", "id", "size", "sha256"}`.
 - `list`: 200 `{"links": [{"url", "file", "size", "received", "expires",
   "once", "mutable", "portal", "access", "updated", "permanent",
-  "permanent_url", "shared", "cursor"}], "next"}`, one page of the links
+  "permanent_url", "shared", "sender", "cursor"}], "next"}`, one page of the links
   of the signer on the endpoint; `links` is `[]` for none.
   - Order: newest first by acceptance order, then by upload id
     (descending), then by the key of the stored name (the first 16 bytes
@@ -772,7 +772,8 @@ Answers:
     the cursor of the last entry, or one it already followed, means a
     server that never ends the list.
   - `any: true` adds, in the same order, the files of access `any` of
-    other identities the signer may download, marked `"shared": true`,
+    other identities the signer may download, marked `"shared": true` and carrying `"sender"` (the identity that
+    sent it, as lukd logs it; absent on the signer's own links),
     when the endpoint's `private.list` admits the signer; without `any`
     `private.list` is not consulted and only the signer's own links come.
 

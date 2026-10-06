@@ -689,6 +689,36 @@ func TestPrintLinksShared(t *testing.T) {
 	}
 }
 
+// With --any the FROM column follows FLAGS: the sender of a shared link, -
+// for an own one; the JSON has the sender of a shared link only.
+func TestPrintLinksFrom(t *testing.T) {
+	ls := newLinkList(&wire.LinkListAnswer{Links: []wire.LinkEntry{
+		{URL: "luk://s.example/a", File: "a", Size: 1, Received: "2026-10-01T10:00:00Z", Access: wire.AccessAny, Shared: true, Sender: "robert.socha"},
+		{URL: "luk://s.example/b", File: "b", Size: 1, Received: "2026-10-01T09:00:00Z", Access: wire.AccessAny},
+		{URL: "luk://s.example/c", File: "c", Size: 1, Received: "2026-10-01T08:00:00Z", Access: wire.AccessAny, Shared: true, Sender: "ca:k\x1b"},
+	}})
+	ls.any = true
+	var b strings.Builder
+	err := printLinks(&b, ls, time.UTC, false)
+	want := "NAME  SIZE  SENT              EXPIRES  FLAGS       FROM          URL\n" +
+		"a     1 B   2026-10-01 10:00  never    any,shared  robert.socha  luk://s.example/a\n" +
+		"b     1 B   2026-10-01 09:00  never    any         -             luk://s.example/b\n" +
+		"c     1 B   2026-10-01 08:00  never    any,shared  " + `ca:k\x1b` + "      luk://s.example/c\n"
+	if err != nil || b.String() != want {
+		t.Fatalf("%v\n%q\nwant %q", err, b.String(), want)
+	}
+	j, err := json.Marshal(ls)
+	if err != nil || !strings.Contains(string(j), `"sender":"robert.socha"`) || strings.Count(string(j), `"sender"`) != 2 {
+		t.Fatalf("%v\n%s", err, j)
+	}
+	// Without --any the output has no FROM column.
+	ls.any = false
+	b.Reset()
+	if err := printLinks(&b, ls, time.UTC, false); err != nil || strings.Contains(b.String(), "FROM") || strings.Contains(b.String(), "robert.socha") {
+		t.Fatalf("%v\n%s", err, b.String())
+	}
+}
+
 // --cursor adds the CURSOR column after URL; --json always has the cursor
 // of each link and the next of the page.
 func TestPrintLinksCursor(t *testing.T) {

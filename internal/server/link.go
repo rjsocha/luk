@@ -371,6 +371,9 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 				Once: sc.Client.Once, Mutable: sc.Client.Mutable, Portal: sc.Client.Portal, Access: sc.Client.Access, Updated: sc.Updated,
 				Shared: shared, Cursor: wire.LinkCursor{NS: it.order.NS, Seq: it.order.Seq, Key: it.key, ID: sc.ID}.Encode(),
 			}
+			if shared {
+				it.e.Sender = sc.Sender
+			}
 			if p := ep.Permanent; p != nil && own && sn == ep.Storage && sc.Client.Permanent != "" && sc.PermanentPath == p.Path {
 				cur := current[p.Path+"/"+sc.Client.Permanent]
 				if _, _, ok := p.Entry(sc.Client.Permanent); ok && cur.Current == rel && cur.ID == sc.ID {

@@ -390,13 +390,16 @@ func TestPrivateList(t *testing.T) {
 	if len(a.Links) != 3 || got[theirs].File != "any.txt" || !got[theirs].Shared || got[theirs].Access != wire.AccessAny {
 		t.Fatalf("list: %+v", a.Links)
 	}
-	if l, ok := got[own]; !ok || l.Shared {
+	if l, ok := got[own]; !ok || l.Shared || l.Sender != "" {
 		t.Errorf("own any file: %+v", l)
+	}
+	if got[theirs].Sender != "other" {
+		t.Errorf("sender of the shared entry: %q, want %q", got[theirs].Sender, "other")
 	}
 	if l, ok := got[ownPublic]; !ok || l.Shared {
 		t.Errorf("own public file: %+v", l)
 	}
-	if rec := f.link(t, linkReq{signer: f.user, action: wire.LinkList, any: true}); !strings.Contains(rec.Body.String(), `"shared": true`) {
+	if rec := f.link(t, linkReq{signer: f.user, action: wire.LinkList, any: true}); !strings.Contains(rec.Body.String(), `"shared": true`) || !strings.Contains(rec.Body.String(), `"sender": "other"`) {
 		t.Errorf("answer: %s", rec.Body)
 	}
 	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); len(a.Links) != 2 || a.Links[0].Shared || a.Links[1].Shared {
