@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	openpgp "github.com/ProtonMail/go-crypto/openpgp/v2"
 
 	"luk/internal/gpgkeys"
@@ -45,9 +46,46 @@ type insecureMeta struct {
 	Passwords []string `json:"passwords"`
 }
 
-// decryptPassword decrypts an OpenPGP message with a password only.
+// decryptPassword decrypts an OpenPGP message with a password only. It
+// tries each password packet on its own, as gpg does: ReadMessage stops at
+// the first v4 packet whose wrong-password session key looks valid, which
+// happens about once in 128 messages with two passwords.
 func decryptPassword(t *testing.T, msg []byte, password string) ([]byte, error) {
 	t.Helper()
+	var skesks [][]byte
+	var data []byte
+	or := packet.NewOpaqueReader(bytes.NewReader(msg))
+	for {
+		op, err := or.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		var b bytes.Buffer
+		if err := op.Serialize(&b); err != nil {
+			return nil, err
+		}
+		switch op.Tag {
+		case 3:
+			skesks = append(skesks, b.Bytes())
+		case 18:
+			data = b.Bytes()
+		}
+	}
+	err := errors.New("no password packet")
+	for _, sk := range skesks {
+		var got []byte
+		if got, err = decryptOnePassword(append(slices.Clip(sk), data...), password); err == nil {
+			return got, nil
+		}
+	}
+	return nil, err
+}
+
+// decryptOnePassword decrypts a message with one password packet.
+func decryptOnePassword(msg []byte, password string) ([]byte, error) {
 	tries := 0
 	prompt := func([]openpgp.Key, bool) ([]byte, error) {
 		if tries++; tries > 1 {
@@ -59,11 +97,7 @@ func decryptPassword(t *testing.T, msg []byte, password string) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
-	b, err := io.ReadAll(md.UnverifiedBody)
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
+	return io.ReadAll(md.UnverifiedBody)
 }
 
 func TestEncryptSymmetricPasswords(t *testing.T) {
