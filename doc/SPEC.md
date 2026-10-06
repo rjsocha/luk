@@ -4457,7 +4457,8 @@ work directory. No polkit and no sudo are involved.
   connection on stdin and stdout, stderr to the journal,
   `ExecStart=/usr/bin/lukd run`, sandboxed: read-only file
   system, `AF_UNIX` only, `CapabilityBoundingSet=CAP_DAC_READ_SEARCH` to
-  check the work directories, `RuntimeDirectory=lukd-run` 0700 with
+  check the work directories, `ProtectProc=invisible` (processes of
+  other users hidden), `RuntimeDirectory=lukd-run` 0700 with
   `RuntimeDirectoryPreserve=yes` for the state locks, see below;
   `MemoryMax=128M`, `TasksMax=64` and `RuntimeMaxSec=15d` as a
   backstop: they bound the helper, not the job, which systemd-run starts
@@ -4473,7 +4474,8 @@ work directory. No polkit and no sudo are involved.
 - Global settings, optional: `/etc/site/lukd/run.yaml`
   (`deploy/run.yaml.example`), owned `root:root`, mode 0600:
   - `root`: work directories must live under `<root>/work`; default
-    `/var/lib/luk`.
+    `/var/lib/luk`. Compared as written (see Request flow), so it must
+    be the same path as the lukd `root`.
   - `peer`: the only user allowed to connect (`SO_PEERCRED` of the
     connection); default the owner of `root`.
 - Jobs: `/etc/site/lukd/run.d/<job>.yaml`, one job per file
@@ -4526,17 +4528,32 @@ work directory. No polkit and no sudo are involved.
   at most 16 string values; an unknown or repeated key, a nested or
   non-string value and data after the object make it malformed).
   `lukd run` refuses a peer other than `peer` (closing without an
-  answer), then a request that is malformed, names an unknown or disabled job, or whose
-  work directory, after resolving symlinks, is not a step work directory
-  `<root>/work/<id>/<pipeline>/<step>` (exactly these three levels, the
-  id a queue entry id `YYYYMMDDTHHMMSSZ-<8 hex digits>`, the pipeline a
-  valid pipeline name, `[A-Za-z0-9_.-]` not starting with a dot or a
-  dash, at most 128 bytes, listed in the job's `pipelines`, the step a decimal number from 1 without leading zeros), holds
-  a control character, white space, `$` or `%` anywhere in the resolved
-  path, is not a directory or is not owned by the peer. The pipeline
-  name comes from that path; the request has no field for it. lukd run
-  opens nothing inside the work directory (no `meta.json`, no `in/`).
-  It runs
+  answer), then a request that is malformed, names an unknown or
+  disabled job, or whose work directory is not accepted:
+  - Lexically, before anything on disk is looked at: an absolute,
+    clean path (no `.` or `..` element, no repeated or trailing slash)
+    `<root>/work/<id>/<pipeline>/<step>` with `<root>` the `root` of
+    `run.yaml` as written (exactly these three levels, the id a queue
+    entry id `YYYYMMDDTHHMMSSZ-<8 hex digits>`, the pipeline a valid
+    pipeline name, `[A-Za-z0-9_.-]` not starting with a dot or a dash, at
+    most 128 bytes, the step a decimal number from 1 without leading
+    zeros), without a control character, white space, `$` or `%`. Then
+    the pipeline must be listed in the job's `pipelines`.
+  - On disk: `<root>` is opened as configured (it may be a symlink, it
+    is root's setting); `work`, `<id>`, `<pipeline>` and `<step>` are
+    opened one by one below it with `O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK`,
+    so a symlink (also `<root>/work` itself, which `luk` owns), a FIFO or
+    anything else but a directory is refused without following or
+    blocking; `<step>` must be owned by the peer. Symlinks are never
+    resolved, and lukd run opens nothing inside the work directory (no
+    `meta.json`, no `in/`).
+  - Every refused work directory gets the same answer, `lukd run: work
+    directory refused`, whatever the reason; the reason (with the path
+    and the error of the system call) goes to the journal of
+    `lukd-run@.service` only, so the answer tells `luk` nothing about
+    paths root can see.
+  The pipeline name comes from the path; the request has no field for
+  it. It runs
   the job as `systemd-run --wait --collect --pipe --quiet
   --expand-environment=no --unit=lukd-run-<job>-<random>
   (--uid=<user> | -p DynamicUser=yes -p User=<dynamic user>)
@@ -4550,8 +4567,8 @@ work directory. No polkit and no sudo are involved.
   <command> <work>` (`--expand-environment=no` needs systemd 254 or
   later; the lukd package requires systemd 257 for `PrivatePIDs=`), a transient unit outside
   both the lukd and the lukd run sandbox, and streams the job's stdout and
-  stderr back. `<work>` is the resolved work directory: the job's
-  argument, its `LUK_WORK` and its current directory, as for a `run`
+  stderr back. `<work>` is the work path of the request as checked
+  (never resolved): the job's argument, its `LUK_WORK` and its current directory, as for a `run`
   program. `<work group>` is the group of `<work>`, by name, or the
   numeric gid when it has no name.
 - Deadlines: the request must arrive, and a refusal be read, within 5

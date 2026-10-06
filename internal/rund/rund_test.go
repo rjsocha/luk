@@ -250,19 +250,26 @@ func TestCheckWork(t *testing.T) {
 	w := filepath.Join(root, "work", id1, "p", "1")
 	os.MkdirAll(w, 0o750)
 	outside := filepath.Join(top, "outside")
-	os.Mkdir(outside, 0o750)
+	os.MkdirAll(filepath.Join(outside, id1, "p", "1"), 0o750)
 	os.Symlink(outside, filepath.Join(root, "work", id1, "esc"))
+	os.MkdirAll(filepath.Join(outside, "q", "1"), 0o750)
+	os.Symlink(filepath.Join(outside, "q"), filepath.Join(root, "work", id1, "q"))
+	os.MkdirAll(filepath.Join(root, "work", id1, "r"), 0o750)
+	os.Symlink(w, filepath.Join(root, "work", id1, "r", "1"))
 	write(t, filepath.Join(w, "file"), "x", 0o600)
 	write(t, filepath.Join(root, "work", id1, "p", "2"), "x", 0o600)
+	syscall.Mkfifo(filepath.Join(root, "work", id1, "p", "3"), 0o600)
 	alias := filepath.Join(top, "alias")
 	os.Symlink(root, alias)
 
 	gid := uint32(os.Getgid())
-	if got, p, g, err := CheckWork(alias, w, me); err != nil || got != w || p != "p" || g != gid {
-		t.Fatalf("%q %q %d %v", got, p, g, err)
+	// root (run.yaml) may be a symlink; nothing below it may.
+	aw := filepath.Join(alias, "work", id1, "p", "1")
+	if p, g, err := CheckWork(alias, aw, me); err != nil || p != "p" || g != gid {
+		t.Fatalf("%q %d %v", p, g, err)
 	}
-	if got, _, _, err := CheckWork(root, filepath.Join(alias, "work", id1, "p/1"), me); err != nil || got != w {
-		t.Fatalf("%q %v", got, err)
+	if p, _, err := CheckWork(root, w, me); err != nil || p != "p" {
+		t.Fatalf("%q %v", p, err)
 	}
 	for _, d := range []string{"p/1/x", "p/01", "p/0", "p/a", ".p/1", "-p/1", "p\x01/1"} {
 		os.MkdirAll(filepath.Join(root, "work", id1, d), 0o750)
@@ -272,27 +279,79 @@ func TestCheckWork(t *testing.T) {
 		uid  uint32
 		want string
 	}{
-		"relative":    {"work/id1", me, "not absolute"},
-		"outside":     {outside, me, "not under"},
-		"work itself": {filepath.Join(root, "work"), me, "not under"},
-		"dotdot":      {w + "/../../../../../outside", me, "not under"},
-		"symlink":     {filepath.Join(root, "work", id1, "esc"), me, "not under"},
-		"missing":     {filepath.Join(root, "work", "nope"), me, "no such file"},
-		"file":        {filepath.Join(root, "work", id1, "p", "2"), me, "not a directory"},
-		"owner":       {w, me + 1, "owned by"},
-		"no step":     {filepath.Join(root, "work", id1, "p"), me, "not a step work directory"},
-		"deeper":      {filepath.Join(root, "work", id1, "p", "1", "x"), me, "not a step work directory"},
-		"zero pad":    {filepath.Join(root, "work", id1, "p", "01"), me, "not a step work directory"},
-		"step 0":      {filepath.Join(root, "work", id1, "p", "0"), me, "not a step work directory"},
-		"named step":  {filepath.Join(root, "work", id1, "p", "a"), me, "not a step work directory"},
-		"dot":         {filepath.Join(root, "work", id1, ".p", "1"), me, "not a step work directory"},
-		"dash":        {filepath.Join(root, "work", id1, "-p", "1"), me, "not a step work directory"},
-		"control":     {filepath.Join(root, "work", id1, "p\x01", "1"), me, "control character"},
+		"relative":       {"work/id1", me, "not absolute"},
+		"outside":        {outside, me, "not under"},
+		"other root":     {aw, me, "not under"},
+		"work itself":    {filepath.Join(root, "work"), me, "not under"},
+		"dotdot":         {w + "/../../../../../outside", me, "not clean"},
+		"dotdot inside":  {filepath.Join(root, "work", id1) + "/../" + id1 + "/p/1", me, "not clean"},
+		"trailing slash": {w + "/", me, "not clean"},
+		"double slash":   {filepath.Join(root, "work") + "//" + id1 + "/p/1", me, "not clean"},
+		"symlinked step": {filepath.Join(root, "work", id1, "r", "1"), me, "not a directory"},
+		"symlinked pipe": {filepath.Join(root, "work", id1, "q", "1"), me, "not a directory"},
+		"missing":        {filepath.Join(root, "work", id1, "p", "9"), me, "no such file"},
+		"file":           {filepath.Join(root, "work", id1, "p", "2"), me, "not a directory"},
+		"fifo":           {filepath.Join(root, "work", id1, "p", "3"), me, "not a directory"},
+		"owner":          {w, me + 1, "owned by"},
+		"no step":        {filepath.Join(root, "work", id1, "p"), me, "not a step work directory"},
+		"deeper":         {filepath.Join(root, "work", id1, "p", "1", "x"), me, "not a step work directory"},
+		"zero pad":       {filepath.Join(root, "work", id1, "p", "01"), me, "not a step work directory"},
+		"step 0":         {filepath.Join(root, "work", id1, "p", "0"), me, "not a step work directory"},
+		"named step":     {filepath.Join(root, "work", id1, "p", "a"), me, "not a step work directory"},
+		"dot":            {filepath.Join(root, "work", id1, ".p", "1"), me, "not a step work directory"},
+		"dash":           {filepath.Join(root, "work", id1, "-p", "1"), me, "not a step work directory"},
+		"control":        {filepath.Join(root, "work", id1, "p\x01", "1"), me, "control character"},
 	} {
-		if _, _, _, err := CheckWork(root, c.work, c.uid); err == nil || !strings.Contains(err.Error(), c.want) {
+		if _, _, err := CheckWork(root, c.work, c.uid); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v, want %q", name, err, c.want)
 		}
 	}
+	// A symlinked <root>/work (luk owns it) is refused as well.
+	os.Rename(filepath.Join(root, "work"), filepath.Join(top, "realwork"))
+	os.Symlink(filepath.Join(top, "realwork"), filepath.Join(root, "work"))
+	if _, _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("symlinked work: %v", err)
+	}
+}
+
+// A refused work directory gets one answer whatever the reason, so the
+// peer learns nothing about paths root can see; the reason goes to the
+// journal.
+func TestServeWorkRefusalIsGeneric(t *testing.T) {
+	e := newEnv(t)
+	var logs strings.Builder
+	var mu sync.Mutex
+	e.srv.Log = slog.New(slog.NewTextHandler(lockedWriter{&mu, &logs}, nil))
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
+		t.Error("job ran")
+		return 0, nil
+	}
+	cwd, _ := os.Getwd()
+	for _, w := range []string{
+		"/etc/passwd/x", "/etc/nonexistent-xyz/x", "/proc/self/cwd/nonexistent-xyz", cwd,
+		filepath.Join(filepath.Dir(e.work), "9"), e.work + "/", "relative",
+	} {
+		fs, err := e.exchange(t, string(runproto.Request{Job: "s3-upload", Work: w}.Encode()))
+		if err == nil || len(fs) != 2 || fs[0] != (frame{'e', "lukd run: work directory refused\n"}) || fs[1] != (frame{'x', "1"}) {
+			t.Errorf("%q: %v %q", w, err, fs)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(logs.String(), "not under") || !strings.Contains(logs.String(), "no such file") {
+		t.Fatalf("journal: %s", logs.String())
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 type fakeRunner struct {
@@ -670,7 +729,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 	root := filepath.Join(top, "root")
 	ok := filepath.Join(root, "work", id1, "p", "1")
 	os.MkdirAll(ok, 0o750)
-	if _, _, _, err := CheckWork(root, ok, me); err != nil {
+	if _, _, err := CheckWork(root, ok, me); err != nil {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{"\n", "\t", " ", "$", "${HOME}", "%", "%h", "\x1b", "\u00a0"} {
@@ -684,7 +743,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 			if err := os.MkdirAll(w, 0o750); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, _, err := CheckWork(root, w, me); err == nil {
+			if _, _, err := CheckWork(root, w, me); err == nil {
 				t.Errorf("%q accepted", d)
 			}
 		}
@@ -692,7 +751,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 	for _, id := range []string{"x", "id1", "20261004T101500Z-0123ABCD", "20261004T101500Z-0123abc", "20261004T101500Z0123abcd", "..x"} {
 		w := filepath.Join(root, "work", id, "p", "1")
 		os.MkdirAll(w, 0o750)
-		if _, _, _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a step work directory") {
+		if _, _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a step work directory") {
 			t.Errorf("id %q: %v", id, err)
 		}
 	}
@@ -700,7 +759,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 	odd := filepath.Join(top, "a$b")
 	w := filepath.Join(odd, "work", id1, "p", "1")
 	os.MkdirAll(w, 0o750)
-	if _, _, _, err := CheckWork(odd, w, me); err == nil {
+	if _, _, err := CheckWork(odd, w, me); err == nil {
 		t.Error("root with $ accepted")
 	}
 }
@@ -746,7 +805,7 @@ func TestServeRefuses(t *testing.T) {
 		"unknown job":  {string(runproto.Request{Job: "nope", Work: e.work}.Encode()), "unknown"},
 		"invalid name": {string(runproto.Request{Job: "../x", Work: e.work}.Encode()), "unknown"},
 		"broken job":   {string(runproto.Request{Job: "broken", Work: e.work}.Encode()), "invalid"},
-		"outside":      {string(runproto.Request{Job: "s3-upload", Work: "/etc"}.Encode()), "not under"},
+		"outside":      {string(runproto.Request{Job: "s3-upload", Work: "/etc"}.Encode()), "work directory refused"},
 		"bad json":     {"{\n", "request"},
 		"oversized":    {strings.Repeat(" ", runproto.MaxRequest+10) + "\n", "larger than"},
 	} {

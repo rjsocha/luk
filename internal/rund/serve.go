@@ -131,12 +131,19 @@ func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, 
 		}
 		return refusal{fmt.Errorf("job %q: unknown", req.Job)}
 	}
-	work, pipeline, gid, err := CheckWork(g.Root, req.Work, peer)
+	pipeline, err := ParseWork(g.Root, req.Work)
 	if err != nil {
-		return refusal{err}
+		s.Log.Warn("work directory refused", "job", req.Job, "err", err)
+		return refusal{errWork}
 	}
 	if !slices.Contains(job.Pipelines, pipeline) {
 		return refusal{fmt.Errorf("job %s: pipeline %s not allowed", req.Job, pipeline)}
+	}
+	work := req.Work
+	_, gid, err := CheckWork(g.Root, work, peer)
+	if err != nil {
+		s.Log.Warn("work directory refused", "job", req.Job, "err", err)
+		return refusal{errWork}
 	}
 	// The path-bound variables come from the checked path and run.yaml,
 	// the free-form metadata from the request: lukd run never reads the
@@ -274,47 +281,73 @@ func (s *Server) lock(job, pipeline string, gone <-chan struct{}) (unlock func()
 	}
 }
 
-// CheckWork resolves work and requires a step work directory
-// <root>/work/<id>/<pipeline>/<step> owned by uid: <id> a queue entry id,
+// workFlags opens a directory below root without following a symlink and
+// without blocking on whatever luk put in its place.
+const workFlags = syscall.O_RDONLY | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC
+
+// errWork is the only answer the peer gets for a refused work directory;
+// the reason goes to the journal.
+var errWork = errors.New("work directory refused")
+
+// ParseWork checks work lexically: an absolute, clean path
+// <root>/work/<id>/<pipeline>/<step> with <id> a queue entry id,
 // <pipeline> a valid pipeline name, <step> a step number, and no control
-// character, white space, "$" or "%" anywhere in the resolved path, which
-// goes into the systemd-run command line and the unit file. It returns the
-// resolved path, the pipeline name and the gid of the directory.
-func CheckWork(root, work string, uid uint32) (string, string, uint32, error) {
+// character, white space, "$" or "%" anywhere, as it goes into the
+// systemd-run command line and the unit file. It returns the pipeline.
+func ParseWork(root, work string) (string, error) {
 	if !filepath.IsAbs(work) {
-		return "", "", 0, fmt.Errorf("work %q: not absolute", work)
+		return "", fmt.Errorf("work %q: not absolute", work)
 	}
-	base, err := filepath.EvalSymlinks(filepath.Join(root, "work"))
-	if err != nil {
-		return "", "", 0, fmt.Errorf("work: %w", err)
+	if filepath.Clean(work) != work {
+		return "", fmt.Errorf("work %q: not clean", work)
 	}
-	real, err := filepath.EvalSymlinks(filepath.Clean(work))
-	if err != nil {
-		return "", "", 0, fmt.Errorf("work %q: %w", work, err)
-	}
-	rel, ok := strings.CutPrefix(real, base+string(filepath.Separator))
+	base := filepath.Join(root, "work")
+	rel, ok := strings.CutPrefix(work, base+string(filepath.Separator))
 	if !ok {
-		return "", "", 0, fmt.Errorf("work %q: not under %s", work, base)
+		return "", fmt.Errorf("work %q: not under %s", work, base)
 	}
-	if strings.ContainsFunc(real, unsafePathRune) {
-		return "", "", 0, fmt.Errorf("work %q: control character, white space, $ or %% in the path", work)
+	if strings.ContainsFunc(work, unsafePathRune) {
+		return "", fmt.Errorf("work %q: control character, white space, $ or %% in the path", work)
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 	if len(parts) != 3 || !queue.IsID(parts[0]) || !config.ValidPipelineName(parts[1]) || !isStep(parts[2]) {
-		return "", "", 0, fmt.Errorf("work %q: not a step work directory %s/<id>/<pipeline>/<step>", work, base)
+		return "", fmt.Errorf("work %q: not a step work directory %s/<id>/<pipeline>/<step>", work, base)
 	}
-	fi, err := os.Lstat(real)
+	return parts[1], nil
+}
+
+// CheckWork requires work to pass ParseWork and to be a directory owned by
+// uid, reached from root (which may be a symlink: it is root's
+// configuration) through work, <id>, <pipeline> and <step>, each opened
+// with workFlags: no symlink, nothing but a directory, no blocking open.
+// It returns the pipeline and the gid of the directory.
+func CheckWork(root, work string, uid uint32) (string, uint32, error) {
+	pipeline, err := ParseWork(root, work)
 	if err != nil {
-		return "", "", 0, err
+		return "", 0, err
 	}
-	if !fi.IsDir() {
-		return "", "", 0, fmt.Errorf("work %q: not a directory", work)
+	fd, err := syscall.Open(root, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return "", 0, fmt.Errorf("root %s: %w", root, err)
 	}
-	st := fi.Sys().(*syscall.Stat_t)
+	rel, _ := filepath.Rel(root, work)
+	for _, name := range strings.Split(rel, string(filepath.Separator)) {
+		next, err := syscall.Openat(fd, name, workFlags, 0)
+		syscall.Close(fd)
+		if err != nil {
+			return "", 0, fmt.Errorf("work %q: %s: %w", work, name, err)
+		}
+		fd = next
+	}
+	defer syscall.Close(fd)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return "", 0, fmt.Errorf("work %q: %w", work, err)
+	}
 	if st.Uid != uid {
-		return "", "", 0, fmt.Errorf("work %q: owned by uid %d, not the peer", work, st.Uid)
+		return "", 0, fmt.Errorf("work %q: owned by uid %d, not the peer", work, st.Uid)
 	}
-	return real, parts[1], st.Gid, nil
+	return pipeline, st.Gid, nil
 }
 
 // unsafePathRune reports a rune refused in a work path: systemd-run and

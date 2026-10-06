@@ -5,7 +5,8 @@
 # (deploy/run.d/s3-upload.yaml.example).
 
 # The lukd root: a job runs only on a work directory strictly under
-# <root>/work, owned by the peer. Default: /var/lib/luk.
+# <root>/work, owned by the peer. Compared as written, so it must be the
+# same path as root of the lukd configuration. Default: /var/lib/luk.
 # root: /var/lib/luk
 
 # The only user allowed to connect to the socket (SO_PEERCRED); any other

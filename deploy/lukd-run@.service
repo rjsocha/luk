@@ -37,6 +37,8 @@ ProtectHome=yes
 InaccessiblePaths=-/etc/site/lukd/identity.key -/etc/site/lukd/password.d
 PrivateTmp=yes
 PrivateDevices=yes
+# Processes of other users (luk, the jobs) are hidden in /proc.
+ProtectProc=invisible
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
