@@ -281,8 +281,9 @@ var maxLinkList = wire.MaxLinkList
 // storage of ep, and of its secret storage, uploaded through ep by id, not
 // expired; claimed once files are out of the data tree. An identity of
 // private.list also gets the files of access any others uploaded through
-// ep that the protect expose serves it, marked shared. Newest first, at
-// most maxLinkList.
+// ep that the protect expose serves it, not once, marked shared. Newest
+// first, at most maxLinkList: the own links first, the shared ones up to
+// the remainder.
 func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Identity, now time.Time) (int, any, error) {
 	storages := []string{ep.Storage}
 	if ep.Secret != nil {
@@ -315,16 +316,18 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 				}
 			}
 		}
-		// The protect allow of the storage, when id may see the any files
-		// of others (private.list).
+		// The protect allow of the respond storage, when id may see the
+		// any files of others (private.list); never of the secret storage.
 		var allow []string
 		share := false
-		if x := cfg.Expose[st.Protect]; st.Protect != "" && x != nil && x.Auth.SSH != nil && auth.Allowed(id, ep.Private.List) {
+		if x := cfg.Expose[st.Protect]; sn == ep.Storage && st.Protect != "" && x != nil && x.Auth.SSH != nil && auth.Allowed(id, ep.Private.List) {
 			allow, share = x.Auth.SSH.Allow, true
 		}
 		err := l.Walk(func(rel string, sc store.Sidecar) error {
 			own := sc.OwnerKey != "" && sc.OwnerKey == key
-			shared := !own && share && sc.Client.Access == wire.AccessAny && expose.ProtectPermits(id, allow, sc)
+			// A once file of another is never shared: listing it would let
+			// the viewer claim a file meant for someone else.
+			shared := !own && share && !sc.Client.Once && sc.Client.Access == wire.AccessAny && expose.ProtectPermits(id, allow, sc)
 			if sc.AliasOf != "" || sc.Endpoint != ep.Name || !own && !shared || expiredAt(sc.Expires, now) {
 				return nil
 			}
@@ -355,11 +358,23 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 	slices.SortFunc(items, func(a, b item) int {
 		return cmp.Or(b.order.Compare(a.order), strings.Compare(b.id, a.id), strings.Compare(a.e.URL, b.e.URL))
 	})
+	// The cap keeps the own links first; the shared entries fill the
+	// remainder, newest first.
+	owned := 0
+	for _, it := range items {
+		if !it.e.Shared {
+			owned++
+		}
+	}
 	a := &wire.LinkListAnswer{Links: []wire.LinkEntry{}}
-	for i, it := range items {
-		if i == maxLinkList {
+	room := max(maxLinkList-owned, 0)
+	for _, it := range items {
+		if it.e.Shared && room == 0 || len(a.Links) == maxLinkList {
 			a.Truncated = true
-			break
+			continue
+		}
+		if it.e.Shared {
+			room--
 		}
 		a.Links = append(a.Links, it.e)
 	}

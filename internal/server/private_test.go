@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -428,6 +429,77 @@ func TestPrivateListProtectAllow(t *testing.T) {
 	f.settle(t)
 	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); len(a.Links) != 1 || a.Links[0].URL != own || a.Links[0].Shared {
 		t.Fatalf("list: %+v", a.Links)
+	}
+}
+
+// TestPrivateListOnce: a once file of another identity is never listed
+// as shared, so a viewer cannot claim a file meant for someone else.
+func TestPrivateListOnce(t *testing.T) {
+	f := privateListFixture(t, nil)
+	f.drop(t, f.other, wire.Meta{Access: wire.AccessAny, Once: true}, "once")
+	theirs := f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, "theirs")
+	own := f.drop(t, f.user, wire.Meta{Access: wire.AccessAny, Once: true}, "mine")
+	f.settle(t)
+	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
+	got := map[string]bool{}
+	for _, l := range a.Links {
+		got[l.URL] = l.Shared
+	}
+	if len(a.Links) != 2 || !got[theirs] || got[own] {
+		t.Fatalf("list: %+v", a.Links)
+	}
+	if _, ok := got[own]; !ok {
+		t.Fatalf("own once file: %+v", a.Links)
+	}
+}
+
+// TestPrivateListSecret: shared entries come from the respond storage
+// only, never from the secret storage.
+func TestPrivateListSecret(t *testing.T) {
+	vol := filepath.Join(t.TempDir(), "volatile")
+	f := privateListFixture(t, func(s string) string {
+		return strings.NewReplacer(
+			`storage: drop, private:`, `storage: drop, secret: {allow: ['*'], path: `+vol+`/queue, storage: volatile}, private:`,
+			"storage:\n", "storage:\n  volatile: {type: local, base: "+vol+"/storage, path: \"{{ .Random }}\", expose: volatile, protect: vsecure, ttl: {user: true}}\n",
+			"  drop: {listen: main, path: /d/}\n", "  drop: {listen: main, path: /d/}\n  volatile: {listen: main, path: /d/volatile/}\n  vsecure: {listen: secure, path: /v/, auth: {ssh: {allow: [\"*\"]}}}\n",
+		).Replace(s)
+	})
+	rec, _ := f.do(t, req{signer: f.other, path: "/drop", meta: secretMeta("s"), body: []byte("s")})
+	sec := receipt(t, rec, http.StatusCreated).URL
+	f.settle(t)
+	// A secret of another identity made of access any by hand.
+	name := path.Base(mustURL(t, sec).Path)
+	sc := sidecarOf(t, filepath.Join(vol, "storage"), name)
+	sc.Client.Access = wire.AccessAny
+	b, _ := json.Marshal(sc)
+	if err := os.WriteFile(filepath.Join(vol, "storage", ".db", "meta", name+".json"), b, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	theirs := f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, "theirs")
+	f.settle(t)
+	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
+	if len(a.Links) != 1 || a.Links[0].URL != theirs || !a.Links[0].Shared {
+		t.Fatalf("list: %+v", a.Links)
+	}
+}
+
+// TestPrivateListCap: the cap keeps the own links first, the shared
+// entries fill the remainder.
+func TestPrivateListCap(t *testing.T) {
+	f := privateListFixture(t, nil)
+	own := f.drop(t, f.user, wire.Meta{Access: wire.AccessAny}, "mine")
+	older := f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, "older")
+	f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, "newer")
+	f.settle(t)
+	defer func(m int) { maxLinkList = m }(maxLinkList)
+	maxLinkList = 1
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); len(a.Links) != 1 || a.Links[0].URL != own || !a.Truncated {
+		t.Fatalf("cap 1: %+v", a)
+	}
+	maxLinkList = 2
+	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
+	if len(a.Links) != 2 || !a.Truncated || a.Links[1].URL != own || !a.Links[0].Shared || a.Links[0].URL == older {
+		t.Fatalf("cap 2: %+v", a)
 	}
 }
 

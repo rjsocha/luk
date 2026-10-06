@@ -1399,13 +1399,17 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   read are left out and logged. Logged as `link list`.
   A signer `private.list` admits (see Private files) also gets, in the
   same walk and order, the files of access `any` other identities sent
-  through the endpoint that the protect expose of the storage serves it
-  (its `auth.ssh.allow` admits the signer), not expired; these have
+  through the endpoint into its respond storage (never the secret
+  storage) that the protect expose of that storage serves it (its
+  `auth.ssh.allow` admits the signer), not expired and not `once` (a
+  viewer must not claim a file meant for someone else); these have
   `"shared": true` (omitted for the signer's own links) and no
   `permanent`. `link.list` is still needed. A shared entry stays
   read-only: `remove`, `ttl` and `replace` of it are 404 `link not
   found`, as for any link of another owner. Files of access `private`
-  of others are never listed.
+  of others are never listed. The 10000 cap keeps the signer's own
+  links first; shared entries fill the remainder, newest first, and
+  `"truncated": true` marks any left out.
 
 Other statuses: an unknown `Luk-Link-Action`, or a remove, ttl or replace
 without `Luk-Link` (or `Luk-Link` without an action), is 400; a `list`
@@ -1642,9 +1646,9 @@ expose:
 - `endpoint.<n>.private.list` (a list of identities, see Capabilities;
   absent or `[]` is no one): who gets, in `luk link ls` (link `list`, see
   Links), besides its own links the files of access `any` other
-  identities sent through the endpoint that it may download (the
-  protect expose admits it, the same check as for `luk get`), not
-  expired, marked `shared` and read-only: their link actions stay
+  identities sent through the endpoint into its respond storage that it
+  may download (the protect expose admits it, the same check as for `luk
+  get`), not expired and not `once`, marked `shared` and read-only: their link actions stay
   refused (404). Files of access `private` of others are never listed.
   It grants no upload; a non-empty list needs `respond: url` and a
   respond storage with `protect` (`endpoint <n>: private.list needs
