@@ -2,6 +2,7 @@ package rund
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -26,7 +27,8 @@ const (
 )
 
 // jobsFile is the part of a file of the lukd configuration lukd run
-// reads: the relay steps and the jobs of the run steps of the pipelines.
+// reads: the relay steps and the jobs of the run steps of the pipelines,
+// and the paths that hold data or secrets of lukd (see Lukd.Paths).
 // Every other key is left to lukd.
 type jobsFile struct {
 	Pipeline map[string]*struct {
@@ -36,28 +38,105 @@ type jobsFile struct {
 			Jobs  []string `yaml:"jobs"`
 		} `yaml:"steps"`
 	} `yaml:"pipeline"`
+	Root   string `yaml:"root"`
+	Listen map[string]*struct {
+		TLS *struct {
+			Cert string `yaml:"cert"`
+			Key  string `yaml:"key"`
+			EAB  struct {
+				KeyFile string `yaml:"key_file"`
+			} `yaml:"eab"`
+		} `yaml:"tls"`
+	} `yaml:"listen"`
+	Auth struct {
+		Nonces string `yaml:"nonces"`
+	} `yaml:"auth"`
+	GPG struct {
+		Keys string `yaml:"keys"`
+	} `yaml:"gpg"`
+	Endpoint map[string]*struct {
+		Path   string `yaml:"path"`
+		Secret *struct {
+			Path string `yaml:"path"`
+		} `yaml:"secret"`
+	} `yaml:"endpoint"`
+	Storage map[string]*struct {
+		Base string `yaml:"base"`
+	} `yaml:"storage"`
 }
 
-// LoadJobPipelines reads the steps of the lukd configuration: the main
-// file p and the *.yaml of config.d next to it (dotfiles left out, in
-// lexical order), as lukd loads them. It returns, per job, the pipelines
-// that may run it, sorted: those with a step relay: <job> and those with
-// a run step whose jobs lists it. A missing p (or a missing directory
-// above it) allows nothing. Every directory from top down to config.d, p
+// paths are the absolute paths of f that hold data or secrets of lukd:
+// root, the TLS files and the EAB key file of the listeners, auth.nonces,
+// gpg.keys, the queues and secret queues of the endpoints and the bases
+// of the storages. A relative path lies under root (lukd anchors it
+// there), a missing root is config.DefaultRoot.
+func (f *jobsFile) paths() []string {
+	ps := []string{cmp.Or(f.Root, config.DefaultRoot), f.Auth.Nonces, f.GPG.Keys}
+	for _, l := range f.Listen {
+		if l != nil && l.TLS != nil {
+			ps = append(ps, l.TLS.Cert, l.TLS.Key, l.TLS.EAB.KeyFile)
+		}
+	}
+	for _, e := range f.Endpoint {
+		if e == nil {
+			continue
+		}
+		ps = append(ps, e.Path)
+		if e.Secret != nil {
+			ps = append(ps, e.Secret.Path)
+		}
+	}
+	for _, st := range f.Storage {
+		if st != nil {
+			ps = append(ps, st.Base)
+		}
+	}
+	var out []string
+	for _, p := range ps {
+		if filepath.IsAbs(p) {
+			out = append(out, filepath.Clean(p))
+		}
+	}
+	return out
+}
+
+// Lukd is what lukd run takes from the lukd configuration: per job the
+// pipelines that may run it, sorted, and the paths that hold data or
+// secrets of lukd, which a job must not see (sorted, without duplicates).
+type Lukd struct {
+	Pipelines map[string][]string
+	Paths     []string
+}
+
+// LoadJobPipelines is the Pipelines of LoadLukd.
+func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) {
+	lk, err := LoadLukd(p, top, owner)
+	if err != nil {
+		return nil, err
+	}
+	return lk.Pipelines, nil
+}
+
+// LoadLukd reads the steps and the paths of the lukd configuration: the
+// main file p and the *.yaml of config.d next to it (dotfiles left out, in
+// lexical order), as lukd loads them. The pipelines of a job are those
+// with a step relay: <job> and those with a run step whose jobs lists it;
+// the paths are those of every file (see jobsFile.paths). A missing p (or
+// a missing directory above it) allows nothing. Every directory from top down to config.d, p
 // and the snippets must pass the checks of run.d (CheckParents,
 // readSafe) for owner; a refused or malformed file, too many snippets or
 // a pipeline defined in two files or a step with both run and relay (an
 // error of lukd as well) refuse the whole configuration.
-func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) {
+func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 	dir := filepath.Dir(p)
 	if err := CheckParents(dir, top, owner); errors.Is(err, os.ErrNotExist) {
-		return map[string][]string{}, nil
+		return &Lukd{Pipelines: map[string][]string{}}, nil
 	} else if err != nil {
 		return nil, err
 	}
 	b, err := readSafe(p, owner, maxConfigFile)
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string][]string{}, nil
+		return &Lukd{Pipelines: map[string][]string{}}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -69,6 +148,7 @@ func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) 
 	// origin maps each pipeline to the file that defines it.
 	origin := map[string]string{}
 	rs := map[string][]string{}
+	var paths []string
 	for i, f := range append([]string{p}, snippets...) {
 		if i > 0 {
 			if b, err = readSafe(f, owner, maxConfigFile); err != nil {
@@ -79,6 +159,7 @@ func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) 
 		if err := decodeOne(b, &jf); err != nil {
 			return nil, fmt.Errorf("%s: %w", f, err)
 		}
+		paths = append(paths, jf.paths()...)
 		for name, pl := range jf.Pipeline {
 			if prev, ok := origin[name]; ok {
 				return nil, fmt.Errorf("pipeline %s: defined in %s and %s", name, prev, f)
@@ -112,7 +193,8 @@ func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) 
 	for _, ps := range rs {
 		slices.Sort(ps)
 	}
-	return rs, nil
+	slices.Sort(paths)
+	return &Lukd{Pipelines: rs, Paths: slices.Compact(paths)}, nil
 }
 
 // snippetFiles lists the *.yaml of dir that are not dotfiles, in lexical
@@ -171,13 +253,13 @@ func decodeOne(data []byte, v any) error {
 }
 
 // allowed reports whether pipeline may run job by the lukd configuration
-// of g (LoadJobPipelines). A refused configuration allows nothing
-// (logged).
-func (s *Server) allowed(g *Global, job, pipeline string) bool {
-	ps, err := LoadJobPipelines(g.Config, s.Top, s.Owner)
+// of g (LoadLukd) and returns that configuration. A refused configuration
+// allows nothing (logged).
+func (s *Server) allowed(g *Global, job, pipeline string) (*Lukd, bool) {
+	lk, err := LoadLukd(g.Config, s.Top, s.Owner)
 	if err != nil {
 		s.Log.Error("lukd configuration refused, no pipeline may run a job", "config", g.Config, "err", err)
-		return false
+		return nil, false
 	}
-	return slices.Contains(ps[job], pipeline)
+	return lk, slices.Contains(lk.Pipelines[job], pipeline)
 }

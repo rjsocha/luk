@@ -14,12 +14,15 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 
 	"luk/internal/config"
 	"luk/internal/queue"
@@ -51,6 +54,9 @@ type Server struct {
 	// when empty) down.
 	Owner uint32
 	Top   string
+	// Checker is the lukd binary whose run check-work (CheckWorkCmd) is
+	// the ExecStartPre of every job.
+	Checker string
 	// PeerUID returns the uid of the connected process.
 	PeerUID func() (uint32, error)
 	Runner  Runner
@@ -147,11 +153,13 @@ func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, 
 		s.Log.Warn("work directory refused", "job", req.Job, "err", err)
 		return refusal{errWork}
 	}
-	if !s.allowed(g, req.Job, pipeline) {
+	lk, ok := s.allowed(g, req.Job, pipeline)
+	if !ok {
 		return refusal{fmt.Errorf("job %s: pipeline %s not allowed", req.Job, pipeline)}
 	}
 	work := req.Work
-	if _, err := CheckWork(g.Root, work, peer); err != nil {
+	_, ino, err := CheckWork(g.Root, work, peer)
+	if err != nil {
 		s.Log.Warn("work directory refused", "job", req.Job, "err", err)
 		return refusal{errWork}
 	}
@@ -167,7 +175,11 @@ func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, 
 	// work directory.
 	vars := runstep.Vars(work, g.Root, req.Env)
 	unit := UnitName(req.Job)
-	argv, err := job.Argv(g, unit, req.Job, pipeline, work, group, vars)
+	box := &Box{
+		Root: g.Root, Config: filepath.Dir(g.Config), Hide: slices.Concat(g.Hide, lk.Paths),
+		Checker: s.Checker, Work: ino,
+	}
+	argv, err := job.Argv(box, unit, req.Job, pipeline, work, group, vars)
 	if err != nil {
 		s.Log.Error("job refused", "job", req.Job, "err", err)
 		return refusal{fmt.Errorf("job %s: unavailable", req.Job)}
@@ -337,38 +349,78 @@ func ParseWork(root, work string) (string, error) {
 	return parts[1], nil
 }
 
+// Inode is the identity of a directory: its device and inode number.
+type Inode struct{ Dev, Ino uint64 }
+
 // CheckWork requires work to pass ParseWork and to be a directory owned by
 // uid, reached from root (which may be a symlink: it is root's
 // configuration) through work, <id>, <pipeline> and <step>, each opened
 // with workFlags: no symlink, nothing but a directory, no blocking open.
-// It returns the pipeline.
-func CheckWork(root, work string, uid uint32) (string, error) {
-	pipeline, err := ParseWork(root, work)
+// It returns the pipeline and the identity of the directory.
+func CheckWork(root, work string, uid uint32) (string, Inode, error) {
+	st, err := walkWork(root, work, syscall.O_RDONLY|syscall.O_NONBLOCK, workFlags)
 	if err != nil {
-		return "", err
-	}
-	fd, err := syscall.Open(root, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return "", fmt.Errorf("root %s: %w", root, err)
-	}
-	rel, _ := filepath.Rel(root, work)
-	for _, name := range strings.Split(rel, string(filepath.Separator)) {
-		next, err := syscall.Openat(fd, name, workFlags, 0)
-		syscall.Close(fd)
-		if err != nil {
-			return "", fmt.Errorf("work %q: %s: %w", work, name, err)
-		}
-		fd = next
-	}
-	defer syscall.Close(fd)
-	var st syscall.Stat_t
-	if err := syscall.Fstat(fd, &st); err != nil {
-		return "", fmt.Errorf("work %q: %w", work, err)
+		return "", Inode{}, err
 	}
 	if st.Uid != uid {
-		return "", fmt.Errorf("work %q: owned by uid %d, not the peer", work, st.Uid)
+		return "", Inode{}, fmt.Errorf("work %q: owned by uid %d, not the peer", work, st.Uid)
 	}
-	return pipeline, nil
+	pipeline, _ := ParseWork(root, work)
+	return pipeline, Inode{uint64(st.Dev), st.Ino}, nil
+}
+
+// CheckWorkCmd is the subcommand of lukd run that runs VerifyWork as the
+// ExecStartPre of a job: lukd run check-work <root> <work> <dev> <ino>.
+const CheckWorkCmd = "check-work"
+
+// VerifyWork requires work, inside the namespace of a job, to be the
+// directory want: reached from root as CheckWork does, without following a
+// symlink below root, and with the same device and inode. It needs no
+// privileges: every directory is opened with O_PATH.
+func VerifyWork(root, work string, want Inode) error {
+	const path = unix.O_PATH | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
+	st, err := walkWork(root, work, unix.O_PATH, path)
+	if err != nil {
+		return err
+	}
+	if got := (Inode{uint64(st.Dev), st.Ino}); got != want {
+		return fmt.Errorf("work %q: device %d inode %d, not the checked %d %d", work, got.Dev, got.Ino, want.Dev, want.Ino)
+	}
+	return nil
+}
+
+// walkWork opens root with rootFlags (following a symlink: it is root's
+// configuration), then every element of work below it with flags, each a
+// directory, and returns the stat of work. work must pass ParseWork.
+func walkWork(root, work string, rootFlags, flags int) (*syscall.Stat_t, error) {
+	if _, err := ParseWork(root, work); err != nil {
+		return nil, err
+	}
+	fd, err := syscall.Open(root, rootFlags|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("root %s: %w", root, err)
+	}
+	var st syscall.Stat_t
+	rel, _ := filepath.Rel(root, work)
+	for _, name := range strings.Split(rel, string(filepath.Separator)) {
+		next, err := syscall.Openat(fd, name, flags, 0)
+		syscall.Close(fd)
+		if err != nil {
+			return nil, fmt.Errorf("work %q: %s: %w", work, name, err)
+		}
+		fd = next
+		// O_PATH|O_NOFOLLOW opens a symlink itself.
+		if err := syscall.Fstat(fd, &st); err != nil {
+			syscall.Close(fd)
+			return nil, fmt.Errorf("work %q: %w", work, err)
+		}
+		if st.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+			syscall.Close(fd)
+			return nil, fmt.Errorf("work %q: %s: not a directory", work, name)
+		}
+	}
+	syscall.Close(fd)
+	return &st, nil
 }
 
 // unsafePathRune reports a rune refused in a work path: systemd-run and

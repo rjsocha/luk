@@ -16,6 +16,13 @@
 # writable by group or others; a missing file allows no pipeline, a
 # refused one neither (logged). Default: /etc/site/lukd/config.yaml.
 # config: /etc/site/lukd/config.yaml
+# It also names the paths a job must not see: its directory, root and,
+# when absolute, auth.nonces, gpg.keys, the TLS and EAB key files, the
+# queues and the storage bases (see the sandbox of a job in doc/SPEC.md).
+
+# Further absolute paths a job must not see, for data of luk the
+# configuration does not name. Default: none.
+# hide: [/srv/luk-archive]
 
 # The only user allowed to connect to the socket (SO_PEERCRED); any other
 # connection is closed without an answer. Default: the owner of root.

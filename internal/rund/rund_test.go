@@ -84,6 +84,14 @@ func TestLoadGlobal(t *testing.T) {
 	if _, err := LoadGlobal(p, me+1); err == nil || !strings.Contains(err.Error(), "owned by") {
 		t.Fatalf("owner: %v", err)
 	}
+	write(t, p, "hide: [/srv/a/, /srv/b/../c]\n", 0o600)
+	if g, err := LoadGlobal(p, me); err != nil || !slices.Equal(g.Hide, []string{"/srv/a", "/srv/c"}) {
+		t.Fatalf("hide %+v %v", g, err)
+	}
+	write(t, p, "hide: [srv]\n", 0o600)
+	if _, err := LoadGlobal(p, me); err == nil || !strings.Contains(err.Error(), "not absolute") {
+		t.Fatalf("relative hide: %v", err)
+	}
 }
 
 func TestLoadJobsRules(t *testing.T) {
@@ -182,6 +190,11 @@ func TestLoadJobsRules(t *testing.T) {
 	}
 }
 
+// box is the sandbox of the argv tests.
+func box(root, conf string, hide ...string) *Box {
+	return &Box{Root: root, Config: conf, Hide: hide, Checker: "/usr/bin/lukd", Work: Inode{2049, 77}}
+}
+
 func TestArgv(t *testing.T) {
 	d := t.TempDir()
 	write(t, filepath.Join(d, "j.yaml"), s3Job, 0o600)
@@ -190,17 +203,19 @@ func TestArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	j.State = StateLocked
-	g := &Global{Root: "/var/lib/luk", Config: "/etc/site/lukd/config.yaml"}
 	vars := []string{"LUK_WORK=/var/lib/luk/work/a/offsite/1", "LUK_PIPELINE=offsite", "LUK_TAGS=a b,$HOME"}
-	a, err := j.Argv(g, "lukd-run-s3-1", "s3-upload", "offsite", "/var/lib/luk/work/a/offsite/1", "luk", vars)
+	b := box("/var/lib/luk", "/etc/site/lukd", "/storage", "/run/luk/volatile/q", "/var/lib/luk/tls/k.pem", "/etc/site/lukd/gpg.d", "/storage/x", "/etc/ssl/private/k.pem")
+	a, err := j.Argv(b, "lukd-run-s3-1", "s3-upload", "offsite", "/var/lib/luk/work/a/offsite/1", "luk", vars)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(a, " ")
 	want := "systemd-run --wait --collect --pipe --quiet --expand-environment=no --unit=lukd-run-s3-1 --uid=luk-s3 " +
 		"--working-directory=/var/lib/luk/work/a/offsite/1 --gid=luk-s3 -p SupplementaryGroups=luk backup " +
-		"-p PrivateTmp=yes -p InaccessiblePaths=-/etc/site/lukd -p InaccessiblePaths=-/run/luk " +
-		"-p TemporaryFileSystem=/var/lib/luk:ro -p BindPaths=/var/lib/luk/work/a/offsite/1 " +
+		"-p PrivateTmp=yes -p ProtectProc=invisible -p InaccessiblePaths=-/etc/site/lukd -p InaccessiblePaths=-/run/luk " +
+		"-p InaccessiblePaths=-/etc/ssl/private/k.pem -p InaccessiblePaths=-/storage " +
+		"-p TemporaryFileSystem=/var/lib/luk:ro -p BindPaths=/var/lib/luk/work/a/offsite/1:/var/lib/luk/work/a/offsite/1:norbind " +
+		"-p ExecStartPre=/usr/bin/lukd run check-work /var/lib/luk /var/lib/luk/work/a/offsite/1 2049 77 " +
 		"-p StateDirectory=lukd-run/s3-upload/offsite -p StateDirectoryMode=0700 " +
 		"-p LoadCredential=s3:/etc/site/lukd/s3.credentials -p RuntimeMaxSec=1800 --setenv=BUCKET=example-backup " +
 		"--setenv=LUK_WORK=/var/lib/luk/work/a/offsite/1 --setenv=LUK_PIPELINE=offsite --setenv=LUK_TAGS=a b,$HOME " +
@@ -213,15 +228,15 @@ func TestArgv(t *testing.T) {
 		t.Fatalf("groups %s", g)
 	}
 	dyn := &Job{Command: "/opt/luk/notify", Groups: []string{"mail"}, Timeout: config.Duration(time.Minute)}
-	g = &Global{Root: "/srv/l", Config: "/etc/l/c.yaml"}
-	a, err = dyn.Argv(g, "lukd-run-n-1", "notify", "p", "/srv/l/work/i/p/1", "luk", []string{"LUK_WORK=/srv/l/work/i/p/1", "LUK_PIPELINE=p"})
+	a, err = dyn.Argv(box("/srv/l", "/etc/l"), "lukd-run-n-1", "notify", "p", "/srv/l/work/i/p/1", "luk", []string{"LUK_WORK=/srv/l/work/i/p/1", "LUK_PIPELINE=p"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got = strings.Join(a, " ")
 	want = "systemd-run --wait --collect --pipe --quiet --expand-environment=no --unit=lukd-run-n-1 -p DynamicUser=yes -p User=" + DynamicUser("notify", "p") + " " +
-		"--working-directory=/srv/l/work/i/p/1 -p SupplementaryGroups=luk mail -p PrivateTmp=yes " +
-		"-p InaccessiblePaths=-/etc/l -p InaccessiblePaths=-/run/luk -p TemporaryFileSystem=/srv/l:ro -p BindPaths=/srv/l/work/i/p/1 " +
+		"--working-directory=/srv/l/work/i/p/1 -p SupplementaryGroups=luk mail -p PrivateTmp=yes -p ProtectProc=invisible " +
+		"-p InaccessiblePaths=-/etc/l -p InaccessiblePaths=-/run/luk -p TemporaryFileSystem=/srv/l:ro " +
+		"-p BindPaths=/srv/l/work/i/p/1:/srv/l/work/i/p/1:norbind -p ExecStartPre=/usr/bin/lukd run check-work /srv/l /srv/l/work/i/p/1 2049 77 " +
 		"-p RuntimeMaxSec=60 " +
 		"--setenv=LUK_WORK=/srv/l/work/i/p/1 --setenv=LUK_PIPELINE=p --setenv=LUK_JOB=notify --setenv=LUK_TMP=/var/tmp /opt/luk/notify /srv/l/work/i/p/1"
 	if got != want {
@@ -232,68 +247,117 @@ func TestArgv(t *testing.T) {
 	}
 }
 
-// TestArgvSandboxFromRunYAML takes the hidden directories from run.yaml.
-func TestArgvSandboxFromRunYAML(t *testing.T) {
-	d := t.TempDir()
-	p := filepath.Join(d, "run.yaml")
-	write(t, p, "root: /data/luk\nconfig: /etc/x/lukd/main.yaml\n", 0o600)
-	g, err := LoadGlobal(p, me)
-	if err != nil {
-		t.Fatal(err)
-	}
-	j := &Job{User: "u", Command: "/opt/j", Timeout: config.Duration(time.Minute)}
-	a, err := j.Argv(g, "u1", "j", "p", "/data/luk/work/i/p/2", "luk", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(a, " ")
-	for _, w := range []string{
-		" -p InaccessiblePaths=-/etc/x/lukd ",
-		" -p InaccessiblePaths=-/run/luk ",
-		" -p TemporaryFileSystem=/data/luk:ro ",
-		" -p BindPaths=/data/luk/work/i/p/2 ",
-	} {
-		if !strings.Contains(got, w) {
-			t.Errorf("no %q in %s", w, got)
-		}
-	}
-}
-
 func TestArgvRefusesPaths(t *testing.T) {
 	j := &Job{User: "u", Command: "/opt/j", Timeout: config.Duration(time.Minute)}
-	ok := &Global{Root: "/var/lib/luk", Config: "/etc/site/lukd/config.yaml"}
+	ok := box("/var/lib/luk", "/etc/site/lukd")
+	const w = "/var/lib/luk/work/i/p/1"
 	for name, c := range map[string]struct {
-		g    *Global
-		work string
-		cmd  string
+		b     *Box
+		work  string
+		cmd   string
+		state bool
 	}{
-		"space in work":       {ok, "/var/lib/luk/work/i/p q/1", ""},
-		"tab in work":         {ok, "/var/lib/luk/work/i/p\tq/1", ""},
-		"newline in work":     {ok, "/var/lib/luk/work/i/p\nq/1", ""},
-		"control in work":     {ok, "/var/lib/luk/work/i/p\x01/1", ""},
-		"colon in work":       {ok, "/var/lib/luk/work/i/p:q/1", ""},
-		"quote in work":       {ok, "/var/lib/luk/work/i/p\"q/1", ""},
-		"backslash in work":   {ok, "/var/lib/luk/work/i/p\\q/1", ""},
-		"percent in work":     {ok, "/var/lib/luk/work/i/p%q/1", ""},
-		"work outside root":   {ok, "/var/lib/other/work/i/p/1", ""},
-		"work not clean":      {ok, "/var/lib/luk/work/i/../p/1", ""},
-		"space in root":       {&Global{Root: "/var/lib/l k", Config: ok.Config}, "/var/lib/l k/work/i/p/1", ""},
-		"root is /":           {&Global{Root: "/", Config: ok.Config}, "/work/i/p/1", ""},
-		"space in config dir": {&Global{Root: ok.Root, Config: "/etc/l k/config.yaml"}, "/var/lib/luk/work/i/p/1", ""},
-		"config dir is /":     {&Global{Root: ok.Root, Config: "/config.yaml"}, "/var/lib/luk/work/i/p/1", ""},
-		"command under root":  {ok, "/var/lib/luk/work/i/p/1", "/var/lib/luk/bin/j"},
-		"command in config":   {ok, "/var/lib/luk/work/i/p/1", "/etc/site/lukd/j"},
-		"command in /run/luk": {ok, "/var/lib/luk/work/i/p/1", "/run/luk/j"},
+		"space in work":          {ok, "/var/lib/luk/work/i/p q/1", "", false},
+		"tab in work":            {ok, "/var/lib/luk/work/i/p\tq/1", "", false},
+		"newline in work":        {ok, "/var/lib/luk/work/i/p\nq/1", "", false},
+		"control in work":        {ok, "/var/lib/luk/work/i/p\x01/1", "", false},
+		"colon in work":          {ok, "/var/lib/luk/work/i/p:q/1", "", false},
+		"quote in work":          {ok, "/var/lib/luk/work/i/p\"q/1", "", false},
+		"backslash in work":      {ok, "/var/lib/luk/work/i/p\\q/1", "", false},
+		"percent in work":        {ok, "/var/lib/luk/work/i/p%q/1", "", false},
+		"work outside root":      {ok, "/var/lib/other/work/i/p/1", "", false},
+		"work not clean":         {ok, "/var/lib/luk/work/i/../p/1", "", false},
+		"space in root":          {box("/var/lib/l k", "/etc/site/lukd"), "/var/lib/l k/work/i/p/1", "", false},
+		"root is /":              {box("/", "/etc/site/lukd"), "/work/i/p/1", "", false},
+		"root is /var/lib":       {box("/var/lib", "/etc/site/lukd"), "/var/lib/work/i/p/1", "", false},
+		"root is /srv":           {box("/srv", "/etc/site/lukd"), "/srv/work/i/p/1", "", false},
+		"space in config dir":    {box("/var/lib/luk", "/etc/l k"), w, "", false},
+		"config dir is /":        {box("/var/lib/luk", "/"), w, "", false},
+		"config dir is /etc":     {box("/var/lib/luk", "/etc"), w, "", false},
+		"space in hidden path":   {box("/var/lib/luk", "/etc/site/lukd", "/srv/a b"), w, "", false},
+		"hidden path holds work": {box("/var/lib/luk", "/etc/site/lukd", "/var/lib"), w, "", false},
+		"hidden command":         {box("/var/lib/luk", "/etc/site/lukd", "/opt"), w, "", false},
+		"hidden checker":         {box("/var/lib/luk", "/etc/site/lukd", "/usr/bin"), w, "", false},
+		"hidden state":           {box("/var/lib/luk", "/etc/site/lukd", "/var/lib/lukd-run"), w, "", true},
+		"relative checker":       {&Box{Root: "/var/lib/luk", Config: "/etc/site/lukd", Checker: "lukd"}, w, "", false},
+		"command under root":     {ok, w, "/var/lib/luk/bin/j", false},
+		"command in config":      {ok, w, "/etc/site/lukd/j", false},
+		"command in /run/luk":    {ok, w, "/run/luk/j", false},
 	} {
 		jc := *j
 		if c.cmd != "" {
 			jc.Command = c.cmd
 		}
-		if a, err := jc.Argv(c.g, "u1", "j", "p", c.work, "luk", nil); err == nil {
+		if c.state {
+			jc.State = StateShared
+		}
+		if a, err := jc.Argv(c.b, "u1", "j", "p", c.work, "luk", nil); err == nil {
 			t.Errorf("%s accepted: %q", name, a)
 		}
 	}
-	if _, err := j.Argv(ok, "u1", "j", "p", "/var/lib/luk/work/i/p/1", "luk", nil); err != nil {
+	if _, err := j.Argv(ok, "u1", "j", "p", w, "luk", nil); err != nil {
+		t.Fatal(err)
+	}
+	// A hidden path under root, the configuration directory or /run/luk
+	// is left out, whatever its characters.
+	a, err := j.Argv(box("/var/lib/luk", "/etc/site/lukd", "/var/lib/luk/a b", "/run/luk/x:y"), "u1", "j", "p", w, "luk", nil)
+	if err != nil || strings.Count(strings.Join(a, " "), "InaccessiblePaths=") != 2 {
+		t.Fatalf("%q %v", a, err)
+	}
+}
+
+func TestVerifyWork(t *testing.T) {
+	top := t.TempDir()
+	root := filepath.Join(top, "root")
+	w := filepath.Join(root, "work", id1, "p", "1")
+	os.MkdirAll(w, 0o750)
+	_, ino, err := CheckWork(root, w, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyWork(root, w, ino); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyWork(root, w, Inode{ino.Dev, ino.Ino + 1}); err == nil || !strings.Contains(err.Error(), "not the checked") {
+		t.Fatalf("other inode: %v", err)
+	}
+	// A copy at the same path is another directory.
+	other := filepath.Join(top, "other")
+	os.MkdirAll(filepath.Join(other, "p", "1"), 0o750)
+	id := filepath.Join(root, "work", id1)
+	os.Rename(id, filepath.Join(top, "real"))
+	os.Rename(other, id)
+	if err := VerifyWork(root, w, ino); err == nil || !strings.Contains(err.Error(), "not the checked") {
+		t.Fatalf("swapped: %v", err)
+	}
+	// A symlink to the very directory is refused as well.
+	os.RemoveAll(id)
+	os.Symlink(filepath.Join(top, "real"), id)
+	if err := VerifyWork(root, w, ino); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("symlinked id: %v", err)
+	}
+	os.Remove(id)
+	os.Rename(filepath.Join(top, "real"), id)
+	os.Rename(filepath.Join(root, "work"), filepath.Join(top, "realwork"))
+	os.Symlink(filepath.Join(top, "realwork"), filepath.Join(root, "work"))
+	if err := VerifyWork(root, w, ino); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("symlinked work: %v", err)
+	}
+	// root itself may be a symlink, as in CheckWork.
+	os.Remove(filepath.Join(root, "work"))
+	os.Rename(filepath.Join(top, "realwork"), filepath.Join(root, "work"))
+	alias := filepath.Join(top, "alias")
+	os.Symlink(root, alias)
+	if err := VerifyWork(alias, filepath.Join(alias, "work", id1, "p", "1"), ino); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyWork(root, "/etc", ino); err == nil {
+		t.Fatal("outside accepted")
+	}
+	// Without any permission but search on the directories.
+	os.Chmod(w, 0)
+	defer os.Chmod(w, 0o750)
+	if err := VerifyWork(root, w, ino); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -349,10 +413,10 @@ func TestCheckWork(t *testing.T) {
 
 	// root (run.yaml) may be a symlink; nothing below it may.
 	aw := filepath.Join(alias, "work", id1, "p", "1")
-	if p, err := CheckWork(alias, aw, me); err != nil || p != "p" {
+	if p, _, err := CheckWork(alias, aw, me); err != nil || p != "p" {
 		t.Fatalf("%q %v", p, err)
 	}
-	if p, err := CheckWork(root, w, me); err != nil || p != "p" {
+	if p, _, err := CheckWork(root, w, me); err != nil || p != "p" {
 		t.Fatalf("%q %v", p, err)
 	}
 	for _, d := range []string{"p/1/x", "p/01", "p/0", "p/a", ".p/1", "-p/1", "p\x01/1"} {
@@ -386,14 +450,14 @@ func TestCheckWork(t *testing.T) {
 		"dash":           {filepath.Join(root, "work", id1, "-p", "1"), me, "not a step work directory"},
 		"control":        {filepath.Join(root, "work", id1, "p\x01", "1"), me, "control character"},
 	} {
-		if _, err := CheckWork(root, c.work, c.uid); err == nil || !strings.Contains(err.Error(), c.want) {
+		if _, _, err := CheckWork(root, c.work, c.uid); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v, want %q", name, err, c.want)
 		}
 	}
 	// A symlinked <root>/work (luk owns it) is refused as well.
 	os.Rename(filepath.Join(root, "work"), filepath.Join(top, "realwork"))
 	os.Symlink(filepath.Join(top, "realwork"), filepath.Join(root, "work"))
-	if _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a directory") {
+	if _, _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Errorf("symlinked work: %v", err)
 	}
 }
@@ -511,6 +575,7 @@ func newEnv(t *testing.T) *env {
 	e := &env{work: w, fr: &fakeRunner{}, peer: me}
 	e.srv = &Server{
 		Config: conf, Jobs: jobs, Locks: filepath.Join(top, "locks"), Owner: me, Top: top,
+		Checker: "/usr/bin/lukd",
 		PeerUID: func() (uint32, error) { return e.peer, nil },
 		Runner:  e.fr,
 		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -581,20 +646,48 @@ func TestServeRuns(t *testing.T) {
 func TestServeSandbox(t *testing.T) {
 	e := newEnv(t)
 	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { return 0, nil }
+	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(e.work))))
+	top := filepath.Dir(root)
+	conf := filepath.Join(top, "lukd", "config.yaml")
+	// Data and secrets of lukd outside root; relative paths lie under root.
+	write(t, conf, envConfig+`root: `+root+`
+auth:
+  nonces: /srv/nonces
+gpg:
+  keys: /srv/gpg
+listen:
+  tls:
+    tls: {mode: files, cert: /etc/ssl/luk.crt, key: /etc/ssl/private/luk.key}
+  rel:
+    tls: {mode: files, cert: tls/c.pem, key: tls/k.pem}
+endpoint:
+  up:
+    path: /srv/queue/up
+    secret: {path: /run/luk/volatile/queue}
+storage:
+  backup: {type: local, base: /storage/backup, path: x}
+  near: {type: local, base: store, path: x}
+`, 0o640)
+	write(t, e.srv.Config, "root: "+root+"\nconfig: "+conf+"\nhide: [/srv/extra, /srv/queue]\n", 0o600)
 	if _, err := e.exchange(t, string(runproto.Request{Job: "state", Work: e.work}.Encode())); err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(e.work))))
-	top := filepath.Dir(root)
+	_, ino, err := CheckWork(root, e.work, me)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := strings.Join(e.fr.argv, " ")
-	want := "-p InaccessiblePaths=-" + filepath.Join(top, "lukd") + " -p InaccessiblePaths=-/run/luk " +
-		"-p TemporaryFileSystem=" + root + ":ro -p BindPaths=" + e.work + " "
+	hidden := []string{filepath.Join(top, "lukd"), "/run/luk", "/etc/ssl/luk.crt", "/etc/ssl/private/luk.key", "/srv/extra", "/srv/gpg", "/srv/nonces", "/srv/queue", "/storage/backup"}
+	want := "-p ProtectProc=invisible -p InaccessiblePaths=-" + strings.Join(hidden, " -p InaccessiblePaths=-") + " " +
+		"-p TemporaryFileSystem=" + root + ":ro -p BindPaths=" + e.work + ":" + e.work + ":norbind " +
+		"-p ExecStartPre=/usr/bin/lukd run check-work " + root + " " + e.work + " " +
+		strconv.FormatUint(ino.Dev, 10) + " " + strconv.FormatUint(ino.Ino, 10) + " "
 	if !strings.Contains(got, want) {
 		t.Fatalf("argv %s\nwant %s", got, want)
 	}
 	// A command the sandbox hides is refused before anything runs.
 	e.fr.argv = nil
-	write(t, filepath.Join(e.srv.Jobs, "quick.yaml"), "command: "+filepath.Join(top, "lukd", "quick")+"\n", 0o600)
+	write(t, filepath.Join(e.srv.Jobs, "quick.yaml"), "command: /storage/backup/quick\n", 0o600)
 	fs, err := e.exchange(t, string(runproto.Request{Job: "quick", Work: e.work}.Encode()))
 	if err == nil || len(fs) != 2 || fs[0] != (frame{'e', "lukd run: job quick: unavailable\n"}) || e.fr.argv != nil {
 		t.Fatalf("%v %q %q", err, fs, e.fr.argv)
@@ -853,7 +946,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 	root := filepath.Join(top, "root")
 	ok := filepath.Join(root, "work", id1, "p", "1")
 	os.MkdirAll(ok, 0o750)
-	if _, err := CheckWork(root, ok, me); err != nil {
+	if _, _, err := CheckWork(root, ok, me); err != nil {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{"\n", "\t", " ", "$", "${HOME}", "%", "%h", "\x1b", "\u00a0"} {
@@ -867,7 +960,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 			if err := os.MkdirAll(w, 0o750); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := CheckWork(root, w, me); err == nil {
+			if _, _, err := CheckWork(root, w, me); err == nil {
 				t.Errorf("%q accepted", d)
 			}
 		}
@@ -875,7 +968,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 	for _, id := range []string{"x", "id1", "20261004T101500Z-0123ABCD", "20261004T101500Z-0123abc", "20261004T101500Z0123abcd", "..x"} {
 		w := filepath.Join(root, "work", id, "p", "1")
 		os.MkdirAll(w, 0o750)
-		if _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a step work directory") {
+		if _, _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a step work directory") {
 			t.Errorf("id %q: %v", id, err)
 		}
 	}
@@ -883,7 +976,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 	odd := filepath.Join(top, "a$b")
 	w := filepath.Join(odd, "work", id1, "p", "1")
 	os.MkdirAll(w, 0o750)
-	if _, err := CheckWork(odd, w, me); err == nil {
+	if _, _, err := CheckWork(odd, w, me); err == nil {
 		t.Error("root with $ accepted")
 	}
 }

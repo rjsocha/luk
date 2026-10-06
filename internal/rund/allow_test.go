@@ -236,3 +236,40 @@ func TestLoadJobPipelinesMany(t *testing.T) {
 		t.Fatalf("took %v", d)
 	}
 }
+
+func TestLoadLukdPaths(t *testing.T) {
+	top, p := relayTree(t)
+	lk, err := LoadLukd(p, top, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(lk.Paths, []string{"/var/lib/luk"}) {
+		t.Fatalf("default root: %q", lk.Paths)
+	}
+	sd := filepath.Join(filepath.Dir(p), "config.d")
+	write(t, filepath.Join(sd, "30-paths.yaml"), `root: /data/luk
+auth: {nonces: /srv/nonces/}
+gpg: {keys: /srv/gpg}
+listen:
+  web:
+    tls: {mode: acme, cert: tls/c.pem, key: /etc/ssl/private/k.pem, eab: {kid: k, key_file: /etc/eab.key}}
+endpoint:
+  up: {path: /srv/q/up, secret: {path: /run/v/q}}
+  rel: {path: queue/rel}
+storage:
+  s: {type: local, base: /storage/s, path: x}
+  r: {type: local, base: store, path: x}
+  b: {type: s3, bucket: x}
+`, 0o640)
+	write(t, filepath.Join(sd, "40-more.yaml"), "storage:\n  t: {type: local, base: /storage/s, path: y}\n", 0o640)
+	if lk, err = LoadLukd(p, top, me); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/data/luk", "/etc/eab.key", "/etc/ssl/private/k.pem", "/run/v/q", "/srv/gpg", "/srv/nonces", "/srv/q/up", "/storage/s", "/var/lib/luk"}
+	if !slices.Equal(lk.Paths, want) {
+		t.Fatalf("paths\n got %q\nwant %q", lk.Paths, want)
+	}
+	if !slices.Equal(lk.Pipelines["j1"], []string{"a", "b"}) {
+		t.Fatalf("pipelines %q", lk.Pipelines)
+	}
+}

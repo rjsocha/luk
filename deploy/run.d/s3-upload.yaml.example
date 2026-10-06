@@ -18,9 +18,9 @@ user: luk-s3
 # group: luk-s3
 
 # Absolute path; receives the work directory as its only argument (also
-# in LUK_WORK). It must lie outside the lukd root, /etc/site/lukd and
-# /run/luk: the job sees none of them, of the root only its work
-# directory.
+# in LUK_WORK). It must lie outside the lukd root, /etc/site/lukd,
+# /run/luk and every other path the sandbox of a job hides: the job
+# sees none of them, of the root only its work directory.
 command: /opt/luk/s3-upload
 
 # systemd LoadCredential= entries, name: path. The job reads them from

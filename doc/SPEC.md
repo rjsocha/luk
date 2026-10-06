@@ -4545,9 +4545,12 @@ work directory. No polkit and no sudo are involved.
     connection); default the owner of `root`.
   - `config`: the main file of the lukd configuration, an absolute
     path; default `/etc/site/lukd/config.yaml`. It decides which
-    pipelines may run a job (see Pipelines of a job below); `lukd
+    pipelines may run a job (see Pipelines of a job below) and names
+    the paths a job must not see (see Sandbox of a job); `lukd
     check` run as root warns when it is not the checked file, and when
     it is but lukd run would refuse it.
+  - `hide`: absolute paths, further ones a job must not see (see
+    Sandbox of a job); default none.
 - Jobs: `/etc/site/lukd/run.d/<job>.yaml`, one job per file
   (`deploy/run.d/s3-upload.yaml.example`). The job name is the file base
   name, `[a-z0-9][a-z0-9._-]*`. Files not ending in `.yaml`, dotfiles and
@@ -4660,8 +4663,10 @@ work directory. No polkit and no sudo are involved.
   (--uid=<user> | -p DynamicUser=yes -p User=<dynamic user>)
   --working-directory=<work> [--gid=<group>]
   -p SupplementaryGroups=<peer group> [<groups>] -p PrivateTmp=yes
-  -p InaccessiblePaths=-<config dir> -p InaccessiblePaths=-/run/luk
-  -p TemporaryFileSystem=<root>:ro -p BindPaths=<work>
+  -p ProtectProc=invisible -p InaccessiblePaths=-<config dir>
+  -p InaccessiblePaths=-/run/luk [-p InaccessiblePaths=-<path> ...]
+  -p TemporaryFileSystem=<root>:ro -p BindPaths=<work>:<work>:norbind
+  -p ExecStartPre=<lukd> run check-work <root> <work> <dev> <ino>
   [-p StateDirectory=lukd-run/<job>/<pipeline> -p StateDirectoryMode=0700]
   -p LoadCredential=... -p RuntimeMaxSec=<timeout> [--setenv=K=V ...]
   --setenv=LUK_WORK=<work> ... --setenv=LUK_ORIGIN=<origin>
@@ -4672,11 +4677,13 @@ work directory. No polkit and no sudo are involved.
   both the lukd and the lukd run sandbox, and streams the job's stdout and
   stderr back. `<work>` is the work path of the request as checked
   (never resolved): the job's argument, its `LUK_WORK` and its current
-  directory, as for a `run` program. The check is at request time:
-  `luk` owns `<root>/work/<id>` and can swap it for a symlink before
-  systemd changes into the directory, with the same effect as running
-  the job in a tree of `luk`'s own, so a job does not trust the location
-  of its work directory beyond that. `<peer group>` is the primary group
+  directory, as for a `run` program. The check is at request time, and
+  `luk` owns `<root>`, `<root>/work` and `<root>/work/<id>`: it can swap
+  one of them for a symlink before systemd binds `<work>` into the unit,
+  and systemd binds whatever the path then resolves to. So the unit
+  checks again from inside (see Sandbox of a job): a work directory that
+  is not the one checked fails the job before its command starts.
+  `<peer group>` is the primary group
   of the peer (passwd), by name, or the numeric gid when it has no name or
   one that is not a plain account name.
 - Sandbox of a job: the job runs as another user with credentials of
@@ -4684,31 +4691,60 @@ work directory. No polkit and no sudo are involved.
   group reads. Its unit hides all of that:
   - `<config dir>`, the directory of `config` of `run.yaml` (default
     `/etc/site/lukd`), is inaccessible as a whole: the identity key,
-    `password.d`, `config.yaml` and `config.d`, `run.yaml` and run.d,
-    and every other file there. `LoadCredential=` still reads a
-    credential from it, since systemd reads the credentials as root
-    before it sets up the namespace of the job.
+    `password.d`, `gpg.d`, `ssh.d`, `config.yaml` and `config.d`,
+    `run.yaml` and run.d, and every other file there. `LoadCredential=`
+    still reads a credential from it, since systemd reads the
+    credentials as root before it sets up the namespace of the job.
   - `/run/luk` is inaccessible: the socket of lukd run, the nonce cache
     and the volatile secrets.
   - `<root>` is an empty read-only tmpfs (the TLS and ACME keys, the
-    storages, the queues and the other work directories are gone) with
-    only `<work>` bound back, read-write and at the same path, so
-    `LUK_WORK`, `LUK_IN`, `LUK_OUT`, `LUK_META`, the argument and the
-    current directory stay valid. `LUK_ROOT` names the tmpfs.
-  - The `-` of `InaccessiblePaths=` skips a missing directory; the bind
-    of `<work>` has none, so a work directory gone before the start
-    fails the job.
+    WKD key cache, the status, the storages, the queues and the other
+    work directories are gone) with only `<work>` bound back
+    (non-recursively), read-write and at the same path, so `LUK_WORK`,
+    `LUK_IN`, `LUK_OUT`, `LUK_META`, the argument and the current
+    directory stay valid. `LUK_ROOT` names the tmpfs.
+  - Every other path of the lukd configuration that holds data or
+    secrets is inaccessible as well, read per connection with the
+    pipelines (`config` and its `config.d`, see Pipelines of a job):
+    its `root` (default `/var/lib/luk`) and, when absolute, `auth.nonces`,
+    `gpg.keys`, the `tls.cert`, `tls.key` and `tls.eab.key_file` of
+    every listener, the `path` and `secret.path` of every endpoint and
+    the `base` of every storage (a relative one lies under `root`).
+    So are the paths of `hide` in `run.yaml` (absolute, for anything
+    the configuration does not name). A path under `<root>`, `<config
+    dir>`, `/run/luk` or another hidden path adds nothing.
+  - `-p ExecStartPre=<lukd> run check-work <root> <work> <dev> <ino>`
+    runs in the namespace of the job, as its user, before its command:
+    `<lukd>` is the binary of lukd run, `<dev>` and `<ino>` the device
+    and inode of `<work>` as lukd run checked it. It opens `<root>`
+    (following a symlink, as lukd run does) and every element below it
+    with `O_PATH|O_NOFOLLOW` (no privileges needed) and fails unless
+    each is a directory and `<work>` is the checked one. A swapped
+    directory above `<work>` (see Request flow) so fails the job; the
+    namespace does not change after the check.
+  - `ProtectProc=invisible`: the processes of other users (lukd, its
+    `run` programs, other jobs) are hidden in `/proc`.
+  - The `-` of `InaccessiblePaths=` skips a missing path; the bind of
+    `<work>` has none, so a work directory gone before the start fails
+    the job.
   - The job sees the rest of the system as its user and groups allow,
     `/tmp` and `/var/tmp` private (`PrivateTmp=yes`), and its state
-    directory. A storage, queue, nonce cache or volatile directory
-    configured outside `<root>` and `/run/luk` is not hidden.
-  - `command` must lie outside `<root>`, `<config dir>` and `/run/luk`,
-    which the job cannot reach; `<root>`, `<config dir>` and `<work>`
-    must be clean absolute paths other than `/` without white space, a
-    control character, a quote, a backslash, a colon, `$` or `%`
-    (systemd-run splits, unquotes or expands them in a property).
-    Otherwise the request is refused as `job <job>: unavailable`, the
-    reason in the journal.
+    directory.
+  - Not confined: a job whose groups reach a service that acts for it
+    on the host. A job in the group `docker` can bind any host path into
+    a container through the daemon, which also resolves `<work>` on the
+    host without the check above; such a job sees what root sees.
+  - `command`, the work directory, the state directory and `<lukd>` must
+    lie outside every hidden path (`<work>` is the one exception under
+    `<root>`); `<root>`, `<config dir>`, `<work>`, `<lukd>` and every
+    hidden path that adds a property must be clean absolute paths other
+    than `/` without white space, a control character, a quote, a
+    backslash, a colon, `$` or `%` (systemd-run splits, unquotes or
+    expands them in a property); `<root>` and `<config dir>` must not be
+    a system directory (`/etc`, `/usr`, `/var`, `/var/lib`, `/run`,
+    `/srv`, `/opt`, `/home`, `/tmp` and the like), which the job cannot
+    do without. Otherwise the request is refused as `job <job>:
+    unavailable`, the reason in the journal.
 - Deadlines: the request must arrive, and a refusal be read, within 5
   seconds of the connection; a peer that sends nothing, half a line or
   does not read the refusal is cut off then. A job waiting for its state

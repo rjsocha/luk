@@ -62,6 +62,8 @@ type Global struct {
 	Peer string `yaml:"peer"`
 	// Config is the main file of the lukd configuration (see LoadJobPipelines).
 	Config string `yaml:"config"`
+	// Hide lists further absolute paths a job must not see (see Box).
+	Hide []string `yaml:"hide"`
 }
 
 // Job is one file of run.d. The pipelines that may run it come from the
@@ -180,6 +182,12 @@ func LoadGlobal(p string, owner uint32) (*Global, error) {
 		return nil, fmt.Errorf("%s: config %q: not absolute", p, g.Config)
 	}
 	g.Config = filepath.Clean(g.Config)
+	for i, h := range g.Hide {
+		if !filepath.IsAbs(h) {
+			return nil, fmt.Errorf("%s: hide %q: not absolute", p, h)
+		}
+		g.Hide[i] = filepath.Clean(h)
+	}
 	return g, nil
 }
 
@@ -370,16 +378,28 @@ func DynamicUser(job, pipeline string) string {
 	return "lukd-" + strings.TrimRight(r, "-") + "-" + h
 }
 
+// Box is the sandbox of a job (see Job.Argv): the root of run.yaml, the
+// directory of the lukd configuration, further paths to hide (hide of
+// run.yaml, Lukd.Paths), the lukd binary that checks the work directory
+// inside the unit and the identity of the work directory CheckWork
+// accepted.
+type Box struct {
+	Root    string
+	Config  string
+	Hide    []string
+	Checker string
+	Work    Inode
+}
+
 // Argv is the systemd-run command line of job name on work (a step of
 // pipeline) as unit. peerGroup (a name or a numeric gid) is the primary
 // group of the peer; without a user the job gets a dynamic user per job
 // and pipeline. vars is the LUK_* metadata of work (runstep.Vars), set
 // after the job's env and before LUK_JOB, LUK_TMP and LUK_STATE, one
-// --setenv argument each. The job sees neither the directory of the lukd
-// configuration of g nor RunDir, and of the root of g only work, at the
+// --setenv argument each. The job sees nothing of box but work, at the
 // same path (see sandbox).
-func (j *Job) Argv(g *Global, unit, name, pipeline, work, peerGroup string, vars []string) ([]string, error) {
-	box, err := j.sandbox(g, work)
+func (j *Job) Argv(box *Box, unit, name, pipeline, work, peerGroup string, vars []string) ([]string, error) {
+	sb, err := j.sandbox(box, name, pipeline, work)
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +415,7 @@ func (j *Job) Argv(g *Global, unit, name, pipeline, work, peerGroup string, vars
 	}
 	a = append(a, "-p", "SupplementaryGroups="+strings.Join(j.SupplementaryGroups(peerGroup), " "))
 	a = append(a, "-p", "PrivateTmp=yes")
-	a = append(a, box...)
+	a = append(a, sb...)
 	if j.State != "" {
 		a = append(a, "-p", "StateDirectory="+StateDir+"/"+name+"/"+pipeline, "-p", "StateDirectoryMode=0700")
 	}
@@ -416,35 +436,81 @@ func (j *Job) Argv(g *Global, unit, name, pipeline, work, peerGroup string, vars
 	return append(a, j.Command, work), nil
 }
 
-// sandbox is the part of the namespace of a job that hides what the group
-// of the peer may read: the directory of the lukd configuration
-// (identity key, passwords, TLS settings) and RunDir become inaccessible,
-// the root (keys, storages, queues, other work directories) an empty
-// read-only tmpfs with only work bound back, read-write and at the same
-// path, so LUK_WORK, LUK_IN, LUK_OUT and LUK_META stay valid. The
-// credentials of the job are read by systemd before the namespace is set
-// up. work is the path CheckWork accepted, passed as is.
-func (j *Job) sandbox(g *Global, work string) ([]string, error) {
-	conf := filepath.Dir(g.Config)
-	for _, p := range []string{g.Root, conf, work} {
+// systemDirs may be neither the root nor the directory of the lukd
+// configuration: the job would lose the system below them.
+var systemDirs = []string{
+	"/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root",
+	"/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/usr/bin", "/usr/lib", "/usr/local",
+	"/usr/sbin", "/usr/share", "/var", "/var/cache", "/var/lib", "/var/log", "/var/tmp",
+}
+
+// under reports whether p is d or below it.
+func under(p, d string) bool {
+	return p == d || strings.HasPrefix(p, d+"/")
+}
+
+// sandbox is the part of the unit of a job that hides what the group of
+// the peer may read. The directory of the lukd configuration (identity
+// key, passwords, TLS settings), RunDir and the paths of box.Hide outside
+// both and the root become inaccessible; the root (keys, storages,
+// queues, other work directories) an empty read-only tmpfs with only work
+// bound back, read-write and at the same path, so LUK_WORK, LUK_IN,
+// LUK_OUT and LUK_META stay valid. luk may swap a directory above work
+// for a symlink after CheckWork, and systemd binds what the path resolves
+// to: ExecStartPre runs box.Checker in the namespace of the job, which
+// refuses to start it unless work there is the directory CheckWork
+// accepted. The processes of other users are hidden. The credentials of
+// the job are read by systemd before the namespace is set up.
+func (j *Job) sandbox(box *Box, name, pipeline, work string) ([]string, error) {
+	for _, p := range []string{box.Root, box.Config, work, box.Checker} {
 		if err := unitPath(p); err != nil {
 			return nil, err
 		}
 	}
-	if !strings.HasPrefix(work, g.Root+"/") {
-		return nil, fmt.Errorf("work %q: not under %s", work, g.Root)
-	}
-	for _, d := range []string{g.Root, conf, RunDir} {
-		if j.Command == d || strings.HasPrefix(j.Command, d+"/") {
-			return nil, fmt.Errorf("command %s: hidden from the job under %s", j.Command, d)
+	for _, d := range []struct{ what, path string }{{"root", box.Root}, {"configuration directory", box.Config}} {
+		if slices.Contains(systemDirs, d.path) {
+			return nil, fmt.Errorf("%s %s: a system directory, a job cannot run without it", d.what, d.path)
 		}
 	}
-	return []string{
-		"-p", "InaccessiblePaths=-" + conf,
-		"-p", "InaccessiblePaths=-" + RunDir,
-		"-p", "TemporaryFileSystem=" + g.Root + ":ro",
-		"-p", "BindPaths=" + work,
-	}, nil
+	if !strings.HasPrefix(work, box.Root+"/") {
+		return nil, fmt.Errorf("work %q: not under %s", work, box.Root)
+	}
+	hidden := []string{box.Config, RunDir}
+	var hide []string
+	for _, h := range slices.Sorted(slices.Values(box.Hide)) {
+		if slices.ContainsFunc(append(hidden, box.Root), func(d string) bool { return under(h, d) }) {
+			continue
+		}
+		if err := unitPath(h); err != nil {
+			return nil, err
+		}
+		hide = append(hide, h)
+		hidden = append(hidden, h)
+	}
+	keep := map[string]string{"work": work, "command": j.Command, "checker": box.Checker}
+	if j.State != "" {
+		keep["state directory"] = StatePath(name, pipeline)
+	}
+	for _, what := range sortedKeys(keep) {
+		for _, d := range append(slices.Clone(hidden), box.Root) {
+			if d == box.Root && what == "work" {
+				continue
+			}
+			if under(keep[what], d) {
+				return nil, fmt.Errorf("%s %s: hidden from the job under %s", what, keep[what], d)
+			}
+		}
+	}
+	a := []string{"-p", "ProtectProc=invisible"}
+	for _, h := range append([]string{box.Config, RunDir}, hide...) {
+		a = append(a, "-p", "InaccessiblePaths=-"+h)
+	}
+	return append(a,
+		"-p", "TemporaryFileSystem="+box.Root+":ro",
+		"-p", "BindPaths="+work+":"+work+":norbind",
+		"-p", "ExecStartPre="+strings.Join([]string{box.Checker, "run", CheckWorkCmd, box.Root, work,
+			strconv.FormatUint(box.Work.Dev, 10), strconv.FormatUint(box.Work.Ino, 10)}, " "),
+	), nil
 }
 
 // unitPath requires p to be a clean absolute path other than / without a
@@ -454,7 +520,7 @@ func unitPath(p string) error {
 	if !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" {
 		return fmt.Errorf("path %q: not a clean absolute path below /", p)
 	}
-	if strings.ContainsFunc(p, func(r rune) bool { return unsafePathRune(r) || strings.ContainsRune(`"'\:`, r) }) {
+	if strings.ContainsFunc(p, func(r rune) bool { return unsafePathRune(r) || strings.ContainsRune(`"'\\:`, r) }) {
 		return fmt.Errorf("path %q: control character, white space, quote, backslash, colon, $ or %% in the path", p)
 	}
 	return nil

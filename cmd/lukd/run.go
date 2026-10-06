@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -55,7 +56,30 @@ func runCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&jobs, "jobs", rund.DefaultJobs, "directory of the job files")
+	cmd.AddCommand(checkWorkCmd())
 	return cmd
+}
+
+// checkWorkCmd is the ExecStartPre of a job (rund.VerifyWork): it runs as
+// the job user inside the namespace of the job.
+func checkWorkCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    rund.CheckWorkCmd + " ROOT WORK DEV INO",
+		Short:  "Check the work directory of a job inside its unit",
+		Hidden: true,
+		Args:   cobra.ExactArgs(4),
+		RunE: func(_ *cobra.Command, args []string) error {
+			var want rund.Inode
+			var err error
+			if want.Dev, err = strconv.ParseUint(args[2], 10, 64); err != nil {
+				return fmt.Errorf("device %q: %w", args[2], err)
+			}
+			if want.Ino, err = strconv.ParseUint(args[3], 10, 64); err != nil {
+				return fmt.Errorf("inode %q: %w", args[3], err)
+			}
+			return rund.VerifyWork(args[0], args[1], want)
+		},
+	}
 }
 
 func serveRun(cfg, jobs string) error {
@@ -72,11 +96,16 @@ func serveRun(cfg, jobs string) error {
 		return errors.New("stdin is not a unix socket")
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
 	srv := &rund.Server{
 		Config:  cfg,
 		Jobs:    jobs,
 		Locks:   rund.DefaultLocks,
 		Owner:   0,
+		Checker: self,
 		PeerUID: func() (uint32, error) { return peerUID(uc) },
 		Runner:  rund.Systemd{},
 		Log:     log,
