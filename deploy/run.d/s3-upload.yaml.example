@@ -33,6 +33,7 @@ timeout: 1h
 # state: locked
 
 # Fixed environment of the job. LUK_* names are reserved: lukd run sets
-# LUK_WORK, LUK_JOB, LUK_PIPELINE, LUK_TMP and LUK_STATE.
+# the step metadata a run program gets (LUK_WORK, LUK_ID, LUK_FILE,
+# LUK_NAME, LUK_TAGS, LUK_ORIGIN, ...), then LUK_JOB, LUK_TMP and LUK_STATE.
 env:
   BUCKET: example-backup

@@ -21,7 +21,6 @@ import (
 	"luk/internal/config"
 	"luk/internal/runproto"
 	"luk/internal/runstep"
-	"luk/internal/wire"
 )
 
 const (
@@ -54,23 +53,6 @@ func initialSet(j Job) []file {
 	return []file{{name: name, path: filepath.Join(j.Entry.Dir, "payload")}}
 }
 
-type workServer struct {
-	ID       string `json:"id"`
-	Sender   string `json:"sender"`
-	Endpoint string `json:"endpoint"`
-	Received string `json:"received"`
-	Size     int64  `json:"size"`
-	SHA256   string `json:"sha256"`
-	Expires  string `json:"expires,omitempty"`
-}
-
-type workMeta struct {
-	Server   workServer `json:"server"`
-	Client   wire.Meta  `json:"client"`
-	Pipeline string     `json:"pipeline"`
-	Step     int        `json:"step"`
-}
-
 // stepFailed is the message a run program left in its fail file; it
 // replaces the exit status and the output tail as the step error.
 type stepFailed string
@@ -90,29 +72,30 @@ func readFail(dir string) string {
 }
 
 // openWork prepares the work directory dir of a run or relay step on set
-// (see prepareWork), writes its meta.json and creates its log.
-func openWork(j Job, p *config.Pipeline, step int, set []file, dir string) (in, out, meta string, logf *os.File, err error) {
-	if in, out, err = prepareWork(dir, set); err != nil {
-		return "", "", "", nil, err
+// (see prepareWork), writes its meta.json and creates its log. It returns
+// out/ and the log.
+func openWork(j Job, p *config.Pipeline, step int, set []file, dir string) (out string, logf *os.File, err error) {
+	if _, out, err = prepareWork(dir, set); err != nil {
+		return "", nil, err
 	}
-	meta = filepath.Join(dir, "meta.json")
+	meta := filepath.Join(dir, "meta.json")
 	sc := j.Sidecar
-	b, err := json.Marshal(workMeta{
-		Server: workServer{ID: sc.ID, Sender: sc.Sender, Endpoint: sc.Endpoint, Received: sc.Received,
+	b, err := json.Marshal(runstep.WorkMeta{
+		Server: runstep.WorkServer{ID: sc.ID, Sender: sc.Sender, Endpoint: sc.Endpoint, Received: sc.Received,
 			Size: sc.Size, SHA256: sc.SHA256, Expires: sc.Expires},
-		Client: sc.Client, Pipeline: p.Name, Step: step,
+		Client: sc.Client, Pipeline: p.Name, Step: step, Produced: len(set) > 0 && set[0].produced,
 	})
 	if err != nil {
-		return "", "", "", nil, err
+		return "", nil, err
 	}
 	if err := os.WriteFile(meta, b, 0o440); err != nil {
-		return "", "", "", nil, err
+		return "", nil, err
 	}
 	logf, err = os.OpenFile(filepath.Join(dir, "log"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
 	if err != nil {
-		return "", "", "", nil, err
+		return "", nil, err
 	}
-	return in, out, meta, logf, nil
+	return out, logf, nil
 }
 
 // stepTimeout is the timeout of one run or relay step of p.
@@ -126,11 +109,15 @@ func stepTimeout(p *config.Pipeline) time.Duration {
 // runStep runs s in dir on set and returns the set it produced (a tee step:
 // set itself) and the tail of its output, with the error on failure.
 func runStep(j Job, p *config.Pipeline, step int, s config.Step, set []file, dir, root string, stop <-chan struct{}) ([]file, string, error) {
-	in, out, meta, logf, err := openWork(j, p, step, set, dir)
+	out, logf, err := openWork(j, p, step, set, dir)
 	if err != nil {
 		return nil, "", err
 	}
-	sc := j.Sidecar
+	vars, err := runstep.WorkEnv(dir, root)
+	if err != nil {
+		logf.Close()
+		return nil, "", err
+	}
 	w := &capWriter{f: logf, left: logCap}
 	env := []string{"PATH=" + defaultPath, "LANG=C.UTF-8"}
 	keys := make([]string, 0, len(s.Env))
@@ -141,25 +128,7 @@ func runStep(j Job, p *config.Pipeline, step int, s config.Step, set []file, dir
 	for _, k := range keys {
 		env = append(env, k+"="+s.Env[k])
 	}
-	env = append(env, "LUK_WORK="+dir, "LUK_IN="+in, "LUK_OUT="+out, "LUK_META="+meta,
-		"LUK_ID="+j.Entry.ID, "LUK_SENDER="+sc.Sender, "LUK_ENDPOINT="+sc.Endpoint, "LUK_PIPELINE="+p.Name)
-	name := ""
-	if len(set) == 1 {
-		env = append(env, "LUK_FILE="+filepath.Join(in, set[0].name))
-		name = set[0].name
-		if !set[0].produced {
-			name = ""
-			if runstep.ValidName(j.Vars.File) {
-				name = j.Vars.File
-			}
-		}
-	}
-	origin := j.Vars.Hostname
-	if origin == "" {
-		origin = sc.Sender
-	}
-	env = append(env, "LUK_NAME="+name, "LUK_ROOT="+root, "LUK_STEP="+strconv.Itoa(step),
-		"LUK_TAGS="+strings.Join(j.Vars.Tags, ","), "LUK_HOSTNAME="+j.Vars.Hostname, "LUK_ORIGIN="+origin)
+	env = append(env, vars...)
 	err = execute(s.Run, dir, env, w, stepTimeout(p), stop)
 	if cerr := logf.Close(); err == nil && cerr != nil {
 		err = cerr
@@ -194,7 +163,7 @@ func runStep(j Job, p *config.Pipeline, step int, s config.Step, set []file, dir
 // reads the set, which passes on unchanged. It returns the tail of the
 // job's output, with the error on failure.
 func relayStep(j Job, p *config.Pipeline, step int, s config.Step, set []file, dir string, stop <-chan struct{}) (string, error) {
-	_, out, _, logf, err := openWork(j, p, step, set, dir)
+	out, logf, err := openWork(j, p, step, set, dir)
 	if err != nil {
 		return "", err
 	}

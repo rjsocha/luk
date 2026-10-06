@@ -19,6 +19,7 @@ import (
 	"luk/internal/queue"
 	"luk/internal/status"
 	"luk/internal/store"
+	"luk/internal/wire"
 )
 
 const cfgTmpl = `
@@ -150,7 +151,7 @@ func (e *env) enqueueWith(t *testing.T, id, endpoint string, mut func(*Job), pip
 		Entry:     ent,
 		Pipelines: pipelines,
 		Vars:      store.Vars{Sender: "robert.socha", Endpoint: endpoint, Time: time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC), Id: id, Random: "r-" + id, File: "f.txt"},
-		Sidecar:   store.Sidecar{ID: id, Sender: "robert.socha", Endpoint: endpoint, Size: size, SHA256: sha},
+		Sidecar:   store.Sidecar{ID: id, Sender: "robert.socha", Endpoint: endpoint, Size: size, SHA256: sha, Client: wire.Meta{File: "f.txt"}},
 	}
 	if mut != nil {
 		mut(&j)

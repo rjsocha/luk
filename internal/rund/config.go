@@ -312,7 +312,9 @@ func DynamicUser(job, pipeline string) string {
 // Argv is the systemd-run command line of job name on work (a step of
 // pipeline) as unit. workGroup (a name or a numeric gid) is the group of
 // work; without a user the job gets a dynamic user per job and pipeline.
-func (j *Job) Argv(unit, name, pipeline, work, workGroup string) []string {
+// vars is the LUK_* metadata of work (JobEnv), set after the job's env and
+// before LUK_JOB, LUK_TMP and LUK_STATE, one --setenv argument each.
+func (j *Job) Argv(unit, name, pipeline, work, workGroup string, vars []string) []string {
 	a := []string{"systemd-run", "--wait", "--collect", "--pipe", "--quiet", "--expand-environment=no", "--unit=" + unit}
 	if j.User != "" {
 		a = append(a, "--uid="+j.User)
@@ -335,8 +337,10 @@ func (j *Job) Argv(unit, name, pipeline, work, workGroup string) []string {
 	for _, k := range sortedKeys(j.Env) {
 		a = append(a, "--setenv="+k+"="+j.Env[k])
 	}
-	a = append(a, "--setenv=LUK_WORK="+work, "--setenv=LUK_JOB="+name,
-		"--setenv=LUK_PIPELINE="+pipeline, "--setenv=LUK_TMP="+TmpDir)
+	for _, kv := range vars {
+		a = append(a, "--setenv="+kv)
+	}
+	a = append(a, "--setenv=LUK_JOB="+name, "--setenv=LUK_TMP="+TmpDir)
 	if j.State != "" {
 		a = append(a, "--setenv=LUK_STATE="+StatePath(name, pipeline))
 	}

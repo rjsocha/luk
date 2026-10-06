@@ -2,6 +2,7 @@ package rund
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -19,6 +20,8 @@ import (
 
 	"luk/internal/config"
 	"luk/internal/runproto"
+	"luk/internal/runstep"
+	"luk/internal/wire"
 )
 
 var me = uint32(os.Getuid())
@@ -169,13 +172,14 @@ func TestArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	j.State = StateLocked
-	got := strings.Join(j.Argv("lukd-run-s3-1", "s3-upload", "offsite", "/var/lib/luk/work/a/offsite/1", "luk"), " ")
+	vars := []string{"LUK_WORK=/var/lib/luk/work/a/offsite/1", "LUK_PIPELINE=offsite", "LUK_TAGS=a b,$HOME"}
+	got := strings.Join(j.Argv("lukd-run-s3-1", "s3-upload", "offsite", "/var/lib/luk/work/a/offsite/1", "luk", vars), " ")
 	want := "systemd-run --wait --collect --pipe --quiet --expand-environment=no --unit=lukd-run-s3-1 --uid=luk-s3 " +
 		"--working-directory=/var/lib/luk/work/a/offsite/1 --gid=luk-s3 -p SupplementaryGroups=luk backup " +
 		"-p PrivateTmp=yes -p StateDirectory=lukd-run/s3-upload/offsite -p StateDirectoryMode=0700 " +
 		"-p LoadCredential=s3:/etc/site/lukd/s3.credentials -p RuntimeMaxSec=1800 --setenv=BUCKET=example-backup " +
-		"--setenv=LUK_WORK=/var/lib/luk/work/a/offsite/1 --setenv=LUK_JOB=s3-upload --setenv=LUK_PIPELINE=offsite " +
-		"--setenv=LUK_TMP=/var/tmp --setenv=LUK_STATE=/var/lib/lukd-run/s3-upload/offsite " +
+		"--setenv=LUK_WORK=/var/lib/luk/work/a/offsite/1 --setenv=LUK_PIPELINE=offsite --setenv=LUK_TAGS=a b,$HOME " +
+		"--setenv=LUK_JOB=s3-upload --setenv=LUK_TMP=/var/tmp --setenv=LUK_STATE=/var/lib/lukd-run/s3-upload/offsite " +
 		"/opt/luk/s3-upload /var/lib/luk/work/a/offsite/1"
 	if got != want {
 		t.Fatalf("\n got %s\nwant %s", got, want)
@@ -184,10 +188,10 @@ func TestArgv(t *testing.T) {
 		t.Fatalf("groups %s", g)
 	}
 	dyn := &Job{Command: "/opt/luk/notify", Groups: []string{"mail"}, Timeout: config.Duration(time.Minute)}
-	got = strings.Join(dyn.Argv("lukd-run-n-1", "notify", "p", "/w", "luk"), " ")
+	got = strings.Join(dyn.Argv("lukd-run-n-1", "notify", "p", "/w", "luk", []string{"LUK_WORK=/w", "LUK_PIPELINE=p"}), " ")
 	want = "systemd-run --wait --collect --pipe --quiet --expand-environment=no --unit=lukd-run-n-1 -p DynamicUser=yes -p User=" + DynamicUser("notify", "p") + " " +
 		"--working-directory=/w -p SupplementaryGroups=luk mail -p PrivateTmp=yes -p RuntimeMaxSec=60 " +
-		"--setenv=LUK_WORK=/w --setenv=LUK_JOB=notify --setenv=LUK_PIPELINE=p --setenv=LUK_TMP=/var/tmp /opt/luk/notify /w"
+		"--setenv=LUK_WORK=/w --setenv=LUK_PIPELINE=p --setenv=LUK_JOB=notify --setenv=LUK_TMP=/var/tmp /opt/luk/notify /w"
 	if got != want {
 		t.Fatalf("\n got %s\nwant %s", got, want)
 	}
@@ -325,7 +329,7 @@ func newEnv(t *testing.T) *env {
 	top := t.TempDir()
 	root := filepath.Join(top, "root")
 	w := filepath.Join(root, "work", id1, "p", "1")
-	os.MkdirAll(w, 0o750)
+	writeWork(t, w, workMeta(id1, "p", 1), "db.sql")
 	jobs := filepath.Join(top, "run.d")
 	os.Mkdir(jobs, 0o755)
 	write(t, filepath.Join(jobs, "s3-upload.yaml"), s3Job, 0o600)
@@ -398,6 +402,185 @@ func TestServeRuns(t *testing.T) {
 	if !slices.Contains(e.fr.argv, "--setenv=LUK_PIPELINE=p") || !slices.Contains(e.fr.argv, "--setenv=LUK_JOB=s3-upload") ||
 		slices.ContainsFunc(e.fr.argv, func(a string) bool { return strings.HasPrefix(a, "--setenv=LUK_STATE=") }) {
 		t.Fatalf("argv %q", e.fr.argv)
+	}
+}
+
+// workMeta is the meta.json of an upload db.sql from db1, tagged daily.
+func workMeta(id, pipeline string, step int) runstep.WorkMeta {
+	return runstep.WorkMeta{
+		Server: runstep.WorkServer{ID: id, Sender: "robert.socha", Endpoint: "up", Size: 1, SHA256: "ab"},
+		Client: wire.Meta{File: "db.sql", Source: wire.SourceFile, Tags: []string{"daily"}, Portal: wire.PortalDirect,
+			Backup: &wire.Backup{Hostname: "db1", Path: "/b/db.sql"}},
+		Pipeline: pipeline, Step: step,
+	}
+}
+
+// writeWork creates the work directory w with meta.json m (a
+// runstep.WorkMeta or raw bytes) and the files of in/.
+func writeWork(t *testing.T, w string, m any, in ...string) {
+	t.Helper()
+	for _, d := range []string{"in", "out"} {
+		if err := os.MkdirAll(filepath.Join(w, d), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, ok := m.([]byte)
+	if !ok {
+		var err error
+		if b, err = json.Marshal(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(t, filepath.Join(w, "meta.json"), string(b), 0o440)
+	for _, n := range in {
+		write(t, filepath.Join(w, "in", n), "x", 0o440)
+	}
+}
+
+// setenv is the LUK_* metadata of argv, the --setenv values without
+// LUK_JOB, LUK_TMP and LUK_STATE, and every --setenv value.
+func setenv(argv []string) (meta, all []string) {
+	for _, a := range argv {
+		kv, ok := strings.CutPrefix(a, "--setenv=")
+		if !ok {
+			continue
+		}
+		all = append(all, kv)
+		k, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(k, "LUK_") && k != "LUK_JOB" && k != "LUK_TMP" && k != "LUK_STATE" {
+			meta = append(meta, kv)
+		}
+	}
+	return meta, all
+}
+
+func TestServeJobEnv(t *testing.T) {
+	e := newEnv(t)
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { return 0, nil }
+	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(e.work))))
+	if _, err := e.exchange(t, string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode())); err != nil {
+		t.Fatal(err)
+	}
+	meta, all := setenv(e.fr.argv)
+	w := e.work
+	want := []string{
+		"LUK_WORK=" + w, "LUK_IN=" + w + "/in", "LUK_OUT=" + w + "/out", "LUK_META=" + w + "/meta.json",
+		"LUK_ID=" + id1, "LUK_SENDER=robert.socha", "LUK_ENDPOINT=up", "LUK_PIPELINE=p",
+		"LUK_FILE=" + w + "/in/db.sql", "LUK_NAME=db.sql", "LUK_ROOT=" + root, "LUK_STEP=1",
+		"LUK_TAGS=daily", "LUK_HOSTNAME=db1", "LUK_ORIGIN=db1",
+	}
+	if !slices.Equal(meta, want) {
+		t.Fatalf("\n got %q\nwant %q", meta, want)
+	}
+	// The job's own env comes first, the LUK_* variables last.
+	if all[0] != "BUCKET=example-backup" || all[len(all)-2] != "LUK_JOB=s3-upload" || all[len(all)-1] != "LUK_TMP=/var/tmp" {
+		t.Fatalf("%q", all)
+	}
+}
+
+func TestJobEnvSets(t *testing.T) {
+	top := t.TempDir()
+	root := filepath.Join(top, "root")
+	w := filepath.Join(root, "work", id1, "p", "2")
+	stream := workMeta(id1, "p", 2)
+	stream.Client.File, stream.Client.Backup = "", nil
+	several := workMeta(id1, "p", 2)
+	several.Produced = true
+	odd := workMeta(id1, "p", 2)
+	odd.Client.Tags = []string{"a,b", "x y", "$HOME", "'q\"", "--uid=0"}
+	for name, c := range map[string]struct {
+		meta runstep.WorkMeta
+		in   []string
+		want map[string]string // "-" means unset
+	}{
+		"one file":       {workMeta(id1, "p", 2), []string{"db.sql"}, map[string]string{"LUK_FILE": w + "/in/db.sql", "LUK_NAME": "db.sql", "LUK_HOSTNAME": "db1", "LUK_ORIGIN": "db1"}},
+		"several files":  {several, []string{"a.gz", "b.gz", "b.gz.meta.json"}, map[string]string{"LUK_FILE": "-", "LUK_NAME": "", "LUK_STEP": "2"}},
+		"unnamed stream": {stream, []string{id1}, map[string]string{"LUK_FILE": w + "/in/" + id1, "LUK_NAME": "", "LUK_HOSTNAME": "", "LUK_ORIGIN": "robert.socha"}},
+		"odd tags":       {odd, []string{"db.sql"}, map[string]string{"LUK_TAGS": "a,b,x y,$HOME,'q\",--uid=0"}},
+	} {
+		os.RemoveAll(w)
+		writeWork(t, w, c.meta, c.in...)
+		env, err := JobEnv(root, w, me)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		got := map[string]string{}
+		for _, kv := range env {
+			k, v, _ := strings.Cut(kv, "=")
+			got[k] = v
+		}
+		for k, v := range c.want {
+			if g, ok := got[k]; v == "-" && ok || v != "-" && g != v {
+				t.Errorf("%s: %s=%q (%v), want %q", name, k, g, ok, v)
+			}
+		}
+		argv := (&Job{Command: "/opt/luk/x", Timeout: config.Duration(time.Minute)}).Argv("u", "x", "p", w, "luk", env)
+		if argv[len(argv)-2] != "/opt/luk/x" || argv[len(argv)-1] != w || slices.Contains(argv, "--uid=0") {
+			t.Errorf("%s: argv %q", name, argv)
+		}
+	}
+}
+
+// A crafted meta.json cannot add an argument: a value with a newline or
+// NUL is dropped, so each variable stays one --setenv argument.
+func TestJobEnvNewlineInTag(t *testing.T) {
+	top := t.TempDir()
+	root := filepath.Join(top, "root")
+	w := filepath.Join(root, "work", id1, "p", "1")
+	m := workMeta(id1, "p", 1)
+	m.Client.Tags = []string{"daily\n--uid=0", "x\x00y"}
+	m.Client.Backup.Hostname = "db1\nLUK_ROOT=/evil"
+	writeWork(t, w, m, "db.sql")
+	env, err := JobEnv(root, w, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := (&Job{Command: "/opt/luk/x", Timeout: config.Duration(time.Minute)}).Argv("u", "x", "p", w, "luk", env)
+	clean := (&Job{Command: "/opt/luk/x", Timeout: config.Duration(time.Minute)}).Argv("u", "x", "p", w, "luk", nil)
+	if len(argv) != len(clean)+len(env) {
+		t.Fatalf("argv %q", argv)
+	}
+	for _, a := range argv {
+		if strings.ContainsAny(a, "\n\x00") || a == "--uid=0" {
+			t.Fatalf("argv %q", argv)
+		}
+		if strings.HasPrefix(a, "--setenv=LUK_TAGS=") || strings.HasPrefix(a, "--setenv=LUK_HOSTNAME=") || strings.HasPrefix(a, "--setenv=LUK_ORIGIN=") {
+			t.Fatalf("unsafe value kept: %q", a)
+		}
+	}
+	if !slices.Contains(argv, "--setenv=LUK_ROOT="+root) {
+		t.Fatalf("argv %q", argv)
+	}
+}
+
+func TestServeRefusesBadMeta(t *testing.T) {
+	e := newEnv(t)
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
+		t.Error("job ran")
+		return 0, nil
+	}
+	good, _ := json.Marshal(workMeta(id1, "p", 1))
+	for name, m := range map[string]any{
+		"other id":       workMeta("20261004T101500Z-ffffffff", "p", 1),
+		"other pipeline": workMeta(id1, "q", 1),
+		"other step":     workMeta(id1, "p", 2),
+		"unknown key":    []byte(`{"server":{},"client":{},"pipeline":"p","step":1,"x":1}`),
+		"two objects":    append(good, good...),
+		"oversized":      []byte(`{"pipeline":"` + strings.Repeat("p", runstep.MaxWorkMeta) + `"}`),
+	} {
+		os.RemoveAll(e.work)
+		writeWork(t, e.work, m, "db.sql")
+		fs, err := e.exchange(t, string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode()))
+		if err == nil || len(fs) != 2 || !strings.Contains(fs[0].p, "meta.json") || fs[1] != (frame{'x', "1"}) {
+			t.Errorf("%s: %v %q", name, err, fs)
+		}
+	}
+	os.RemoveAll(e.work)
+	writeWork(t, e.work, workMeta(id1, "p", 1), "db.sql")
+	os.Rename(filepath.Join(e.work, "meta.json"), filepath.Join(e.work, "real.json"))
+	os.Symlink("real.json", filepath.Join(e.work, "meta.json"))
+	if fs, err := e.exchange(t, string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode())); err == nil || len(fs) != 2 {
+		t.Errorf("symlinked meta.json: %v %q", err, fs)
 	}
 }
 

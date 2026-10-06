@@ -2846,7 +2846,7 @@ before every run:
   out/                  # empty; the program puts its results here
   out/<name>.meta.json  # optional: meta of out/<name> for the catalog,
                         # e.g. kind, compression, encryption, "alias"
-  meta.json             # {"server", "client", "pipeline", "step"}
+  meta.json             # {"server", "client", "pipeline", "step", "produced"}
   log                   # stdout and stderr of the program
   fail                  # optional: the step error, written by the program
 ```
@@ -2855,29 +2855,13 @@ before every run:
   directory, as the lukd user, in its own process group, under the
   pipeline `timeout`.
 - Environment: `PATH` (system default, includes `/usr/local/bin`),
-  `LANG=C.UTF-8`, the step's `env`, then the `LUK_*` variables (last, so
-  `env` cannot override them):
-  - `LUK_WORK`: the work directory (also the argument and the cwd).
-  - `LUK_IN`: `in/`.
-  - `LUK_OUT`: `out/`.
-  - `LUK_META`: path of `meta.json`.
-  - `LUK_ID`: the upload id.
-  - `LUK_SENDER`: the authenticated key name.
-  - `LUK_ENDPOINT`: the endpoint name.
-  - `LUK_PIPELINE`: the pipeline name.
-  - `LUK_STEP`: the step number, 1-based, as in the work directory.
-  - `LUK_ROOT`: the configured `root`.
-  - `LUK_FILE`: absolute path of the input file when the set has exactly
-    one file; unset otherwise.
-  - `LUK_NAME`: that file's name (step 1: the client `file`; later steps:
-    the produced name); empty when the set has several files or the
-    upload is an unnamed stream.
-  - `LUK_TAGS`: the client tags joined with `,`.
-  - `LUK_HOSTNAME`: `backup.hostname` when present, else empty.
-  - `LUK_ORIGIN`: `LUK_HOSTNAME` when present, else the sender.
+  `LANG=C.UTF-8`, the step's `env`, then the metadata variables of the
+  Step environment (last, so `env` cannot override them).
 - `meta.json`: `server` (`id`, `sender`, `endpoint`, `received`, `size`,
   `sha256`, `expires` when set), `client` (the client meta as sent:
-  `file`, `source`, `tags`, `backup`, ...), `pipeline` and `step`.
+  `file`, `source`, `tags`, `backup`, ...), `pipeline`, `step` and
+  `produced` (`true` when the set was written by an earlier `run` step;
+  absent while the set is still the upload itself).
 - Inputs are immutable. `in/` holds hardlinks (0440) of the payload or of
   the previous step's results; the program reads them and never modifies
   them in place (it runs as their owner, so a chmod would corrupt the
@@ -2917,6 +2901,46 @@ before every run:
   input to another process, a container (bind-mount the work directory)
   or a remote host, as long as the results end up in `out/` before it
   exits. Whatever is left of its process group when it exits is killed.
+
+### Step environment
+
+The metadata variables of a step work directory. A `run` program, the
+job of a `relay` step and every job of `lukd run` (`luk-job run --job`)
+get the same list with the same values: lukd and lukd run derive it
+with one function from the work directory itself, its `meta.json` and
+the files of `in/` (regular files; a `<name>.meta.json` next to its
+file is that file's meta, not a member of the set).
+
+- `LUK_WORK`: the work directory (also the argument and the cwd).
+- `LUK_IN`: `in/`.
+- `LUK_OUT`: `out/`.
+- `LUK_META`: path of `meta.json`.
+- `LUK_ID`: the upload id (`server.id`).
+- `LUK_SENDER`: the authenticated key name (`server.sender`).
+- `LUK_ENDPOINT`: the endpoint name (`server.endpoint`).
+- `LUK_PIPELINE`: the pipeline name.
+- `LUK_FILE`: absolute path of the input file when the set has exactly
+  one file; unset otherwise.
+- `LUK_NAME`: that file's name (the upload: the client `file`; a set
+  `produced` by a `run` step: the produced name); empty when the set has
+  several files or the upload is an unnamed stream (or its `file` is not
+  a valid name: the file in `in/` is then named by the id).
+- `LUK_ROOT`: the luk `root` (for a job: `root` of `run.yaml`, the same
+  directory).
+- `LUK_STEP`: the step number, 1-based, as in the work directory.
+- `LUK_TAGS`: the client tags joined with `,`.
+- `LUK_HOSTNAME`: `backup.hostname` when present, else empty.
+- `LUK_ORIGIN`: `LUK_HOSTNAME` when present, else the sender.
+
+A variable whose value would hold a control character (C0 such as NUL
+and newline, DEL, C1) or invalid UTF-8 is left unset, for a `run`
+program and a job alike: an exec environment cannot carry a NUL and a
+`systemd-run --setenv` refuses control characters. lukd refuses such
+client values at upload already, so this only applies to a `meta.json`
+written by hand. Every variable is its own `--setenv=NAME=value`
+argument of `systemd-run` (no shell, `--expand-environment=no`), so no
+value (a tag, a file name, a host name) can add an argument or expand
+anything.
 
 ### luk-job
 
@@ -4438,7 +4462,11 @@ work directory. No polkit and no sudo are involved.
   valid pipeline name, `[A-Za-z0-9_.-]` not starting with a dot or a
   dash, the step a decimal number from 1 without leading zeros), holds
   a control character, white space, `$` or `%` anywhere in the resolved
-  path, is not a directory or is not owned by the peer. The pipeline
+  path, is not a directory or is not owned by the peer, or whose
+  `in/` is not a directory or whose `meta.json` is not a regular file
+  (a symlink is refused for both), is larger
+  than 64 KiB, is not exactly one JSON object with only known keys, or
+  names another id, pipeline or step than the path. The pipeline
   name comes from that path; the request has no field for it. It runs
   the job as `systemd-run --wait --collect --pipe --quiet
   --expand-environment=no --unit=lukd-run-<job>-<random>
@@ -4447,8 +4475,8 @@ work directory. No polkit and no sudo are involved.
   -p SupplementaryGroups=<work group> [<groups>] -p PrivateTmp=yes
   [-p StateDirectory=lukd-run/<job>/<pipeline> -p StateDirectoryMode=0700]
   -p LoadCredential=... -p RuntimeMaxSec=<timeout> [--setenv=K=V ...]
-  --setenv=LUK_WORK=<work> --setenv=LUK_JOB=<job>
-  --setenv=LUK_PIPELINE=<pipeline> --setenv=LUK_TMP=/var/tmp
+  --setenv=LUK_WORK=<work> ... --setenv=LUK_ORIGIN=<origin>
+  --setenv=LUK_JOB=<job> --setenv=LUK_TMP=/var/tmp
   [--setenv=LUK_STATE=/var/lib/lukd-run/<job>/<pipeline>]
   <command> <work>` (`--expand-environment=no` needs systemd 254 or
   later; the lukd package requires systemd 257 for `PrivatePIDs=`), a transient unit outside
@@ -4498,10 +4526,12 @@ work directory. No polkit and no sudo are involved.
 Environment and state of every job, reserved like `LUK_WORK` (an `env`
 key `LUK_*` is a config error):
 
-- `LUK_WORK`: the resolved work directory (also the argument and the
-  current directory).
+- The metadata variables of the Step environment (`LUK_WORK` to
+  `LUK_ORIGIN`), read from the work directory as for a `run` program,
+  with `LUK_WORK` the resolved work directory (also the argument and the
+  current directory) and `LUK_ROOT` the `root` of `run.yaml`; they come
+  after the job's `env`.
 - `LUK_JOB`: the job name.
-- `LUK_PIPELINE`: the pipeline name, from the work directory path.
 - `LUK_TMP`: `/var/tmp`, scratch space on disk for this run. Every job
   gets `-p PrivateTmp=yes` (implied for a dynamic user, explicit with
   `user`): `/tmp` and `/var/tmp` are private to the unit and removed
@@ -4595,8 +4625,8 @@ pipeline:
   (`in/`, an empty `out/`, `meta.json`, owned by `luk`), connects to
   `/run/luk/run.sock` and sends `{"job": <job>, "work": <work>}`, as
   `luk-job run` does. A relay step takes no `env` (the environment of the
-  job comes from its run.d file) and no `tee` (it always passes its set
-  on).
+  job comes from its run.d file and the Step environment) and no `tee`
+  (it always passes its set on).
 - The next step gets the input set of the relay step unchanged (the
   files and their per-file meta, the upload itself when it is the first
   step), as after a `tee` run step; it may be the last step. The job only

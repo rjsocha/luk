@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -14,8 +17,10 @@ import (
 
 	"luk/internal/config"
 	"luk/internal/queue"
+	"luk/internal/rund"
 	"luk/internal/status"
 	"luk/internal/store"
+	"luk/internal/wire"
 )
 
 const runTmpl = `
@@ -528,6 +533,8 @@ printf x > "$LUK_OUT/x"
 	j := e.enqueueWith(t, "id7", "up", func(j *Job) {
 		j.Vars.Tags = []string{"t1", "t2"}
 		j.Vars.Hostname = "host1"
+		j.Sidecar.Client.Tags = j.Vars.Tags
+		j.Sidecar.Client.Backup = &wire.Backup{Hostname: "host1"}
 	}, "p")
 	if err := d.Submit(j); err != nil {
 		t.Fatal(err)
@@ -560,7 +567,7 @@ func TestRunEnvOriginWithoutHostname(t *testing.T) {
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - store: a\n", s))
 	d := e.dispatcher()
-	j := e.enqueueWith(t, "id8", "up", func(j *Job) { j.Vars.File = "" }, "p")
+	j := e.enqueueWith(t, "id8", "up", func(j *Job) { j.Vars.File, j.Sidecar.Client.File = "", "" }, "p")
 	if err := d.Submit(j); err != nil {
 		t.Fatal(err)
 	}
@@ -568,6 +575,55 @@ func TestRunEnvOriginWithoutHostname(t *testing.T) {
 	m := envLines(e.read(t, "a/file/robert.socha/env"))
 	if m["LUK_HOSTNAME"] != "" || m["LUK_ORIGIN"] != "robert.socha" || m["LUK_NAME"] != "" || m["LUK_FILE"] == "" || m["LUK_TAGS"] != "" {
 		t.Errorf("env %v", m)
+	}
+}
+
+// A run step and a job of lukd run on the same work directory see the
+// same LUK_* metadata: each step keeps a copy of its meta.json and in/ at
+// the same place under another root, and rund.JobEnv of the copy matches
+// the environment of the step, the roots swapped.
+func TestRunStepAndJobSeeSameEnv(t *testing.T) {
+	keep := t.TempDir()
+	s := script(t, `set -e
+k="$KEEP/work/$LUK_ID/$LUK_PIPELINE/$LUK_STEP"
+mkdir -p "$k"
+cp -a "$LUK_META" "$LUK_IN" "$LUK_OUT" "$k/"
+env | grep '^LUK_' | sort > "$KEEP/env$LUK_STEP"
+if [ "$LUK_STEP" = 1 ]; then printf x > "$LUK_OUT/a.bin"; printf y > "$LUK_OUT/b.bin"; fi
+if [ "$LUK_STEP" = 2 ]; then cat "$LUK_IN"/* > "$LUK_OUT/all.bin"; fi
+`)
+	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %[1]s\n        env: {KEEP: %[2]s}\n      - run: %[1]s\n        env: {KEEP: %[2]s}\n"+
+		"      - run: %[1]s\n        env: {KEEP: %[2]s}\n        tee: true\n      - store: a\n", s, keep))
+	d := e.dispatcher()
+	j := e.enqueueWith(t, "id11", "up", func(j *Job) {
+		j.Vars.Tags, j.Vars.Hostname = []string{"daily", "prod"}, "db1"
+		j.Sidecar.Client.Tags, j.Sidecar.Client.Backup = j.Vars.Tags, &wire.Backup{Hostname: "db1"}
+	}, "p")
+	if err := d.Submit(j); err != nil {
+		t.Fatal(err)
+	}
+	d.Wait()
+	for step := 1; step <= 3; step++ {
+		b, err := os.ReadFile(filepath.Join(keep, fmt.Sprintf("env%d", step)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := strings.Split(strings.TrimSpace(string(b)), "\n")
+		got, err := rund.JobEnv(keep, filepath.Join(keep, "work", "id11", "p", strconv.Itoa(step)), uint32(os.Getuid()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, kv := range got {
+			k, v, _ := strings.Cut(kv, "=")
+			if v == keep || strings.HasPrefix(v, keep+"/") {
+				v = e.root + strings.TrimPrefix(v, keep)
+			}
+			got[i] = k + "=" + v
+		}
+		sort.Strings(got)
+		if !slices.Equal(got, want) {
+			t.Errorf("step %d:\n job %q\n run %q", step, got, want)
+		}
 	}
 }
 
