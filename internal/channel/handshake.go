@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/flynn/noise"
 )
@@ -35,9 +36,15 @@ type ClientHandshake struct {
 
 // NewClientHandshake starts a handshake and returns the request body.
 func NewClientHandshake(host, path string) (*ClientHandshake, []byte, error) {
+	return newClientHandshake(rand.Reader, host, path)
+}
+
+// newClientHandshake is NewClientHandshake with the ephemeral key read
+// from random; the test vectors fix it.
+func newClientHandshake(random io.Reader, host, path string) (*ClientHandshake, []byte, error) {
 	hs, err := noise.NewHandshakeState(noise.Config{
 		CipherSuite: suite,
-		Random:      rand.Reader,
+		Random:      random,
 		Pattern:     noise.HandshakeNX,
 		Initiator:   true,
 		Prologue:    Prologue(host, path),
@@ -75,12 +82,18 @@ func (c *ClientHandshake) Finish(respBody []byte) (*Session, []byte, error) {
 
 // ServerHandshake answers a handshake request with the identity key k.
 func ServerHandshake(k Key, host, path string, reqBody []byte) (*Session, []byte, error) {
+	return serverHandshake(rand.Reader, k, host, path, reqBody)
+}
+
+// serverHandshake is ServerHandshake with the ephemeral key read from
+// random; the test vectors fix it.
+func serverHandshake(random io.Reader, k Key, host, path string, reqBody []byte) (*Session, []byte, error) {
 	if len(reqBody) != handshakeRequestSize || reqBody[0] != typeHandshake {
 		return nil, nil, errors.New("channel: not a handshake request")
 	}
 	hs, err := noise.NewHandshakeState(noise.Config{
 		CipherSuite:   suite,
-		Random:        rand.Reader,
+		Random:        random,
 		Pattern:       noise.HandshakeNX,
 		Prologue:      Prologue(host, path),
 		StaticKeypair: noise.DHKey{Private: k.Private, Public: k.Public},

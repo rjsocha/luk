@@ -42,6 +42,8 @@ luk --channel--> lukd ingest --> queue --> pipeline(s) --> storage --> expose --
 
 ## Channel
 
+Client authors: the wire contract, with test vectors, is `doc/PROTOCOL.md`.
+
 luk reaches the endpoints of lukd (uploads, link requests, the endpoint
 listing) through a channel between the two programs: a Noise handshake
 authenticates lukd by its identity key, then every request and every
