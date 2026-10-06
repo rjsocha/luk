@@ -292,10 +292,11 @@ func sortedKeys(m map[string]string) []string {
 	return ks
 }
 
-// SupplementaryGroups is workGroup, the group of the work directory,
-// followed by the groups of the job, without duplicates.
-func (j *Job) SupplementaryGroups(workGroup string) []string {
-	gs := []string{workGroup}
+// SupplementaryGroups is peerGroup, the primary group of the peer that
+// owns the work directory, followed by the groups of the job, without
+// duplicates.
+func (j *Job) SupplementaryGroups(peerGroup string) []string {
+	gs := []string{peerGroup}
 	for _, g := range j.Groups {
 		if !slices.Contains(gs, g) {
 			gs = append(gs, g)
@@ -325,11 +326,12 @@ func DynamicUser(job, pipeline string) string {
 }
 
 // Argv is the systemd-run command line of job name on work (a step of
-// pipeline) as unit. workGroup (a name or a numeric gid) is the group of
-// work; without a user the job gets a dynamic user per job and pipeline.
-// vars is the LUK_* metadata of work (runstep.Vars), set after the job's env and
-// before LUK_JOB, LUK_TMP and LUK_STATE, one --setenv argument each.
-func (j *Job) Argv(unit, name, pipeline, work, workGroup string, vars []string) []string {
+// pipeline) as unit. peerGroup (a name or a numeric gid) is the primary
+// group of the peer; without a user the job gets a dynamic user per job
+// and pipeline. vars is the LUK_* metadata of work (runstep.Vars), set
+// after the job's env and before LUK_JOB, LUK_TMP and LUK_STATE, one
+// --setenv argument each.
+func (j *Job) Argv(unit, name, pipeline, work, peerGroup string, vars []string) []string {
 	a := []string{"systemd-run", "--wait", "--collect", "--pipe", "--quiet", "--expand-environment=no", "--unit=" + unit}
 	if j.User != "" {
 		a = append(a, "--uid="+j.User)
@@ -340,7 +342,7 @@ func (j *Job) Argv(unit, name, pipeline, work, workGroup string, vars []string) 
 	if j.Group != "" {
 		a = append(a, "--gid="+j.Group)
 	}
-	a = append(a, "-p", "SupplementaryGroups="+strings.Join(j.SupplementaryGroups(workGroup), " "))
+	a = append(a, "-p", "SupplementaryGroups="+strings.Join(j.SupplementaryGroups(peerGroup), " "))
 	a = append(a, "-p", "PrivateTmp=yes")
 	if j.State != "" {
 		a = append(a, "-p", "StateDirectory="+StateDir+"/"+name+"/"+pipeline, "-p", "StateDirectoryMode=0700")

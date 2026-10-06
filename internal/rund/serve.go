@@ -140,17 +140,23 @@ func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, 
 		return refusal{fmt.Errorf("job %s: pipeline %s not allowed", req.Job, pipeline)}
 	}
 	work := req.Work
-	_, gid, err := CheckWork(g.Root, work, peer)
-	if err != nil {
+	if _, err := CheckWork(g.Root, work, peer); err != nil {
 		s.Log.Warn("work directory refused", "job", req.Job, "err", err)
 		return refusal{errWork}
+	}
+	// The group that reads the work directory is the peer's own, not
+	// the group of the directory, which the peer may change.
+	group, err := PeerGroup(peer)
+	if err != nil {
+		s.Log.Error("peer group", "uid", peer, "err", err)
+		return refusal{fmt.Errorf("job %s: unavailable", req.Job)}
 	}
 	// The path-bound variables come from the checked path and run.yaml,
 	// the free-form metadata from the request: lukd run never reads the
 	// work directory.
 	vars := runstep.Vars(work, g.Root, req.Env)
 	unit := UnitName(req.Job)
-	argv := job.Argv(unit, req.Job, pipeline, work, GroupName(gid), vars)
+	argv := job.Argv(unit, req.Job, pipeline, work, group, vars)
 	who := job.User
 	if who == "" {
 		who = DynamicUser(req.Job, pipeline)
@@ -320,34 +326,34 @@ func ParseWork(root, work string) (string, error) {
 // uid, reached from root (which may be a symlink: it is root's
 // configuration) through work, <id>, <pipeline> and <step>, each opened
 // with workFlags: no symlink, nothing but a directory, no blocking open.
-// It returns the pipeline and the gid of the directory.
-func CheckWork(root, work string, uid uint32) (string, uint32, error) {
+// It returns the pipeline.
+func CheckWork(root, work string, uid uint32) (string, error) {
 	pipeline, err := ParseWork(root, work)
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
 	fd, err := syscall.Open(root, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return "", 0, fmt.Errorf("root %s: %w", root, err)
+		return "", fmt.Errorf("root %s: %w", root, err)
 	}
 	rel, _ := filepath.Rel(root, work)
 	for _, name := range strings.Split(rel, string(filepath.Separator)) {
 		next, err := syscall.Openat(fd, name, workFlags, 0)
 		syscall.Close(fd)
 		if err != nil {
-			return "", 0, fmt.Errorf("work %q: %s: %w", work, name, err)
+			return "", fmt.Errorf("work %q: %s: %w", work, name, err)
 		}
 		fd = next
 	}
 	defer syscall.Close(fd)
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
-		return "", 0, fmt.Errorf("work %q: %w", work, err)
+		return "", fmt.Errorf("work %q: %w", work, err)
 	}
 	if st.Uid != uid {
-		return "", 0, fmt.Errorf("work %q: owned by uid %d, not the peer", work, st.Uid)
+		return "", fmt.Errorf("work %q: owned by uid %d, not the peer", work, st.Uid)
 	}
-	return pipeline, st.Gid, nil
+	return pipeline, nil
 }
 
 // unsafePathRune reports a rune refused in a work path: systemd-run and
@@ -370,13 +376,31 @@ func isStep(s string) bool {
 	return true
 }
 
-// GroupName is the name of gid, or gid in decimal when it has none.
+// lookupGroupID is user.LookupGroupId, replaced by tests.
+var lookupGroupID = user.LookupGroupId
+
+// GroupName is the name of gid, or gid in decimal when it has none or one
+// that is not a plain account name (white space would split
+// SupplementaryGroups=).
 func GroupName(gid uint32) string {
 	id := strconv.FormatUint(uint64(gid), 10)
-	if g, err := user.LookupGroupId(id); err == nil {
+	if g, err := lookupGroupID(id); err == nil && account.MatchString(g.Name) {
 		return g.Name
 	}
 	return id
+}
+
+// PeerGroup is the primary group of uid, by name (see GroupName).
+func PeerGroup(uid uint32) (string, error) {
+	u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+	if err != nil {
+		return "", err
+	}
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil {
+		return "", err
+	}
+	return GroupName(uint32(gid)), nil
 }
 
 // UnitName is a unique transient unit name for job.

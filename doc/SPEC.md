@@ -4494,10 +4494,12 @@ work directory. No polkit and no sudo are involved.
   - `group` (optional, needs `user`): replaces the primary group of the
     user (`--gid`).
   - `groups` (optional): extra supplementary groups. The job always gets
-    the group of the work directory (normally `luk`) as a supplementary
-    group, so it can read the inputs and `meta.json` without any
-    setting; `groups` adds to it (`-p SupplementaryGroups=`, the work
-    directory group first, duplicates dropped). The user keeps its own
+    the primary group of the peer (normally `luk`, the group of the work
+    directories) as a supplementary group, so it can read the inputs and
+    `meta.json` without any setting; `groups` adds to it
+    (`-p SupplementaryGroups=`, the peer's group first, duplicates
+    dropped). The group of the work directory itself is not used: `luk`
+    could change it to any group it is a member of. The user keeps its own
     primary and supplementary groups.
   - `command` (required): a clean absolute path; it gets the work
     directory as its only argument, in `LUK_WORK` and as its current
@@ -4558,7 +4560,7 @@ work directory. No polkit and no sudo are involved.
   --expand-environment=no --unit=lukd-run-<job>-<random>
   (--uid=<user> | -p DynamicUser=yes -p User=<dynamic user>)
   --working-directory=<work> [--gid=<group>]
-  -p SupplementaryGroups=<work group> [<groups>] -p PrivateTmp=yes
+  -p SupplementaryGroups=<peer group> [<groups>] -p PrivateTmp=yes
   [-p StateDirectory=lukd-run/<job>/<pipeline> -p StateDirectoryMode=0700]
   -p LoadCredential=... -p RuntimeMaxSec=<timeout> [--setenv=K=V ...]
   --setenv=LUK_WORK=<work> ... --setenv=LUK_ORIGIN=<origin>
@@ -4569,8 +4571,9 @@ work directory. No polkit and no sudo are involved.
   both the lukd and the lukd run sandbox, and streams the job's stdout and
   stderr back. `<work>` is the work path of the request as checked
   (never resolved): the job's argument, its `LUK_WORK` and its current directory, as for a `run`
-  program. `<work group>` is the group of `<work>`, by name, or the
-  numeric gid when it has no name.
+  program. `<peer group>` is the primary group of the peer (passwd), by
+  name, or the numeric gid when it has no name or one that is not a
+  plain account name.
 - Deadlines: the request must arrive, and a refusal be read, within 5
   seconds of the connection; a peer that sends nothing, half a line or
   does not read the refusal is cut off then. A job waiting for its state
@@ -4600,8 +4603,8 @@ work directory. No polkit and no sudo are involved.
   writes the values (they normally repeat the upload's meta, but nothing
   but the filter holds `luk` to that; `LUK_FILE` always names a file of
   `<work>/in/`, not necessarily an existing one).
-- Read access to the work directory comes from its group (work
-  directories are 0750, inputs and `meta.json` 0440). Results go to
+- Read access to the work directory comes from its group, the peer's
+  primary group the job gets (work directories are 0750, inputs and `meta.json` 0440). Results go to
   `out/` only when the job user may write there; usually a job just
   delivers the inputs elsewhere and the `run` program writes `out/`.
 - A dynamic user (no `user`) is allocated by systemd for the run of the

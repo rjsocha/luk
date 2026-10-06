@@ -262,13 +262,12 @@ func TestCheckWork(t *testing.T) {
 	alias := filepath.Join(top, "alias")
 	os.Symlink(root, alias)
 
-	gid := uint32(os.Getgid())
 	// root (run.yaml) may be a symlink; nothing below it may.
 	aw := filepath.Join(alias, "work", id1, "p", "1")
-	if p, g, err := CheckWork(alias, aw, me); err != nil || p != "p" || g != gid {
-		t.Fatalf("%q %d %v", p, g, err)
+	if p, err := CheckWork(alias, aw, me); err != nil || p != "p" {
+		t.Fatalf("%q %v", p, err)
 	}
-	if p, _, err := CheckWork(root, w, me); err != nil || p != "p" {
+	if p, err := CheckWork(root, w, me); err != nil || p != "p" {
 		t.Fatalf("%q %v", p, err)
 	}
 	for _, d := range []string{"p/1/x", "p/01", "p/0", "p/a", ".p/1", "-p/1", "p\x01/1"} {
@@ -302,14 +301,14 @@ func TestCheckWork(t *testing.T) {
 		"dash":           {filepath.Join(root, "work", id1, "-p", "1"), me, "not a step work directory"},
 		"control":        {filepath.Join(root, "work", id1, "p\x01", "1"), me, "control character"},
 	} {
-		if _, _, err := CheckWork(root, c.work, c.uid); err == nil || !strings.Contains(err.Error(), c.want) {
+		if _, err := CheckWork(root, c.work, c.uid); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v, want %q", name, err, c.want)
 		}
 	}
 	// A symlinked <root>/work (luk owns it) is refused as well.
 	os.Rename(filepath.Join(root, "work"), filepath.Join(top, "realwork"))
 	os.Symlink(filepath.Join(top, "realwork"), filepath.Join(root, "work"))
-	if _, _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a directory") {
+	if _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Errorf("symlinked work: %v", err)
 	}
 }
@@ -729,7 +728,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 	root := filepath.Join(top, "root")
 	ok := filepath.Join(root, "work", id1, "p", "1")
 	os.MkdirAll(ok, 0o750)
-	if _, _, err := CheckWork(root, ok, me); err != nil {
+	if _, err := CheckWork(root, ok, me); err != nil {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{"\n", "\t", " ", "$", "${HOME}", "%", "%h", "\x1b", "\u00a0"} {
@@ -743,7 +742,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 			if err := os.MkdirAll(w, 0o750); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := CheckWork(root, w, me); err == nil {
+			if _, err := CheckWork(root, w, me); err == nil {
 				t.Errorf("%q accepted", d)
 			}
 		}
@@ -751,7 +750,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 	for _, id := range []string{"x", "id1", "20261004T101500Z-0123ABCD", "20261004T101500Z-0123abc", "20261004T101500Z0123abcd", "..x"} {
 		w := filepath.Join(root, "work", id, "p", "1")
 		os.MkdirAll(w, 0o750)
-		if _, _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a step work directory") {
+		if _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a step work directory") {
 			t.Errorf("id %q: %v", id, err)
 		}
 	}
@@ -759,7 +758,7 @@ func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
 	odd := filepath.Join(top, "a$b")
 	w := filepath.Join(odd, "work", id1, "p", "1")
 	os.MkdirAll(w, 0o750)
-	if _, _, err := CheckWork(odd, w, me); err == nil {
+	if _, err := CheckWork(odd, w, me); err == nil {
 		t.Error("root with $ accepted")
 	}
 }
@@ -1089,5 +1088,46 @@ func TestServePipelineAllowlist(t *testing.T) {
 	}
 	if _, err := os.Stat(e.srv.Locks); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("locks: %v", err)
+	}
+}
+
+// The job's group is the primary group of the peer, not the group of the
+// work directory, which luk may change to any group it is in.
+func TestServeGroupOfPeer(t *testing.T) {
+	var other uint32
+	gs, _ := os.Getgroups()
+	for _, g := range gs {
+		if uint32(g) != uint32(os.Getgid()) {
+			other = uint32(g)
+		}
+	}
+	if other == 0 {
+		t.Skip("no supplementary group to chgrp the work directory to")
+	}
+	e := newEnv(t)
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { return 0, nil }
+	if err := os.Chown(e.work, -1, int(other)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.exchange(t, string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode())); err != nil {
+		t.Fatal(err)
+	}
+	u, err := user.LookupId(strconv.Itoa(int(me)))
+	if err != nil {
+		t.Skip(err)
+	}
+	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
+	want := "SupplementaryGroups=" + GroupName(uint32(gid)) + " luk backup"
+	if !slices.Contains(e.fr.argv, want) || slices.Contains(e.fr.argv, "SupplementaryGroups="+GroupName(other)+" luk backup") {
+		t.Fatalf("argv %q, want %s", e.fr.argv, want)
+	}
+}
+
+// A group name that would split SupplementaryGroups= is passed by gid.
+func TestGroupNameOdd(t *testing.T) {
+	defer func(f func(string) (*user.Group, error)) { lookupGroupID = f }(lookupGroupID)
+	lookupGroupID = func(id string) (*user.Group, error) { return &user.Group{Gid: id, Name: "a b"}, nil }
+	if n := GroupName(1234); n != "1234" {
+		t.Fatalf("%q", n)
 	}
 }
