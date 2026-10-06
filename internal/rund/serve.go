@@ -54,8 +54,8 @@ type Server struct {
 	// when empty) down.
 	Owner uint32
 	Top   string
-	// Checker is the lukd binary whose run check-work (CheckWorkCmd) is
-	// the ExecStartPre of every job.
+	// Checker is the lukd binary whose run check-work (CheckWorkCmd)
+	// starts every job.
 	Checker string
 	// PeerUID returns the uid of the connected process.
 	PeerUID func() (uint32, error)
@@ -369,8 +369,9 @@ func CheckWork(root, work string, uid uint32) (string, Inode, error) {
 	return pipeline, Inode{uint64(st.Dev), st.Ino}, nil
 }
 
-// CheckWorkCmd is the subcommand of lukd run that runs VerifyWork as the
-// ExecStartPre of a job: lukd run check-work <root> <work> <dev> <ino>.
+// CheckWorkCmd is the subcommand of lukd run that starts every job: lukd
+// run check-work <root> <work> <dev> <ino> -- <command> <work> runs
+// VerifyWork and then executes the command in its place.
 const CheckWorkCmd = "check-work"
 
 // VerifyWork requires work, inside the namespace of a job, to be the

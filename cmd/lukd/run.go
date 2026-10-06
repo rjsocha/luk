@@ -60,14 +60,24 @@ func runCmd() *cobra.Command {
 	return cmd
 }
 
-// checkWorkCmd is the ExecStartPre of a job (rund.VerifyWork): it runs as
-// the job user inside the namespace of the job.
+// execJob replaces lukd by the command of a job; tests record it.
+var execJob = syscall.Exec
+
+// checkWorkCmd starts every job (rund.VerifyWork): as the job user inside
+// the namespace of the job it checks the work directory, then executes
+// the command of the job in its own place, the same process, with the
+// environment of the unit.
 func checkWorkCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:    rund.CheckWorkCmd + " ROOT WORK DEV INO",
-		Short:  "Check the work directory of a job inside its unit",
+		Use:    rund.CheckWorkCmd + " ROOT WORK DEV INO -- COMMAND [ARG...]",
+		Short:  "Check the work directory of a job inside its unit, then run the job",
 		Hidden: true,
-		Args:   cobra.ExactArgs(4),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if cmd.ArgsLenAtDash() != 4 || len(args) < 5 {
+				return errors.New("want ROOT WORK DEV INO -- COMMAND [ARG...]")
+			}
+			return nil
+		},
 		RunE: func(_ *cobra.Command, args []string) error {
 			var want rund.Inode
 			var err error
@@ -77,7 +87,14 @@ func checkWorkCmd() *cobra.Command {
 			if want.Ino, err = strconv.ParseUint(args[3], 10, 64); err != nil {
 				return fmt.Errorf("inode %q: %w", args[3], err)
 			}
-			return rund.VerifyWork(args[0], args[1], want)
+			if err := rund.VerifyWork(args[0], args[1], want); err != nil {
+				return fmt.Errorf("job not started: %w", err)
+			}
+			job := args[4:]
+			if err := execJob(job[0], job, os.Environ()); err != nil {
+				return fmt.Errorf("job not started: %s: %w", job[0], err)
+			}
+			return nil
 		},
 	}
 }

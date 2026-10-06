@@ -65,13 +65,13 @@ type jobsFile struct {
 	} `yaml:"storage"`
 }
 
-// paths are the absolute paths of f that hold data or secrets of lukd:
-// root, the TLS files and the EAB key file of the listeners, auth.nonces,
-// gpg.keys, the queues and secret queues of the endpoints and the bases
-// of the storages. A relative path lies under root (lukd anchors it
-// there), a missing root is config.DefaultRoot.
+// paths are the absolute paths of f that hold data or secrets of lukd
+// besides root: the TLS files and the EAB key file of the listeners,
+// auth.nonces, gpg.keys, the queues and secret queues of the endpoints
+// and the bases of the storages. A relative path lies under root (lukd
+// anchors it there).
 func (f *jobsFile) paths() []string {
-	ps := []string{cmp.Or(f.Root, config.DefaultRoot), f.Auth.Nonces, f.GPG.Keys}
+	ps := []string{f.Auth.Nonces, f.GPG.Keys}
 	for _, l := range f.Listen {
 		if l != nil && l.TLS != nil {
 			ps = append(ps, l.TLS.Cert, l.TLS.Key, l.TLS.EAB.KeyFile)
@@ -121,7 +121,8 @@ func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) 
 // main file p and the *.yaml of config.d next to it (dotfiles left out, in
 // lexical order), as lukd loads them. The pipelines of a job are those
 // with a step relay: <job> and those with a run step whose jobs lists it;
-// the paths are those of every file (see jobsFile.paths). A missing p (or
+// the paths are the root of the merged configuration (config.DefaultRoot
+// when no file sets it) and those of every file (see jobsFile.paths). A missing p (or
 // a missing directory above it) allows nothing. Every directory from top down to config.d, p
 // and the snippets must pass the checks of run.d (CheckParents,
 // readSafe) for owner; a refused or malformed file, too many snippets or
@@ -149,6 +150,9 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 	origin := map[string]string{}
 	rs := map[string][]string{}
 	var paths []string
+	// root of the merged configuration: lukd takes it from the one file
+	// that sets it.
+	var root string
 	for i, f := range append([]string{p}, snippets...) {
 		if i > 0 {
 			if b, err = readSafe(f, owner, maxConfigFile); err != nil {
@@ -160,6 +164,7 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 			return nil, fmt.Errorf("%s: %w", f, err)
 		}
 		paths = append(paths, jf.paths()...)
+		root = cmp.Or(root, jf.Root)
 		for name, pl := range jf.Pipeline {
 			if prev, ok := origin[name]; ok {
 				return nil, fmt.Errorf("pipeline %s: defined in %s and %s", name, prev, f)
@@ -192,6 +197,9 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 	}
 	for _, ps := range rs {
 		slices.Sort(ps)
+	}
+	if root = cmp.Or(root, config.DefaultRoot); filepath.IsAbs(root) {
+		paths = append(paths, filepath.Clean(root))
 	}
 	slices.Sort(paths)
 	return &Lukd{Pipelines: rs, Paths: slices.Compact(paths)}, nil

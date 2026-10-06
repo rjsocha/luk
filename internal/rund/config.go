@@ -397,7 +397,9 @@ type Box struct {
 // and pipeline. vars is the LUK_* metadata of work (runstep.Vars), set
 // after the job's env and before LUK_JOB, LUK_TMP and LUK_STATE, one
 // --setenv argument each. The job sees nothing of box but work, at the
-// same path (see sandbox).
+// same path (see sandbox). The unit runs box.Checker run check-work, which
+// checks work inside the namespace and then executes command work in its
+// place, with the environment of the unit.
 func (j *Job) Argv(box *Box, unit, name, pipeline, work, peerGroup string, vars []string) ([]string, error) {
 	sb, err := j.sandbox(box, name, pipeline, work)
 	if err != nil {
@@ -433,7 +435,8 @@ func (j *Job) Argv(box *Box, unit, name, pipeline, work, peerGroup string, vars 
 	if j.State != "" {
 		a = append(a, "--setenv=LUK_STATE="+StatePath(name, pipeline))
 	}
-	return append(a, j.Command, work), nil
+	return append(a, box.Checker, "run", CheckWorkCmd, box.Root, work,
+		strconv.FormatUint(box.Work.Dev, 10), strconv.FormatUint(box.Work.Ino, 10), "--", j.Command, work), nil
 }
 
 // systemDirs may be neither the root nor the directory of the lukd
@@ -457,10 +460,11 @@ func under(p, d string) bool {
 // bound back, read-write and at the same path, so LUK_WORK, LUK_IN,
 // LUK_OUT and LUK_META stay valid. luk may swap a directory above work
 // for a symlink after CheckWork, and systemd binds what the path resolves
-// to: ExecStartPre runs box.Checker in the namespace of the job, which
-// refuses to start it unless work there is the directory CheckWork
-// accepted. The processes of other users are hidden. The credentials of
-// the job are read by systemd before the namespace is set up.
+// to, for each process of the unit on its own: so the check of work
+// inside the namespace is the process of the job itself (see Argv),
+// which becomes the command only after it. The processes of other users
+// are hidden. The credentials of the job are read by systemd before the
+// namespace is set up.
 func (j *Job) sandbox(box *Box, name, pipeline, work string) ([]string, error) {
 	for _, p := range []string{box.Root, box.Config, work, box.Checker} {
 		if err := unitPath(p); err != nil {
@@ -478,11 +482,14 @@ func (j *Job) sandbox(box *Box, name, pipeline, work string) ([]string, error) {
 	hidden := []string{box.Config, RunDir}
 	var hide []string
 	for _, h := range slices.Sorted(slices.Values(box.Hide)) {
-		if slices.ContainsFunc(append(hidden, box.Root), func(d string) bool { return under(h, d) }) {
+		if slices.ContainsFunc(slices.Concat(hidden, []string{box.Root}), func(d string) bool { return under(h, d) }) {
 			continue
 		}
 		if err := unitPath(h); err != nil {
 			return nil, err
+		}
+		if slices.Contains(systemDirs, h) {
+			return nil, fmt.Errorf("hidden path %s: a system directory, a job cannot run without it", h)
 		}
 		hide = append(hide, h)
 		hidden = append(hidden, h)
@@ -492,7 +499,7 @@ func (j *Job) sandbox(box *Box, name, pipeline, work string) ([]string, error) {
 		keep["state directory"] = StatePath(name, pipeline)
 	}
 	for _, what := range sortedKeys(keep) {
-		for _, d := range append(slices.Clone(hidden), box.Root) {
+		for _, d := range slices.Concat(hidden, []string{box.Root}) {
 			if d == box.Root && what == "work" {
 				continue
 			}
@@ -508,8 +515,6 @@ func (j *Job) sandbox(box *Box, name, pipeline, work string) ([]string, error) {
 	return append(a,
 		"-p", "TemporaryFileSystem="+box.Root+":ro",
 		"-p", "BindPaths="+work+":"+work+":norbind",
-		"-p", "ExecStartPre="+strings.Join([]string{box.Checker, "run", CheckWorkCmd, box.Root, work,
-			strconv.FormatUint(box.Work.Dev, 10), strconv.FormatUint(box.Work.Ino, 10)}, " "),
 	), nil
 }
 

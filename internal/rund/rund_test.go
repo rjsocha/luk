@@ -215,12 +215,11 @@ func TestArgv(t *testing.T) {
 		"-p PrivateTmp=yes -p ProtectProc=invisible -p InaccessiblePaths=-/etc/site/lukd -p InaccessiblePaths=-/run/luk " +
 		"-p InaccessiblePaths=-/etc/ssl/private/k.pem -p InaccessiblePaths=-/storage " +
 		"-p TemporaryFileSystem=/var/lib/luk:ro -p BindPaths=/var/lib/luk/work/a/offsite/1:/var/lib/luk/work/a/offsite/1:norbind " +
-		"-p ExecStartPre=/usr/bin/lukd run check-work /var/lib/luk /var/lib/luk/work/a/offsite/1 2049 77 " +
 		"-p StateDirectory=lukd-run/s3-upload/offsite -p StateDirectoryMode=0700 " +
 		"-p LoadCredential=s3:/etc/site/lukd/s3.credentials -p RuntimeMaxSec=1800 --setenv=BUCKET=example-backup " +
 		"--setenv=LUK_WORK=/var/lib/luk/work/a/offsite/1 --setenv=LUK_PIPELINE=offsite --setenv=LUK_TAGS=a b,$HOME " +
 		"--setenv=LUK_JOB=s3-upload --setenv=LUK_TMP=/var/tmp --setenv=LUK_STATE=/var/lib/lukd-run/s3-upload/offsite " +
-		"/opt/luk/s3-upload /var/lib/luk/work/a/offsite/1"
+		"/usr/bin/lukd run check-work /var/lib/luk /var/lib/luk/work/a/offsite/1 2049 77 -- /opt/luk/s3-upload /var/lib/luk/work/a/offsite/1"
 	if got != want {
 		t.Fatalf("\n got %s\nwant %s", got, want)
 	}
@@ -236,9 +235,10 @@ func TestArgv(t *testing.T) {
 	want = "systemd-run --wait --collect --pipe --quiet --expand-environment=no --unit=lukd-run-n-1 -p DynamicUser=yes -p User=" + DynamicUser("notify", "p") + " " +
 		"--working-directory=/srv/l/work/i/p/1 -p SupplementaryGroups=luk mail -p PrivateTmp=yes -p ProtectProc=invisible " +
 		"-p InaccessiblePaths=-/etc/l -p InaccessiblePaths=-/run/luk -p TemporaryFileSystem=/srv/l:ro " +
-		"-p BindPaths=/srv/l/work/i/p/1:/srv/l/work/i/p/1:norbind -p ExecStartPre=/usr/bin/lukd run check-work /srv/l /srv/l/work/i/p/1 2049 77 " +
+		"-p BindPaths=/srv/l/work/i/p/1:/srv/l/work/i/p/1:norbind " +
 		"-p RuntimeMaxSec=60 " +
-		"--setenv=LUK_WORK=/srv/l/work/i/p/1 --setenv=LUK_PIPELINE=p --setenv=LUK_JOB=notify --setenv=LUK_TMP=/var/tmp /opt/luk/notify /srv/l/work/i/p/1"
+		"--setenv=LUK_WORK=/srv/l/work/i/p/1 --setenv=LUK_PIPELINE=p --setenv=LUK_JOB=notify --setenv=LUK_TMP=/var/tmp " +
+		"/usr/bin/lukd run check-work /srv/l /srv/l/work/i/p/1 2049 77 -- /opt/luk/notify /srv/l/work/i/p/1"
 	if got != want {
 		t.Fatalf("\n got %s\nwant %s", got, want)
 	}
@@ -276,8 +276,10 @@ func TestArgvRefusesPaths(t *testing.T) {
 		"config dir is /etc":     {box("/var/lib/luk", "/etc"), w, "", false},
 		"space in hidden path":   {box("/var/lib/luk", "/etc/site/lukd", "/srv/a b"), w, "", false},
 		"hidden path holds work": {box("/var/lib/luk", "/etc/site/lukd", "/var/lib"), w, "", false},
-		"hidden command":         {box("/var/lib/luk", "/etc/site/lukd", "/opt"), w, "", false},
-		"hidden checker":         {box("/var/lib/luk", "/etc/site/lukd", "/usr/bin"), w, "", false},
+		"hidden command":         {box("/var/lib/luk", "/etc/site/lukd", "/opt/j"), w, "", false},
+		"hidden checker":         {&Box{Root: "/var/lib/luk", Config: "/etc/site/lukd", Hide: []string{"/usr/local/lukd"}, Checker: "/usr/local/lukd/bin/lukd"}, w, "", false},
+		"hidden /srv":            {box("/var/lib/luk", "/etc/site/lukd", "/srv"), w, "", false},
+		"hidden /usr/bin":        {box("/var/lib/luk", "/etc/site/lukd", "/usr/bin"), w, "", false},
 		"hidden state":           {box("/var/lib/luk", "/etc/site/lukd", "/var/lib/lukd-run"), w, "", true},
 		"relative checker":       {&Box{Root: "/var/lib/luk", Config: "/etc/site/lukd", Checker: "lukd"}, w, "", false},
 		"command under root":     {ok, w, "/var/lib/luk/bin/j", false},
@@ -679,11 +681,14 @@ storage:
 	got := strings.Join(e.fr.argv, " ")
 	hidden := []string{filepath.Join(top, "lukd"), "/run/luk", "/etc/ssl/luk.crt", "/etc/ssl/private/luk.key", "/srv/extra", "/srv/gpg", "/srv/nonces", "/srv/queue", "/storage/backup"}
 	want := "-p ProtectProc=invisible -p InaccessiblePaths=-" + strings.Join(hidden, " -p InaccessiblePaths=-") + " " +
-		"-p TemporaryFileSystem=" + root + ":ro -p BindPaths=" + e.work + ":" + e.work + ":norbind " +
-		"-p ExecStartPre=/usr/bin/lukd run check-work " + root + " " + e.work + " " +
-		strconv.FormatUint(ino.Dev, 10) + " " + strconv.FormatUint(ino.Ino, 10) + " "
+		"-p TemporaryFileSystem=" + root + ":ro -p BindPaths=" + e.work + ":" + e.work + ":norbind "
 	if !strings.Contains(got, want) {
 		t.Fatalf("argv %s\nwant %s", got, want)
+	}
+	want = " /usr/bin/lukd run check-work " + root + " " + e.work + " " +
+		strconv.FormatUint(ino.Dev, 10) + " " + strconv.FormatUint(ino.Ino, 10) + " -- /opt/luk/state " + e.work
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("argv %s\nwant suffix %s", got, want)
 	}
 	// A command the sandbox hides is refused before anything runs.
 	e.fr.argv = nil

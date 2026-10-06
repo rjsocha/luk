@@ -265,7 +265,7 @@ storage:
 	if lk, err = LoadLukd(p, top, me); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/data/luk", "/etc/eab.key", "/etc/ssl/private/k.pem", "/run/v/q", "/srv/gpg", "/srv/nonces", "/srv/q/up", "/storage/s", "/var/lib/luk"}
+	want := []string{"/data/luk", "/etc/eab.key", "/etc/ssl/private/k.pem", "/run/v/q", "/srv/gpg", "/srv/nonces", "/srv/q/up", "/storage/s"}
 	if !slices.Equal(lk.Paths, want) {
 		t.Fatalf("paths\n got %q\nwant %q", lk.Paths, want)
 	}

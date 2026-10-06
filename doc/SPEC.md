@@ -4666,13 +4666,13 @@ work directory. No polkit and no sudo are involved.
   -p ProtectProc=invisible -p InaccessiblePaths=-<config dir>
   -p InaccessiblePaths=-/run/luk [-p InaccessiblePaths=-<path> ...]
   -p TemporaryFileSystem=<root>:ro -p BindPaths=<work>:<work>:norbind
-  -p ExecStartPre=<lukd> run check-work <root> <work> <dev> <ino>
   [-p StateDirectory=lukd-run/<job>/<pipeline> -p StateDirectoryMode=0700]
   -p LoadCredential=... -p RuntimeMaxSec=<timeout> [--setenv=K=V ...]
   --setenv=LUK_WORK=<work> ... --setenv=LUK_ORIGIN=<origin>
   --setenv=LUK_JOB=<job> --setenv=LUK_TMP=/var/tmp
   [--setenv=LUK_STATE=/var/lib/lukd-run/<job>/<pipeline>]
-  <command> <work>` (`--expand-environment=no` needs systemd 254 or
+  <lukd> run check-work <root> <work> <dev> <ino> -- <command> <work>`
+  (`--expand-environment=no` needs systemd 254 or
   later; the lukd package requires systemd 257 for `PrivatePIDs=`), a transient unit outside
   both the lukd and the lukd run sandbox, and streams the job's stdout and
   stderr back. `<work>` is the work path of the request as checked
@@ -4680,9 +4680,11 @@ work directory. No polkit and no sudo are involved.
   directory, as for a `run` program. The check is at request time, and
   `luk` owns `<root>`, `<root>/work` and `<root>/work/<id>`: it can swap
   one of them for a symlink before systemd binds `<work>` into the unit,
-  and systemd binds whatever the path then resolves to. So the unit
-  checks again from inside (see Sandbox of a job): a work directory that
-  is not the one checked fails the job before its command starts.
+  and systemd binds whatever the path then resolves to, for every
+  process of the unit on its own. So the process of the job checks
+  again from inside its namespace before it becomes the command (see
+  Sandbox of a job): a work directory that is not the one checked fails
+  the job before its command starts.
   `<peer group>` is the primary group
   of the peer (passwd), by name, or the numeric gid when it has no name or
   one that is not a plain account name.
@@ -4713,15 +4715,19 @@ work directory. No polkit and no sudo are involved.
     So are the paths of `hide` in `run.yaml` (absolute, for anything
     the configuration does not name). A path under `<root>`, `<config
     dir>`, `/run/luk` or another hidden path adds nothing.
-  - `-p ExecStartPre=<lukd> run check-work <root> <work> <dev> <ino>`
-    runs in the namespace of the job, as its user, before its command:
-    `<lukd>` is the binary of lukd run, `<dev>` and `<ino>` the device
-    and inode of `<work>` as lukd run checked it. It opens `<root>`
+  - The unit starts `<lukd> run check-work <root> <work> <dev> <ino> --
+    <command> <work>`: `<lukd>` is the binary of lukd run, `<dev>` and
+    `<ino>` the device and inode of `<work>` as lukd run checked it. In
+    the namespace of the job and as its user, it opens `<root>`
     (following a symlink, as lukd run does) and every element below it
-    with `O_PATH|O_NOFOLLOW` (no privileges needed) and fails unless
-    each is a directory and `<work>` is the checked one. A swapped
-    directory above `<work>` (see Request flow) so fails the job; the
-    namespace does not change after the check.
+    with `O_PATH|O_NOFOLLOW` (no privileges needed). Unless each is a
+    directory and `<work>` is the checked one, it exits 1 with `lukd:
+    job not started: <reason>` on stderr, which reaches the peer as
+    the output of the job, and the command never runs. Otherwise it
+    executes `<command> <work>` in its own place: the same process (the
+    main PID of the unit), the same namespace, no window after the
+    check. The job sees only its own argv (`<command> <work>`) and the
+    environment of the unit.
   - `ProtectProc=invisible`: the processes of other users (lukd, its
     `run` programs, other jobs) are hidden in `/proc`.
   - The `-` of `InaccessiblePaths=` skips a missing path; the bind of
@@ -4731,17 +4737,18 @@ work directory. No polkit and no sudo are involved.
     `/tmp` and `/var/tmp` private (`PrivateTmp=yes`), and its state
     directory.
   - Not confined: a job whose groups reach a service that acts for it
-    on the host. A job in the group `docker` can bind any host path into
-    a container through the daemon, which also resolves `<work>` on the
-    host without the check above; such a job sees what root sees.
+    on the host. The sandbox does not hold for a job in the group
+    `docker`: through the daemon it can bind any host path into a
+    container, and a path it hands to the daemon (such as `LUK_WORK`) is
+    resolved on the host, without the check above.
   - `command`, the work directory, the state directory and `<lukd>` must
     lie outside every hidden path (`<work>` is the one exception under
     `<root>`); `<root>`, `<config dir>`, `<work>`, `<lukd>` and every
     hidden path that adds a property must be clean absolute paths other
     than `/` without white space, a control character, a quote, a
     backslash, a colon, `$` or `%` (systemd-run splits, unquotes or
-    expands them in a property); `<root>` and `<config dir>` must not be
-    a system directory (`/etc`, `/usr`, `/var`, `/var/lib`, `/run`,
+    expands them in a property); `<root>`, `<config dir>` and a hidden
+    path that adds a property must not be a system directory (`/etc`, `/usr`, `/var`, `/var/lib`, `/run`,
     `/srv`, `/opt`, `/home`, `/tmp` and the like), which the job cannot
     do without. Otherwise the request is refused as `job <job>:
     unavailable`, the reason in the journal.
