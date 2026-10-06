@@ -4890,8 +4890,11 @@ sudo are involved.
     `ProtectSystem=strict` with `ReadWritePaths=<root>/root/job`
     (`<root>/root` for create, which may make `job/`) and, for remove
     and prune, `/run/luk/workspaces` (the count, below);
-    `CapabilityBoundingSet=CAP_SYS_ADMIN` (the kernel requires it for
-    `BTRFS_IOC_TREE_SEARCH` and destroy by id), `PrivateNetwork=yes`,
+    `CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE
+    CAP_DAC_READ_SEARCH` (the kernel requires `CAP_SYS_ADMIN` for
+    `BTRFS_IOC_TREE_SEARCH` and destroy by id; the workspace and what the
+    job made in it belong to the job user, mode 0700, so root needs the
+    DAC capabilities to reach a nested subvolume and delete it), `PrivateNetwork=yes`,
     `RestrictAddressFamilies=AF_UNIX` (`systemctl show`),
     `NoNewPrivileges=yes`, `ProtectHome=yes`, `PrivateTmp=yes`,
     `PrivateDevices=yes`, `ProtectKernelTunables=yes`,
