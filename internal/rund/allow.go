@@ -33,9 +33,9 @@ const (
 type jobsFile struct {
 	Pipeline map[string]*struct {
 		Steps []struct {
-			Run   string   `yaml:"run"`
-			Relay string   `yaml:"relay"`
-			Jobs  []string `yaml:"jobs"`
+			Run   yaml.Node `yaml:"run"`
+			Relay string    `yaml:"relay"`
+			Jobs  []string  `yaml:"jobs"`
 		} `yaml:"steps"`
 	} `yaml:"pipeline"`
 	Root   string `yaml:"root"`
@@ -174,7 +174,7 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 				continue
 			}
 			for i, s := range pl.Steps {
-				if s.Run != "" && s.Relay != "" {
+				if s.Run.Kind != 0 && s.Relay != "" {
 					return nil, fmt.Errorf("%s: pipeline %s: step %d: more than one of run and relay", f, name, i+1)
 				}
 				var jobs []string
@@ -182,7 +182,7 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 					jobs = append(jobs, s.Relay)
 				}
 				// lukd refuses jobs on any other step.
-				if s.Run != "" {
+				if s.Run.Kind != 0 {
 					jobs = append(jobs, s.Jobs...)
 				}
 				// The steps of one pipeline come one after the other: a

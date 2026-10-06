@@ -608,7 +608,7 @@ func directStores(cfg *config.Config, pipes []string, secret string) map[string]
 			continue
 		}
 		for _, step := range p.Steps {
-			if (step.Run != "" && !step.Tee) || step.Encrypt != nil {
+			if (step.Run.Set() && !step.Tee) || step.Encrypt != nil {
 				break
 			}
 			for _, sn := range step.Store {
@@ -661,7 +661,7 @@ func storesOnly(cfg *config.Config, pipes []string, secret string) []store.Local
 			return nil
 		}
 		for _, step := range p.Steps {
-			if step.Run != "" || step.Encrypt != nil || len(step.Store) == 0 {
+			if step.Run.Set() || step.Encrypt != nil || len(step.Store) == 0 {
 				return nil
 			}
 			for _, sn := range step.Store {

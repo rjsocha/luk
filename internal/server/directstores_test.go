@@ -19,9 +19,9 @@ func TestDirectStoresAfterTee(t *testing.T) {
 		Pipeline: map[string]*config.Pipeline{
 			"p": {Steps: []config.Step{
 				{Store: config.StringList{"a"}},
-				{Run: "/opt/luk/s3copy", Tee: true},
+				{Run: config.RunSpec{Program: "/opt/luk/s3copy"}, Tee: true},
 				{Store: config.StringList{"b"}},
-				{Run: "/opt/luk/zip"},
+				{Run: config.RunSpec{Program: "/opt/luk/zip"}},
 				{Store: config.StringList{"c"}},
 			}},
 		},

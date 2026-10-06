@@ -832,13 +832,49 @@ type Queue struct {
 // job of lukd run that consumes the set the same way. Jobs names the jobs
 // of lukd run the program of a run step may start with luk-job run.
 type Step struct {
-	Run     string            `yaml:"run"`
+	Run     RunSpec           `yaml:"run"`
 	Tee     bool              `yaml:"tee"`
 	Relay   string            `yaml:"relay"`
 	Jobs    []string          `yaml:"jobs"`
 	Store   StringList        `yaml:"store"`
 	Encrypt *Encrypt          `yaml:"encrypt"`
 	Env     map[string]string `yaml:"env"`
+}
+
+// RunSpec is the run key of a step: a program (an absolute path) or
+// {job: NAME}, a job of lukd run that runs as the step.
+type RunSpec struct {
+	Program string
+	Job     string
+	// invalid marks a value of another form, reported by validation.
+	invalid bool
+}
+
+func (r RunSpec) Set() bool { return r.Program != "" || r.Job != "" || r.invalid }
+
+// String is what the step errors name: the program, or "job <job>".
+func (r RunSpec) String() string {
+	if r.Job != "" {
+		return "job " + r.Job
+	}
+	return r.Program
+}
+
+// UnmarshalYAML takes a string (the program) or a mapping with exactly
+// the key job. Anything else is kept as invalid for validation to report
+// with the step, so the error names the pipeline and the step.
+func (r *RunSpec) UnmarshalYAML(n *yaml.Node) error {
+	*r = RunSpec{}
+	switch {
+	case n.Kind == yaml.ScalarNode && n.Tag == "!!str":
+		r.Program = n.Value
+	case n.Kind == yaml.MappingNode && len(n.Content) == 2 && n.Content[0].Value == "job" &&
+		n.Content[1].Kind == yaml.ScalarNode && n.Content[1].Tag == "!!str":
+		r.Job = n.Content[1].Value
+	default:
+		r.invalid = true
+	}
+	return nil
 }
 
 // Encrypt encrypts every file of the set to the recipients: WKD addresses
@@ -1658,7 +1694,7 @@ func (c *Config) validate() []error {
 		}
 		for i, s := range p.Steps {
 			kinds := 0
-			for _, set := range []bool{s.Run != "", len(s.Store) > 0, s.Encrypt != nil, s.Relay != ""} {
+			for _, set := range []bool{s.Run.Set(), len(s.Store) > 0, s.Encrypt != nil, s.Relay != ""} {
 				if set {
 					kinds++
 				}
@@ -1669,8 +1705,16 @@ func (c *Config) validate() []error {
 			if s.Encrypt != nil {
 				c.validateEncrypt(bad, fmt.Sprintf("pipeline %s: step %d: encrypt", name, i+1), s.Encrypt)
 			}
-			if s.Run != "" && !strings.HasPrefix(s.Run, "/") {
-				bad("pipeline %s: step %d: run must be an absolute path", name, i+1)
+			switch {
+			case s.Run.invalid, s.Run.Program != "" && !filepath.IsAbs(s.Run.Program):
+				bad("pipeline %s: step %d: run must be an absolute path or {job: NAME}", name, i+1)
+			case s.Run.Job != "":
+				if !ValidJobName(s.Run.Job) {
+					bad("pipeline %s: step %d: run.job %q: invalid job name", name, i+1, s.Run.Job)
+				}
+				if s.Tee || len(s.Env) > 0 || len(s.Jobs) > 0 {
+					bad("pipeline %s: step %d: run job takes no tee, env or jobs", name, i+1)
+				}
 			}
 			if s.Relay != "" {
 				if !ValidJobName(s.Relay) {
@@ -1679,10 +1723,10 @@ func (c *Config) validate() []error {
 				if s.Tee || len(s.Env) > 0 {
 					bad("pipeline %s: step %d: relay takes no tee or env", name, i+1)
 				}
-			} else if s.Tee && s.Run == "" {
+			} else if s.Tee && !s.Run.Set() {
 				bad("pipeline %s: step %d: tee needs run", name, i+1)
 			}
-			if len(s.Jobs) > 0 && s.Run == "" {
+			if len(s.Jobs) > 0 && !s.Run.Set() {
 				bad("pipeline %s: step %d: jobs needs run", name, i+1)
 			}
 			for j, job := range s.Jobs {
@@ -2742,9 +2786,9 @@ func (c *Config) Warnings() []string {
 		p := c.Pipeline[pn]
 		run, renamed, warned := false, "", map[string]bool{}
 		for _, st := range p.Steps {
-			if st.Run != "" || st.Relay != "" {
+			if st.Run.Set() || st.Relay != "" {
 				// A tee or relay step passes its set on unchanged.
-				if st.Run != "" && !st.Tee {
+				if st.Run.Set() && !st.Tee {
 					run, renamed = true, "a run"
 				}
 				continue

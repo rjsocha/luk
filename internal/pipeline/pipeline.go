@@ -694,11 +694,11 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, Outcome) {
 		hookRun(j, name)
 		set := initialSet(j)
 		for i, s := range p.Steps {
-			if s.Run != "" || s.Encrypt != nil || s.Relay != "" {
+			if s.Run.Set() || s.Encrypt != nil || s.Relay != "" {
 				what := "encrypt"
 				switch {
-				case s.Run != "":
-					what = "run " + s.Run
+				case s.Run.Set():
+					what = "run " + s.Run.String()
 				case s.Relay != "":
 					what = "relay " + s.Relay
 				}
@@ -728,7 +728,10 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, Outcome) {
 				set = next
 				continue
 			}
-			if s.Run != "" {
+			if s.Run.Job != "" {
+				return i + 1, fmt.Errorf("run %s: %w", s.Run, errNotSupported)
+			}
+			if s.Run.Program != "" {
 				next, tail, err := runStep(j, p, i+1, s, set, stepDir(work, i+1), cfg.Root, d.stop)
 				if err != nil {
 					logged = tail

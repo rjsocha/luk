@@ -1130,7 +1130,7 @@ func TestWarningRelayKeepsNames(t *testing.T) {
 	if w := c.Warnings(); len(w) != 0 {
 		t.Fatalf("%v", w)
 	}
-	if s := c.Pipeline["drop"].Steps[0]; s.Relay != "s3-upload" || s.Run != "" {
+	if s := c.Pipeline["drop"].Steps[0]; s.Relay != "s3-upload" || s.Run.Set() {
 		t.Fatalf("%+v", s)
 	}
 }
@@ -2288,5 +2288,35 @@ func TestWatchErrors(t *testing.T) {
 func TestValidPipelineNameLength(t *testing.T) {
 	if !ValidPipelineName(strings.Repeat("p", 128)) || ValidPipelineName(strings.Repeat("p", 129)) {
 		t.Fatal("length cap")
+	}
+}
+
+func TestRunJobStep(t *testing.T) {
+	for step, want := range map[string]string{
+		"      - run: {job: S3}\n":                                 `step 1: run.job "S3": invalid job name`,
+		"      - run: {job: db-dump, user: x}\n":                   "step 1: run must be an absolute path or {job: NAME}",
+		"      - run: [a]\n":                                       "step 1: run must be an absolute path or {job: NAME}",
+		"      - run: relative/x\n":                                "step 1: run must be an absolute path or {job: NAME}",
+		"      - run: {job: db-dump}\n        tee: true\n":         "step 1: run job takes no tee, env or jobs",
+		"      - run: {job: db-dump}\n        env: {A: b}\n":       "step 1: run job takes no tee, env or jobs",
+		"      - run: {job: db-dump}\n        jobs: [s3-upload]\n": "step 1: run job takes no tee, env or jobs",
+		"      - run: {job: db-dump}\n        relay: s3-upload\n":  "step 1 needs exactly one of run, store, encrypt or relay",
+	} {
+		src := strings.Replace(good, "    steps:\n      - store: drop\n", "    steps:\n"+step+"      - store: drop\n", 1)
+		_, err := Parse([]byte(src))
+		if err == nil || !strings.Contains(err.Error(), "pipeline drop: ") || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want %q, got %v", step, want, err)
+		}
+	}
+	src := strings.Replace(good, "    steps:\n      - store: drop\n", "    steps:\n      - run: {job: db-dump}\n      - store: drop\n", 1)
+	c, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Pipeline["drop"].Steps[0].Run; r.Job != "db-dump" || r.Program != "" || r.String() != "job db-dump" {
+		t.Fatalf("%+v", r)
+	}
+	if r := c.Pipeline["devdb"].Steps[1].Run; r.Program != "/opt/luk/dbdump" || r.String() != "/opt/luk/dbdump" {
+		t.Fatalf("%+v", r)
 	}
 }

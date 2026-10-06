@@ -135,7 +135,7 @@ func runStep(j Job, p *config.Pipeline, step int, s config.Step, set []file, dir
 		env = append(env, k+"="+s.Env[k])
 	}
 	env = append(env, vars...)
-	err = execute(s.Run, dir, env, w, stepTimeout(p), stop)
+	err = execute(s.Run.Program, dir, env, w, stepTimeout(p), stop)
 	if cerr := logf.Close(); err == nil && cerr != nil {
 		err = cerr
 	}
