@@ -42,7 +42,7 @@ func (s *Server) serveEndpoints(w http.ResponseWriter, r *http.Request, sn *snap
 		reject(level, &httpError{code: http.StatusUnauthorized, msg: "missing signature headers"})
 		return
 	}
-	text := wire.ListCanonicalText(r.Method, r.Host, r.URL.EscapedPath(), ts, nonce, sessionOf(r.Context()).sess.H())
+	text := wire.ListCanonicalText(r.Method, r.Host, r.URL.Path, ts, nonce, sessionOf(r.Context()).sess.H())
 	id, err := s.verify(r, sn, l, s.now(), ts, nonce, sigS, wire.ListNamespace, text)
 	if err != nil {
 		var he *httpError

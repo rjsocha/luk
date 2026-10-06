@@ -204,3 +204,24 @@ func TestEndpointListACME(t *testing.T) {
 		}
 	}
 }
+
+// The listing text holds the path as lukd decodes it, as for an upload
+// and a link: an escaped request target verifies with the signature over
+// its unescaped path.
+func TestEndpointListUnescapedPath(t *testing.T) {
+	f := newFixture(t)
+	c, rec := recOpen(t, f.handler(), "lukd.test", wire.EndpointsPath)
+	if c == nil {
+		t.Fatalf("open: %d %s", rec.Code, rec.Body)
+	}
+	ts, nonce := time.Now().UTC().Format(time.RFC3339), wire.NewNonce()
+	sig, err := sshsig.Sign(f.user, wire.ListNamespace, wire.ListCanonicalText(http.MethodGet, "lukd.test", wire.EndpointsPath, ts, nonce, c.sess.H()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hd := http.Header{}
+	hd.Set(wire.HeaderTimestamp, ts)
+	hd.Set(wire.HeaderNonce, nonce)
+	hd.Set(wire.HeaderSignature, base64.StdEncoding.EncodeToString(sig.Marshal()))
+	decodeList(t, c.op(t, channel.Request{Method: http.MethodGet, Target: "/.well-known/luk/%65ndpoints", Header: hd}))
+}

@@ -358,8 +358,8 @@ func GetTarget(escapedPath, rawQuery string) string {
 }
 
 // ListCanonicalText is what the client signs and the server verifies for
-// the endpoint listing: the method (GET), the Host, the path as requested
-// (escaped), the timestamp, the nonce and the session hash h.
+// the endpoint listing: the method (GET), the Host, the path (unescaped,
+// as for an upload), the timestamp, the nonce and the session hash h.
 func ListCanonicalText(method, host, path, timestamp, nonce string, h []byte) []byte {
 	return text(ListNamespace, h, method, host, path, timestamp, nonce)
 }
