@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -145,5 +146,65 @@ func TestCheckWarnsRelayPipelineNotListed(t *testing.T) {
 	want := "warning: pipeline archive: step 1: relay job s3-upload does not list the pipeline in its pipelines\n"
 	if err != nil || out != "ok\n" || errOut != want {
 		t.Fatalf("%q %q %v", out, errOut, err)
+	}
+}
+
+// As root, lukd check leaves the files of the service user (running
+// state, storage bases) to a run as the owner of root: a FIFO the service
+// user put there blocks nothing in root's run.
+func TestCheckAsRootLeavesServiceFilesToOwner(t *testing.T) {
+	cfgPath, root := statusConfig(t)
+	writeIdentity(t, cfgPath)
+	os.Chmod(cfgPath, 0o644)
+	fakeUser(t, true)
+	os.MkdirAll(filepath.Join(root, "s"), 0o750)
+	for _, p := range []string{filepath.Join(root, "s", "archive"), filepath.Join(root, ".lukd-receive.lock"), filepath.Join(root, ".lukd-receive.running.json")} {
+		if err := syscall.Mkfifo(p, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var asUID uint32
+	var calls int
+	geteuid, reexecAs = func() int { return 0 }, func(uid, gid uint32, groups []uint32) error {
+		calls++
+		asUID = uid
+		return exitCode(3)
+	}
+	t.Cleanup(func() { geteuid, reexecAs = os.Geteuid, reexec })
+	type res struct {
+		out, errOut string
+		err         error
+	}
+	done := make(chan res, 1)
+	go func() {
+		out, errOut, err := runCheck(t, "-c", cfgPath)
+		done <- res{out, errOut, err}
+	}()
+	select {
+	case r := <-done:
+		var code exitCode
+		if !errors.As(r.err, &code) || code != 1 || r.out != "" || calls != 1 || asUID != uint32(os.Getuid()) {
+			t.Fatalf("%q %q %v, %d calls as %d", r.out, r.errOut, r.err, calls, asUID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lukd check as root opened a FIFO of the service user")
+	}
+}
+
+// Run again as the owner, lukd check does only the part root left to it.
+func TestCheckOwnerPart(t *testing.T) {
+	cfgPath, root := statusConfig(t)
+	base := filepath.Join(root, "s", "archive")
+	os.MkdirAll(base, 0o750)
+	os.WriteFile(filepath.Join(base, "junk"), nil, 0o640)
+	t.Setenv(reexecEnv, "1")
+	out, errOut, err := runCheck(t, "-c", cfgPath, "--no-running")
+	var code exitCode
+	if !errors.As(err, &code) || code != 1 || out != "" || !strings.Contains(errOut, "storage archive:") || strings.Contains(errOut, "identity") {
+		t.Fatalf("%q %q %v", out, errOut, err)
+	}
+	os.Remove(filepath.Join(base, "junk"))
+	if out, errOut, err := runCheck(t, "-c", cfgPath, "--no-running"); err != nil || out != "" || errOut != "" {
+		t.Fatalf("clean: %q %q %v", out, errOut, err)
 	}
 }

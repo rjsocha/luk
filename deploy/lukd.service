@@ -15,6 +15,9 @@ ExecStart=/bin/true
 # then reaches both roles (ReloadPropagatedFrom= in their units), each
 # checks again and sends itself SIGHUP.
 ExecReload=/usr/bin/lukd check
+# A oneshot unit has no start timeout by default, and ExecReload= runs
+# under it: bound the check so a stuck reload cannot hang.
+TimeoutSec=5min
 
 [Install]
 WantedBy=multi-user.target

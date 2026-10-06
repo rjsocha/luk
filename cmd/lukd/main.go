@@ -105,7 +105,8 @@ func rootCmd() *cobra.Command {
 			"--no-running skips that comparison, before a restart. Run as root, it also\n" +
 			"checks that the service user (--user) can read every configuration input:\n" +
 			"config.yaml, config.d, ssh.d, the tls files, the eab key file, gpg.keys and\n" +
-			"the passwords.\n" +
+			"the passwords. The part that reads the files of the service user (running\n" +
+			"state, storage bases) then runs again as the owner of the root.\n" +
 			"A relay step whose job has no file in " + rund.DefaultJobs + " is a warning when\n" +
 			"that directory is readable, and so is one whose readable job file does not\n" +
 			"list the pipeline in its pipelines.",
@@ -116,7 +117,19 @@ func rootCmd() *cobra.Command {
 				return err
 			}
 			errw := cmd.ErrOrStderr()
-			for _, w := range slices.Concat(cfg.Warnings(), relayWarnings(cfg, runJobs), permanentOrphans(cfg)) {
+			// Run again by root as the owner of root: only the part that
+			// reads the files of the service user.
+			if os.Getenv(reexecEnv) == "1" && geteuid() != 0 {
+				failed, err := checkOwned(cfg, errw, noRunning)
+				if err != nil {
+					return err
+				}
+				if failed {
+					return exitCode(1)
+				}
+				return nil
+			}
+			for _, w := range slices.Concat(cfg.Warnings(), relayWarnings(cfg, runJobs)) {
 				fmt.Fprintln(errw, "warning: "+w)
 			}
 			failed := false
@@ -145,10 +158,6 @@ func rootCmd() *cobra.Command {
 					}
 				}
 			}
-			for _, err := range storageLayouts(cfg) {
-				fmt.Fprintln(errw, err)
-				failed = true
-			}
 			// As the service user the inputs are opened by the load
 			// itself (ExecReload); root reads everything, so it checks.
 			if geteuid() == 0 {
@@ -157,18 +166,27 @@ func rootCmd() *cobra.Command {
 					failed = true
 				}
 			}
-			if !noRunning {
-				changes, notes, err := server.RunningChanges(cfg)
+			// Root leaves the files of the service user (running state,
+			// storage bases), which it may replace with a FIFO or a
+			// symlink, to a run as the owner of root (see asOwner). A
+			// missing root holds none of them.
+			var code exitCode
+			err = nil
+			if _, lerr := os.Lstat(cfg.Root); geteuid() == 0 && !errors.Is(lerr, os.ErrNotExist) {
+				err = asOwner("lukd check", cfg.Root)
+			}
+			switch {
+			case errors.As(err, &code):
+				failed = failed || code != 0
+			case err != nil:
+				fmt.Fprintln(errw, err)
+				failed = true
+			default:
+				f, err := checkOwned(cfg, errw, noRunning)
 				if err != nil {
 					return err
 				}
-				for _, n := range notes {
-					fmt.Fprintln(errw, "note: "+n)
-				}
-				for _, c := range changes {
-					fmt.Fprintln(errw, c+" changed, restart required (reload would be refused)")
-				}
-				failed = failed || len(changes) > 0
+				failed = failed || f
 			}
 			if failed {
 				return exitCode(1)
@@ -293,4 +311,33 @@ func generateTLS(cfgPath string, w io.Writer) error {
 		return nil
 	})
 	return errors.Join(append([]error{err}, errs...)...)
+}
+
+// checkOwned is the part of lukd check that reads the files of the
+// service user: the orphaned permanent names (warnings), the layouts of
+// the storage bases and, unless noRunning, the restart-only settings of
+// the running roles. It reports whether the check failed.
+func checkOwned(cfg *config.Config, errw io.Writer, noRunning bool) (bool, error) {
+	for _, w := range permanentOrphans(cfg) {
+		fmt.Fprintln(errw, "warning: "+w)
+	}
+	failed := false
+	for _, err := range storageLayouts(cfg) {
+		fmt.Fprintln(errw, err)
+		failed = true
+	}
+	if noRunning {
+		return failed, nil
+	}
+	changes, notes, err := server.RunningChanges(cfg)
+	if err != nil {
+		return false, err
+	}
+	for _, n := range notes {
+		fmt.Fprintln(errw, "note: "+n)
+	}
+	for _, c := range changes {
+		fmt.Fprintln(errw, c+" changed, restart required (reload would be refused)")
+	}
+	return failed || len(changes) > 0, nil
 }

@@ -2597,6 +2597,17 @@ the check fails (exit status 1). Inputs that do not exist are skipped. Run
 as any other user the check is skipped: the role units run `lukd check` as
 `luk`, where loading the configuration opens the same files.
 
+Run as root, `lukd check` never opens a file of the service user, which
+could put a FIFO, a symlink or an endless file there: the part that
+reads them (the running files and locks of the roles, the layouts of the
+local storage bases and their orphaned permanent names) runs again as
+the owner of `root` with its groups (as `lukd queue` and `lukd storage`
+do; `root` must not be a symlink), with the same flags, and its output
+and failure join root's own. A missing `root` holds none of them: root
+then does that part itself. `lukd.service` bounds its reload with
+`TimeoutSec=5min`, so a check that hangs fails the reload instead of
+blocking it.
+
 ## Pipelines
 
 A pipeline is a list of steps working on a set of files:
