@@ -1,6 +1,10 @@
 # /etc/site/lukd/run.d/s3-upload.yaml: the job "s3-upload" (the file base
 # name; [a-z0-9][a-z0-9._-]*). Owned by root, not writable by group or
 # others. Read per request: adding or removing a file needs no reload.
+# The pipelines the job runs for come from the lukd configuration: those
+# with a step `relay: s3-upload` and those with a run step whose `jobs`
+# lists s3-upload (its program starts the job with luk-job run). A
+# request from a work directory of any other pipeline is refused.
 
 # User of the job, optional: without user the job runs as a systemd
 # dynamic user, one per job and pipeline (lukd-<job>-<pipeline>-<hash>),
@@ -23,12 +27,6 @@ credentials:
 
 # RuntimeMaxSec of the job, under 7 days. Default: 1h.
 timeout: 1h
-
-# The pipelines the job runs for, required: a request from a work
-# directory of any other pipeline is refused. List the pipelines whose
-# relay step names the job and those whose run programs call it with
-# luk-job run.
-pipelines: [offsite]
 
 # State directory kept between runs, one per job and pipeline:
 # /var/lib/lukd-run/<job>/<pipeline>, in LUK_STATE (absent without state).

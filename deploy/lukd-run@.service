@@ -4,9 +4,9 @@ Description=luk run connection (one allowlisted job)
 CollectMode=inactive-or-failed
 
 [Service]
-# Root: reads /etc/site/lukd/run.yaml and run.d/, checks the work
-# directory of the peer and starts the job with systemd-run, which needs no
-# polkit as root. The job runs in its own transient unit, outside this
+# Root: reads /etc/site/lukd/run.yaml, run.d/ and the pipelines of
+# config.yaml and config.d/, checks the work directory of the peer and
+# starts the job with systemd-run, which needs no polkit as root. The job runs in its own transient unit, outside this
 # sandbox.
 ExecStart=/usr/bin/lukd run
 StandardInput=socket

@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -47,8 +46,9 @@ type Server struct {
 	// Locks holds the lock files of the jobs with `state: locked`; empty
 	// means DefaultLocks.
 	Locks string
-	// Owner must own the config, run.d and its files (root), and every
-	// directory above them from Top (/ when empty) down.
+	// Owner must own the config, run.d and its files and the lukd
+	// configuration (root), and every directory above them from Top (/
+	// when empty) down.
 	Owner uint32
 	Top   string
 	// PeerUID returns the uid of the connected process.
@@ -147,7 +147,7 @@ func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, 
 		s.Log.Warn("work directory refused", "job", req.Job, "err", err)
 		return refusal{errWork}
 	}
-	if !slices.Contains(job.Pipelines, pipeline) {
+	if !s.allowed(g, req.Job, pipeline) {
 		return refusal{fmt.Errorf("job %s: pipeline %s not allowed", req.Job, pipeline)}
 	}
 	work := req.Work

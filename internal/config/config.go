@@ -821,11 +821,13 @@ type Queue struct {
 
 // Step is one step of a pipeline. Tee makes a run step a consumer: it
 // leaves out/ empty and the next step gets the set it got. Relay names a
-// job of lukd run that consumes the set the same way.
+// job of lukd run that consumes the set the same way. Jobs names the jobs
+// of lukd run the program of a run step may start with luk-job run.
 type Step struct {
 	Run     string            `yaml:"run"`
 	Tee     bool              `yaml:"tee"`
 	Relay   string            `yaml:"relay"`
+	Jobs    []string          `yaml:"jobs"`
 	Store   StringList        `yaml:"store"`
 	Encrypt *Encrypt          `yaml:"encrypt"`
 	Env     map[string]string `yaml:"env"`
@@ -1669,6 +1671,17 @@ func (c *Config) validate() []error {
 				}
 			} else if s.Tee && s.Run == "" {
 				bad("pipeline %s: step %d: tee needs run", name, i+1)
+			}
+			if len(s.Jobs) > 0 && s.Run == "" {
+				bad("pipeline %s: step %d: jobs needs run", name, i+1)
+			}
+			for j, job := range s.Jobs {
+				switch {
+				case !ValidJobName(job):
+					bad("pipeline %s: step %d: jobs: %q: invalid job name", name, i+1, job)
+				case slices.Contains(s.Jobs[:j], job):
+					bad("pipeline %s: step %d: jobs: %s listed twice", name, i+1, job)
+				}
 			}
 			for _, k := range sortedKeys(s.Env) {
 				if strings.HasPrefix(k, "LUK_") {

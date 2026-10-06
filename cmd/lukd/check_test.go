@@ -101,7 +101,7 @@ func TestCheckWarnsRelayWithoutJobFile(t *testing.T) {
 	writeIdentity(t, cfgPath)
 	jobs := t.TempDir()
 	for _, f := range []string{"s3-upload.yaml", "notify.yaml~", "notify.yaml.dpkg-old", ".notify.yaml"} {
-		if err := os.WriteFile(filepath.Join(jobs, f), []byte("command: /opt/luk/s3\npipelines: [archive]\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(jobs, f), []byte("command: /opt/luk/s3\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -118,22 +118,27 @@ func TestCheckWarnsRelayWithoutJobFile(t *testing.T) {
 	}
 }
 
-func TestCheckWarnsRelayPipelineNotListed(t *testing.T) {
+// A job a run step lists in jobs needs a file as a relayed one does; a
+// job of run.d that no relay step and no jobs name is unused, and a file
+// of run.d that does not load is named with the reason.
+func TestCheckWarnsRunStepJobs(t *testing.T) {
 	cfgPath, _ := statusConfig(t)
 	text, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	relays := strings.Replace(string(text), "steps: [{store: archive}]", "steps: [{relay: s3-upload}, {relay: notify}, {store: archive}]", 1)
-	if err := os.WriteFile(cfgPath, []byte(relays), 0o640); err != nil {
+	steps := strings.Replace(string(text), "steps: [{store: archive}]", "steps: [{relay: s3-upload}, {run: /opt/luk/x, tee: true, jobs: [helper, notify]}, {store: archive}]", 1)
+	if err := os.WriteFile(cfgPath, []byte(steps), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	writeIdentity(t, cfgPath)
 	jobs := t.TempDir()
 	os.Chmod(jobs, 0o755)
 	for f, data := range map[string]string{
-		"s3-upload.yaml": "command: /opt/luk/s3\npipelines: [offsite]\n",
-		"notify.yaml":    "command: /opt/luk/notify\npipelines: [offsite, archive]\n",
+		"s3-upload.yaml": "command: /opt/luk/s3\n",
+		"helper.yaml":    "command: /opt/luk/helper\n",
+		"idle.yaml":      "command: /opt/luk/idle\n",
+		"broken.yaml":    "command: /opt/luk/broken\npipelines: [archive]\n",
 	} {
 		if err := os.WriteFile(filepath.Join(jobs, f), []byte(data), 0o600); err != nil {
 			t.Fatal(err)
@@ -143,14 +148,15 @@ func TestCheckWarnsRelayPipelineNotListed(t *testing.T) {
 	t.Cleanup(func() { runJobs = old })
 	runJobs = jobs
 	out, errOut, err := runCheck(t, "--no-running", "-c", cfgPath)
-	want := "warning: pipeline archive: step 1: relay job s3-upload does not list the pipeline in its pipelines\n"
-	if err != nil || out != "ok\n" || errOut != want {
+	want := "warning: pipeline archive: step 2: job notify has no file in " + jobs + "\n" +
+		"warning: " + filepath.Join(jobs, "idle.yaml") + ": unused: no relay step and no jobs of a run step name the job\n" +
+		"warning: run.d job broken: " + filepath.Join(jobs, "broken.yaml") + ": pipelines: removed: "
+	if err != nil || out != "ok\n" || !strings.HasPrefix(errOut, want) || strings.Count(errOut, "\n") != 3 {
 		t.Fatalf("%q %q %v", out, errOut, err)
 	}
 }
 
-// A job file that exists but does not load (a run.d of before
-// pipelines: was required) is named with the reason.
+// A job file that exists but does not load is named with the reason.
 func TestCheckWarnsRelayJobInvalid(t *testing.T) {
 	cfgPath, _ := statusConfig(t)
 	text, err := os.ReadFile(cfgPath)
@@ -164,7 +170,7 @@ func TestCheckWarnsRelayJobInvalid(t *testing.T) {
 	writeIdentity(t, cfgPath)
 	jobs := t.TempDir()
 	os.Chmod(jobs, 0o755)
-	if err := os.WriteFile(filepath.Join(jobs, "s3-upload.yaml"), []byte("command: /opt/luk/s3\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(jobs, "s3-upload.yaml"), []byte("command: opt/luk/s3\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	old := runJobs
@@ -172,7 +178,7 @@ func TestCheckWarnsRelayJobInvalid(t *testing.T) {
 	runJobs = jobs
 	out, errOut, err := runCheck(t, "--no-running", "-c", cfgPath)
 	want := "warning: pipeline archive: step 1: relay job s3-upload: "
-	if err != nil || out != "ok\n" || !strings.HasPrefix(errOut, want) || !strings.Contains(errOut, "pipelines") || strings.Count(errOut, "\n") != 1 {
+	if err != nil || out != "ok\n" || !strings.HasPrefix(errOut, want) || !strings.Contains(errOut, "not a clean absolute path") || strings.Count(errOut, "\n") != 1 {
 		t.Fatalf("%q %q %v", out, errOut, err)
 	}
 }
@@ -240,7 +246,7 @@ func TestCheckOwnerPart(t *testing.T) {
 // lukd run compares the work path with the root of run.yaml as written:
 // a run.yaml root that is not the lukd root as a string is reported.
 func TestRunRootWarning(t *testing.T) {
-	cfg := &config.Config{Root: "/srv/luk"}
+	cfg := &config.Config{Root: "/srv/luk", Path: "/etc/site/lukd/config.yaml"}
 	dir := t.TempDir()
 	p := filepath.Join(dir, "run.yaml")
 	if w := runRootWarning(cfg, p); w != nil {
@@ -257,6 +263,27 @@ func TestRunRootWarning(t *testing.T) {
 		w := runRootWarning(cfg, p)
 		if want == "" && w != nil || want != "" && (len(w) != 1 || w[0] != want) {
 			t.Errorf("%s: %q", root, w)
+		}
+	}
+}
+
+// lukd run reads the jobs of the run steps and the relay steps from the
+// config of run.yaml: another file than the one checked is reported.
+func TestRunConfigWarning(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{Root: "/var/lib/luk", Path: filepath.Join(dir, "lukd", "config.yaml")}
+	p := filepath.Join(dir, "run.yaml")
+	for data, want := range map[string]string{
+		"config: " + dir + "/lukd/./config.yaml\n": "",
+		"config: /etc/other.yaml\n":                p + ": config /etc/other.yaml is not the checked configuration " + cfg.Path + ": lukd run takes the jobs of the pipelines from it",
+		"root: /var/lib/luk\n":                     p + ": config /etc/site/lukd/config.yaml is not the checked configuration " + cfg.Path + ": lukd run takes the jobs of the pipelines from it",
+	} {
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		w := runRootWarning(cfg, p)
+		if want == "" && w != nil || want != "" && (len(w) != 1 || w[0] != want) {
+			t.Errorf("%s: %q", data, w)
 		}
 	}
 }

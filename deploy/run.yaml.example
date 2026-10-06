@@ -9,6 +9,14 @@
 # same path as root of the lukd configuration. Default: /var/lib/luk.
 # root: /var/lib/luk
 
+# The main file of the lukd configuration; lukd run reads it and its
+# config.d per connection, only for the relay steps and the jobs of the
+# run steps of the pipelines: they decide which pipelines may run a job.
+# The files and every directory above them must be owned by root and not
+# writable by group or others; a missing file allows no pipeline, a
+# refused one neither (logged). Default: /etc/site/lukd/config.yaml.
+# config: /etc/site/lukd/config.yaml
+
 # The only user allowed to connect to the socket (SO_PEERCRED); any other
 # connection is closed without an answer. Default: the owner of root.
 # peer: luk

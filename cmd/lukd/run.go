@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -34,6 +35,8 @@ func runCmd() *cobra.Command {
 		Long: "Serve one connection of lukd-run.socket on stdin: check that the peer is\n" +
 			"the luk user, read the request, run the job of " + rund.DefaultJobs + "/<job>.yaml\n" +
 			"on the peer's work directory with systemd-run and stream its output back.\n" +
+			"The pipeline of the work directory must relay to the job or list it in jobs\n" +
+			"of a run step in the lukd configuration (config of run.yaml).\n" +
 			"Runs as root. --config defaults to " + rund.DefaultConfig + " here.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -97,11 +100,13 @@ func peerUID(c *net.UnixConn) (uint32, error) {
 	return cred.Uid, nil
 }
 
-// relayWarnings names the relay steps of cfg whose job has no file in dir,
-// the run.d of lukd run, whose readable file does not load (with the
-// reason) or whose valid file does not list the pipeline. dir is root's
-// and changes without a reload, so it is never required: an unreadable
-// dir or file gives no warning.
+// relayWarnings names the relay steps and the jobs of the run steps of
+// cfg whose job has no file in dir, the run.d of lukd run, or whose
+// readable file does not load (with the reason), then the valid jobs of
+// dir that no relay step and no jobs name (unused) and the other readable
+// job files that do not load. dir is root's and
+// changes without a reload, so it is never required: an unreadable dir or
+// file gives no warning.
 func relayWarnings(cfg *config.Config, dir string) []string {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -120,17 +125,32 @@ func relayWarnings(cfg *config.Config, dir string) []string {
 		}
 	}
 	var w []string
+	used := map[string]bool{}
 	for _, pn := range slices.Sorted(maps.Keys(cfg.Pipeline)) {
 		for i, s := range cfg.Pipeline[pn].Steps {
-			switch j, bad := jobs.OK[s.Relay], jobs.Bad[s.Relay]; {
-			case s.Relay == "":
-			case !have[s.Relay]:
-				w = append(w, fmt.Sprintf("pipeline %s: step %d: relay job %s has no file in %s", pn, i+1, s.Relay, dir))
-			case bad != nil && !errors.Is(bad, fs.ErrPermission):
-				w = append(w, fmt.Sprintf("pipeline %s: step %d: relay job %s: %v", pn, i+1, s.Relay, bad))
-			case j != nil && !slices.Contains(j.Pipelines, pn):
-				w = append(w, fmt.Sprintf("pipeline %s: step %d: relay job %s does not list the pipeline in its pipelines", pn, i+1, s.Relay))
+			what, names := "job", s.Jobs
+			if s.Relay != "" {
+				what, names = "relay job", []string{s.Relay}
 			}
+			for _, j := range names {
+				used[j] = true
+				switch bad := jobs.Bad[j]; {
+				case !have[j]:
+					w = append(w, fmt.Sprintf("pipeline %s: step %d: %s %s has no file in %s", pn, i+1, what, j, dir))
+				case bad != nil && !errors.Is(bad, fs.ErrPermission):
+					w = append(w, fmt.Sprintf("pipeline %s: step %d: %s %s: %v", pn, i+1, what, j, bad))
+				}
+			}
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(jobs.OK)) {
+		if !used[name] {
+			w = append(w, fmt.Sprintf("%s: unused: no relay step and no jobs of a run step name the job", filepath.Join(dir, name+rund.JobExt)))
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(jobs.Bad)) {
+		if bad := jobs.Bad[name]; !used[name] && !errors.Is(bad, fs.ErrPermission) {
+			w = append(w, fmt.Sprintf("run.d job %s: %v", name, bad))
 		}
 	}
 	return w
@@ -138,16 +158,24 @@ func relayWarnings(cfg *config.Config, dir string) []string {
 
 // runRootWarning reports a root of run.yaml p that differs from the root
 // of cfg: lukd run compares the work path with it as written, so it
-// refuses every work directory of this lukd. A missing or unreadable p
-// gives no warning.
+// refuses every work directory of this lukd. It also reports a config of
+// p that is not the file of cfg: lukd run takes the jobs of the pipelines
+// from that file. A missing or unreadable p gives no warning.
 func runRootWarning(cfg *config.Config, p string) []string {
 	fi, err := os.Lstat(p)
 	if err != nil {
 		return nil
 	}
 	g, err := rund.LoadGlobal(p, fi.Sys().(*syscall.Stat_t).Uid)
-	if err != nil || g.Root == cfg.Root {
+	if err != nil {
 		return nil
 	}
-	return []string{fmt.Sprintf("%s: root %s is not the lukd root %s as written: lukd run refuses every work directory", p, g.Root, cfg.Root)}
+	var w []string
+	if g.Root != cfg.Root {
+		w = append(w, fmt.Sprintf("%s: root %s is not the lukd root %s as written: lukd run refuses every work directory", p, g.Root, cfg.Root))
+	}
+	if abs, err := filepath.Abs(cfg.Path); err == nil && g.Config != abs {
+		w = append(w, fmt.Sprintf("%s: config %s is not the checked configuration %s: lukd run takes the jobs of the pipelines from it", p, g.Config, abs))
+	}
+	return w
 }

@@ -1171,6 +1171,34 @@ func TestRelayStep(t *testing.T) {
 	}
 }
 
+// jobs names the jobs of lukd run the program of a run step may start
+// with luk-job run, tee or not.
+func TestRunStepJobs(t *testing.T) {
+	for step, want := range map[string]string{
+		"      - run: /opt/luk/x\n        jobs: [S3]\n":                     `step 1: jobs: "S3": invalid job name`,
+		"      - run: /opt/luk/x\n        jobs: [a/b]\n":                    `step 1: jobs: "a/b": invalid job name`,
+		"      - run: /opt/luk/x\n        jobs: [a, b, a]\n":                `step 1: jobs: a listed twice`,
+		"      - relay: s3-upload\n        jobs: [s3-upload]\n":             "step 1: jobs needs run",
+		"      - encrypt: {key: [robert@example.com]}\n        jobs: [a]\n": "step 1: jobs needs run",
+	} {
+		src := strings.Replace(good, "    steps:\n      - store: drop\n", "    steps:\n"+step+"      - store: drop\n", 1)
+		_, err := Parse([]byte(src))
+		if err == nil || !strings.Contains(err.Error(), "pipeline drop: ") || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want %q, got %v", step, want, err)
+		}
+	}
+	for _, step := range []string{"      - run: /opt/luk/x\n        jobs: [s3-upload, notify.v2_x]\n", "      - run: /opt/luk/x\n        tee: true\n        jobs: [s3-upload]\n"} {
+		src := strings.Replace(good, "    steps:\n      - store: drop\n", "    steps:\n"+step+"      - store: drop\n", 1)
+		c, err := Parse([]byte(src))
+		if err != nil {
+			t.Fatalf("%q: %v", step, err)
+		}
+		if j := c.Pipeline["drop"].Steps[0].Jobs; len(j) == 0 || j[0] != "s3-upload" {
+			t.Fatalf("%q: jobs %v", step, j)
+		}
+	}
+}
+
 func TestRunStepEnvReservesLUK(t *testing.T) {
 	src := strings.Replace(good, "    steps:\n      - store: drop\n", "    steps:\n      - run: /opt/luk/x\n        env: {LUK_TAGS: x, LUKE: y}\n      - store: drop\n", 1)
 	_, err := Parse([]byte(src))

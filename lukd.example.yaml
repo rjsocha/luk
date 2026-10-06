@@ -191,11 +191,12 @@ pipeline:
   #   steps:
   #     - run: /opt/luk/s3copy
   #       tee: true             # only consumes the set: out/ stays empty, the next step gets the same files
+  #       jobs: [s3-upload]     # jobs of lukd run (/etc/site/lukd/run.d) the program may start with luk-job run
   #     - store: archive
   # s3upload:
   #   endpoint: [backup]
   #   steps:
-  #     - relay: s3-upload        # lukd run runs job s3-upload (/etc/site/lukd/run.d/s3-upload.yaml) on the set; the next step gets the same files
+  #     - relay: s3-upload        # lukd run runs job s3-upload (/etc/site/lukd/run.d/s3-upload.yaml) on the set, allowed by this step; the next step gets the same files
   #     - store: archive
   # sealed:                     # the built-in encrypt step (needs gpg below)
   #   endpoint: [backup]

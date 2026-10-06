@@ -107,12 +107,14 @@ func rootCmd() *cobra.Command {
 			"config.yaml, config.d, ssh.d, the tls files, the eab key file, gpg.keys and\n" +
 			"the passwords. The part that reads the files of the service user (running\n" +
 			"state, storage bases) then runs again as the owner of the root.\n" +
-			"A relay step whose job has no file in " + rund.DefaultJobs + " is a warning when\n" +
-			"that directory is readable, and so is one whose readable job file does not\n" +
-			"load (with the reason) or does not list the pipeline in its pipelines.\n" +
-			"Run as root, a root in " + rund.DefaultConfig + " that is not the root of\n" +
-			"the configuration as written is a warning (lukd run would refuse every work\n" +
-			"directory).",
+			"A relay step or a jobs entry of a run step whose job has no file in\n" +
+			rund.DefaultJobs + " is a warning when that directory is readable, and so is\n" +
+			"one whose readable job file does not load (with the reason), a job no relay\n" +
+			"step and no jobs name (unused) and any other readable job file that does not\n" +
+			"load. Run as root, a root in " + rund.DefaultConfig + " that is not the root\n" +
+			"of the configuration as written is a warning (lukd run would refuse every work\n" +
+			"directory), and so is a config there that is not the checked file (lukd run\n" +
+			"takes the jobs of the pipelines from it).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(cfgPath)

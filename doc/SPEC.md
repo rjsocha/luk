@@ -2445,9 +2445,11 @@ and `ssh.d/ca/`):
   `limits.channel.*` and `limits.uploads.*` are positive;
 - `run` is an absolute path; `tee` only on a `run` step (`tee needs
   run`); `relay` is a job name (`[a-z0-9][a-z0-9._-]*`, at most 64
-  bytes) and takes no `tee` or `env` (`relay takes no tee or env`); an
-  `env` name of a `run` step does not start with `LUK_` (`env.<name>:
-  LUK_* names are reserved`);
+  bytes) and takes no `tee` or `env` (`relay takes no tee or env`);
+  `jobs` only on a `run` step, with or without `tee` (`jobs needs
+  run`), each a job name (`jobs: "<job>": invalid job name`) listed
+  once (`jobs: <job> listed twice`); an `env` name of a `run` step does
+  not start with `LUK_` (`env.<name>: LUK_* names are reserved`);
 - `queue.concurrency` and `timeout` are not negative, `queue.order` is
   not negative and needs `queue.group`, `queue.group` does not start
   with a dot or contain a slash; the pipeline key `concurrency` is an
@@ -2631,11 +2633,16 @@ A pipeline is a list of steps working on a set of files:
   the set somewhere (an upload to S3, a copy to another host) and must
   leave `out/` empty; the next step gets the same file set it got (the
   files and their per-file meta). It may be the last step.
+- `jobs: [<job>, ...]` on a `run` step (with or without `tee`): the jobs
+  of `lukd run` its program may start with `luk-job run --job` (see
+  Service, Jobs with other users). `lukd run` runs a job only for the
+  pipelines that list it here or relay to it.
 - `relay: <job>` - a consumer run by another user: lukd asks `lukd run`
   to run the admin-allowlisted job `<job>` on the step work directory
   (see Service, Jobs with other users), like a `tee` run step whose
-  program is `luk-job run --job <job>`, without a script. The next step
-  gets the same file set; it may be the last step.
+  program is `luk-job run --job <job>` and whose `jobs` is `[<job>]`,
+  without a script. The next step gets the same file set; it may be the
+  last step.
 - `store: <storage>` or `store: [a, b]` - writes the current set to the
   storages (tee); the set passes on unchanged.
 
@@ -3056,7 +3063,7 @@ passed by flags only. Errors go to stderr with exit 1.
 - `luk-job run --job NAME [--socket PATH]`: asks `lukd run`
   (default socket `/run/luk/run.sock`) to run the admin-allowlisted
   job NAME as its own user on the work directory (see Service, Jobs with
-  other users), passing on the metadata variables of its own environment
+  other users; the `run` step must list NAME in `jobs`), passing on the metadata variables of its own environment
   (see Step environment). The job's stdout and stderr are relayed to
   luk-job's stdout and stderr and luk-job exits with the job's exit status; a
   refused request, a connection or protocol error exits 1 with a message.
@@ -4504,6 +4511,10 @@ work directory. No polkit and no sudo are involved.
     when it is not.
   - `peer`: the only user allowed to connect (`SO_PEERCRED` of the
     connection); default the owner of `root`.
+  - `config`: the main file of the lukd configuration, an absolute
+    path; default `/etc/site/lukd/config.yaml`. It decides which
+    pipelines may run a job (see Pipelines of a job below); `lukd
+    check` run as root warns when it is not the checked file.
 - Jobs: `/etc/site/lukd/run.d/<job>.yaml`, one job per file
   (`deploy/run.d/s3-upload.yaml.example`). The job name is the file base
   name, `[a-z0-9][a-z0-9._-]*`. Files not ending in `.yaml`, dotfiles and
@@ -4546,17 +4557,37 @@ work directory. No polkit and no sudo are involved.
     `1h`.
   - `env`: fixed environment. Every `LUK_*` name is reserved (a
     config error): lukd run sets them, see Environment and state below.
-  - `pipelines` (required): the pipelines the job runs for, valid
-    pipeline names (at most 128 bytes). A request whose work directory
-    belongs to another pipeline is refused (`job <job>: pipeline <p> not
-    allowed`) before the work directory is looked at and before any
-    lock, state directory or dynamic user exists for it, so `luk`
-    cannot make root create them for names of its choosing. List the
-    pipelines whose `relay` step names the job and those whose `run`
-    programs call it with `luk-job run`.
+  - `pipelines`: removed, a config error of the job (`pipelines:
+    removed: list the job in jobs of the run step of the lukd
+    configuration, a relay step allows its own job`); the pipelines of
+    a job come from the lukd configuration (see Pipelines of a job).
   - `state` (optional): `locked` or `shared`, a state directory kept
     between runs, one per job and pipeline; absent means none. See
     Environment and state below.
+- Pipelines of a job: the pipelines of the lukd configuration with a
+  step `relay: <job>` and those with a `run` step whose `jobs` lists
+  `<job>`. lukd run reads them per connection, and only when the
+  request gets that far, from the `config` of `run.yaml` and the
+  `*.yaml` of `config.d` next to it (dotfiles left out), parsing only
+  `pipeline.<name>.steps[]` (`run`, `relay`, `jobs`) and nothing the
+  files name (keys, passwords); the rest of the configuration is
+  lukd's to validate. A request whose work directory belongs to another
+  pipeline is refused (`job <job>: pipeline <p> not allowed`) before
+  the work directory is looked at and before any lock, state directory
+  or dynamic user exists for it, so `luk` cannot make root create them
+  for names of its choosing. The files are read as the run.d files are:
+  owned by root, not writable by group or others, regular (opened with
+  `O_NOFOLLOW|O_NONBLOCK`, so a symlink or a FIFO is refused), at most
+  1 MiB each, at most 256 snippets, `config.d` a directory (not a
+  symlink) with the same owner and mode rules, and every directory from
+  `/` down to it as above `run.d`. A missing main file (or a missing
+  directory above it) allows no pipeline. A refused file, a malformed
+  one (YAML that does not parse, a `relay` or `jobs` of the wrong type,
+  a second document) or a pipeline defined in two files refuses the
+  whole configuration: no pipeline may run a job, and the reason goes
+  to the journal. The files are the ones on disk, not the configuration
+  lukd runs with: an edit counts at the next connection, before a
+  reload of lukd.
 - Request flow: `luk-job run --job NAME` connects and sends one JSON
   line `{"job": NAME, "work": <work>, "env": {NAME: value, ...}}`: valid
   UTF-8, at most 32 KiB with the newline, exactly one flat object
@@ -4574,7 +4605,7 @@ work directory. No polkit and no sudo are involved.
     pipeline name, `[A-Za-z0-9_.-]` not starting with a dot or a dash, at
     most 128 bytes, the step a decimal number from 1 without leading
     zeros), without a control character, white space, `$` or `%`. Then
-    the pipeline must be listed in the job's `pipelines`.
+    the pipeline must be one of the pipelines of the job (above).
   - On disk: `<root>` is opened as configured (it may be a symlink, it
     is root's setting); `work`, `<id>`, `<pipeline>` and `<step>` are
     opened one by one below it with `O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK`,
@@ -4721,7 +4752,6 @@ credentials:
 timeout: 1h
 env:
   BUCKET: example-backup
-pipelines: [offsite]
 ```
 
 The job (`contrib/examples/s3-upload.sh`, installed as
@@ -4743,7 +4773,18 @@ for f in $(luk-job inputs --work "$work"); do
 done
 ```
 
-The `run` step program:
+The `run` step that lists the job:
+
+```yaml
+pipeline:
+  offsite:
+    endpoint: [backup]
+    steps:
+      - run: /opt/luk/offsite
+        jobs: [s3-upload]
+```
+
+Its program (`/opt/luk/offsite`):
 
 ```bash
 #!/bin/bash
@@ -4794,12 +4835,13 @@ pipeline:
   names stay those of the steps before it), but a link replace and the
   transfer dedup (store steps only) exclude it, since a delivery cannot
   be undone.
-- `lukd check` warns about a relayed job without a file in
-  `/etc/site/lukd/run.d` when it can read that directory, about one
-  whose file it can read but that does not load (with the reason, e.g.
-  `pipelines: required`), and about one whose file does not list the
-  pipeline in `pipelines`. It never requires any of them: run.d is
-  root's and changes without a reload.
+- `lukd check` warns about a relayed job or a job in `jobs` of a `run`
+  step without a file in `/etc/site/lukd/run.d` when it can read that
+  directory, about one whose file it can read but that does not load
+  (with the reason, e.g. `pipelines: removed`), about a valid job that
+  no `relay` step and no `jobs` name (`unused`) and about any other
+  readable job file that does not load. It never requires any of them:
+  run.d is root's and changes without a reload.
 
 `luk-job run` stays for `run` programs that call several jobs or do work
 around them, like the program above that passes its input on with

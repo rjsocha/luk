@@ -55,9 +55,12 @@ var (
 type Global struct {
 	Root string `yaml:"root"`
 	Peer string `yaml:"peer"`
+	// Config is the main file of the lukd configuration (see LoadRelays).
+	Config string `yaml:"config"`
 }
 
-// Job is one file of run.d.
+// Job is one file of run.d. The pipelines that may run it come from the
+// lukd configuration (see LoadJobPipelines).
 type Job struct {
 	User        string            `yaml:"user"`
 	Group       string            `yaml:"group"`
@@ -67,7 +70,9 @@ type Job struct {
 	Timeout     config.Duration   `yaml:"timeout"`
 	Env         map[string]string `yaml:"env"`
 	State       string            `yaml:"state"`
-	Pipelines   []string          `yaml:"pipelines"`
+	// RemovedPipelines catches the key replaced by the jobs of the run
+	// steps, so the error names the new place.
+	RemovedPipelines any `yaml:"pipelines"`
 }
 
 // checkSafe refuses a file or directory not owned by owner or writable by
@@ -117,8 +122,9 @@ func CheckParents(dir, top string, owner uint32) error {
 	return nil
 }
 
-// readSafe reads a regular file (no symlink) that passes checkSafe.
-func readSafe(p string, owner uint32) ([]byte, error) {
+// readSafe reads a regular file (no symlink) of at most max bytes that
+// passes checkSafe.
+func readSafe(p string, owner uint32, max int) ([]byte, error) {
 	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
@@ -134,9 +140,9 @@ func readSafe(p string, owner uint32) ([]byte, error) {
 	if err := checkSafe(fi, owner); err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
-	b, err := io.ReadAll(io.LimitReader(f, maxFile+1))
-	if err == nil && len(b) > maxFile {
-		err = fmt.Errorf("%s: larger than %d bytes", p, maxFile)
+	b, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
+	if err == nil && len(b) > max {
+		err = fmt.Errorf("%s: larger than %d bytes", p, max)
 	}
 	return b, err
 }
@@ -144,7 +150,7 @@ func readSafe(p string, owner uint32) ([]byte, error) {
 // LoadGlobal reads run.yaml; a missing file gives the defaults.
 func LoadGlobal(p string, owner uint32) (*Global, error) {
 	g := &Global{}
-	b, err := readSafe(p, owner)
+	b, err := readSafe(p, owner, maxFile)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
@@ -161,6 +167,13 @@ func LoadGlobal(p string, owner uint32) (*Global, error) {
 		return nil, fmt.Errorf("%s: root %q: not absolute", p, g.Root)
 	}
 	g.Root = filepath.Clean(g.Root)
+	if g.Config == "" {
+		g.Config = DefaultLukdConfig
+	}
+	if !filepath.IsAbs(g.Config) {
+		return nil, fmt.Errorf("%s: config %q: not absolute", p, g.Config)
+	}
+	g.Config = filepath.Clean(g.Config)
 	return g, nil
 }
 
@@ -235,7 +248,7 @@ func LoadJobs(dir string, owner uint32) (*Jobs, error) {
 }
 
 func loadJob(p string, owner uint32) (*Job, error) {
-	b, err := readSafe(p, owner)
+	b, err := readSafe(p, owner, maxFile)
 	if err != nil {
 		return nil, err
 	}
@@ -289,13 +302,8 @@ func (j *Job) validate() error {
 	if time.Duration(j.Timeout) >= config.MaxPipelineTimeout {
 		bad("timeout: must be under %v", config.MaxPipelineTimeout)
 	}
-	if len(j.Pipelines) == 0 {
-		bad("pipelines: required")
-	}
-	for _, p := range j.Pipelines {
-		if !config.ValidPipelineName(p) {
-			bad("pipelines: %q: invalid pipeline name", p)
-		}
+	if j.RemovedPipelines != nil {
+		bad("pipelines: removed: list the job in jobs of the run step of the lukd configuration, a relay step allows its own job")
 	}
 	if j.State != "" && j.State != StateLocked && j.State != StateShared {
 		bad("state %q: want %s or %s", j.State, StateLocked, StateShared)
