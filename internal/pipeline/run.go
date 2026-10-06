@@ -186,7 +186,7 @@ func relayStep(j Job, p *config.Pipeline, step int, s config.Step, set []file, d
 		case <-ctx.Done():
 		}
 	}()
-	err = runproto.Ask(ctx, runSocket, s.Relay, dir, w, w)
+	err = runproto.Ask(ctx, runSocket, runproto.Request{Job: s.Relay, Work: dir}, w, w)
 	if err != nil {
 		select {
 		case <-interrupted:

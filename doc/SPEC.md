@@ -4483,9 +4483,13 @@ work directory. No polkit and no sudo are involved.
     between runs, one per job and pipeline; absent means none. See
     Environment and state below.
 - Request flow: `luk-job run --job NAME` connects and sends one JSON
-  line (at most 4 KiB) `{"job": NAME, "work": <work>}`. `lukd run`
-  refuses a peer other than `peer` (closing without an answer), then a
-  request that is malformed, names an unknown or disabled job, or whose
+  line `{"job": NAME, "work": <work>, "env": {NAME: value, ...}}`: valid
+  UTF-8, at most 32 KiB with the newline, exactly one flat object
+  (`job` and `work` strings, both required, `env` an optional object of
+  at most 16 string values; an unknown or repeated key, a nested or
+  non-string value and data after the object make it malformed).
+  `lukd run` refuses a peer other than `peer` (closing without an
+  answer), then a request that is malformed, names an unknown or disabled job, or whose
   work directory, after resolving symlinks, is not a step work directory
   `<root>/work/<id>/<pipeline>/<step>` (exactly these three levels, the
   id a queue entry id `YYYYMMDDTHHMMSSZ-<8 hex digits>`, the pipeline a

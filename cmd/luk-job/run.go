@@ -18,7 +18,7 @@ func (c exitCode) Error() string { return fmt.Sprintf("exit status %d", int(c)) 
 // with the job's exit status. A cancelled ctx closes the connection, which
 // makes lukd run stop the job.
 func askRun(ctx context.Context, socket, job, work string, stdout, stderr io.Writer) error {
-	err := runproto.Ask(ctx, socket, job, work, stdout, stderr)
+	err := runproto.Ask(ctx, socket, runproto.Request{Job: job, Work: work}, stdout, stderr)
 	var ee runproto.ExitError
 	if errors.As(err, &ee) {
 		return exitCode(ee)
