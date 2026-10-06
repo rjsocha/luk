@@ -35,8 +35,16 @@ import (
 	"luk/internal/wire"
 )
 
-// DefaultRoot is the base of relative paths when `root` is absent.
+// DefaultRoot is `root` when absent.
 const DefaultRoot = "/var/lib/luk"
+
+// DataName and RootName are the two entries of root (see SPEC, Service,
+// State): data holds everything lukd writes and is the base of relative
+// paths; root is root's, the workspaces of lukd run.
+const (
+	DataName = "data"
+	RootName = "root"
+)
 
 // DefaultNonces is the directory of the nonce cache when auth.nonces is
 // absent: on the tmpfs /run, created by tmpfiles.d.
@@ -1275,14 +1283,16 @@ func (c *Config) validate() []error {
 	} else {
 		c.Root = filepath.Clean(c.Root)
 	}
-	// resolve anchors a relative path at root and rejects one that escapes it.
+	// resolve anchors a relative path at <root>/data and rejects one that
+	// escapes it.
+	data := c.DataDir()
 	resolve := func(field, p string) string {
 		if p == "" || filepath.IsAbs(p) || !rootOK {
 			return p
 		}
-		full := filepath.Join(c.Root, p)
-		if rel, err := filepath.Rel(c.Root, full); err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
-			bad("%s: %q escapes root %s", field, p, c.Root)
+		full := filepath.Join(data, p)
+		if rel, err := filepath.Rel(data, full); err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+			bad("%s: %q escapes %s", field, p, data)
 			return p
 		}
 		return full
@@ -1947,6 +1957,7 @@ func (c *Config) validate() []error {
 	}
 	c.checkSecretPaths(bad)
 	c.checkQueuePaths(bad)
+	c.checkRootPart(bad)
 
 	owner := map[string]string{}
 	for _, name := range sortedKeys(c.Storage) {
@@ -2219,7 +2230,7 @@ func elementsMeet(x, y string) bool {
 func (c *Config) checkQueuePaths(bad func(string, ...any)) {
 	own := map[string]string{}
 	if filepath.IsAbs(c.Root) {
-		own[filepath.Join(c.Root, "acme")] = "the ACME cache"
+		own[filepath.Join(c.DataDir(), "acme")] = "the ACME cache"
 		own[c.GPGCacheDir()] = "the WKD key cache"
 	}
 	if filepath.IsAbs(c.Auth.Nonces) {
@@ -2264,6 +2275,41 @@ func (c *Config) checkQueuePaths(bad func(string, ...any)) {
 			if pb := c.Endpoint[b].Path; filepath.IsAbs(pb) && filepath.Clean(pa) != filepath.Clean(pb) && nested(pa, pb) {
 				bad("endpoint %s and %s: paths %s and %s nest", a, b, pa, pb)
 			}
+		}
+	}
+}
+
+// checkRootPart keeps every configured path out of <root>/root, the part
+// of the root that is root's.
+func (c *Config) checkRootPart(bad func(string, ...any)) {
+	dir := c.RootDir()
+	if dir == "" {
+		return
+	}
+	paths := map[string]string{"auth.nonces": c.Auth.Nonces, "gpg.keys": c.GPG.Keys}
+	for n, e := range c.Endpoint {
+		paths["endpoint."+n+".path"] = e.Path
+		if e.Secret != nil {
+			paths["endpoint."+n+".secret.path"] = e.Secret.Path
+		}
+	}
+	for n, s := range c.Storage {
+		paths["storage."+n+".base"] = s.Base
+	}
+	for n, l := range c.Listen {
+		if l.TLS != nil {
+			paths["listen."+n+".tls.cert"] = l.TLS.Cert
+			paths["listen."+n+".tls.key"] = l.TLS.Key
+			paths["listen."+n+".tls.eab.key_file"] = l.TLS.EAB.KeyFile
+		}
+	}
+	for _, k := range sortedKeys(paths) {
+		p := paths[k]
+		if !filepath.IsAbs(p) {
+			continue
+		}
+		if p := filepath.Clean(p); p == dir || strings.HasPrefix(p, dir+"/") {
+			bad("%s: %s lies in %s", k, p, dir)
 		}
 	}
 }
@@ -2532,7 +2578,7 @@ func (c *Config) GPGCacheDir() string {
 	if !filepath.IsAbs(c.Root) {
 		return ""
 	}
-	return filepath.Join(c.Root, "gpg-cache")
+	return filepath.Join(c.DataDir(), "gpg-cache")
 }
 
 // BcryptHash rewrites an htpasswd $2y$ hash to the $2a$ form Go reads.
@@ -2729,12 +2775,29 @@ func (c *Config) Warnings() []string {
 	return w
 }
 
+// DataDir is <root>/data; empty without an absolute root.
+func (c *Config) DataDir() string {
+	if !filepath.IsAbs(c.Root) {
+		return ""
+	}
+	return filepath.Join(c.Root, DataName)
+}
+
+// RootDir is <root>/root, root's part of the root; empty without an
+// absolute root.
+func (c *Config) RootDir() string {
+	if !filepath.IsAbs(c.Root) {
+		return ""
+	}
+	return filepath.Join(c.Root, RootName)
+}
+
 // WorkDir holds the run step work directories; empty without an absolute root.
 func (c *Config) WorkDir() string {
 	if !filepath.IsAbs(c.Root) {
 		return ""
 	}
-	return filepath.Join(c.Root, "work")
+	return filepath.Join(c.DataDir(), "work")
 }
 
 // nested reports whether one of the paths is equal to or inside the other.
@@ -2956,7 +3019,7 @@ func (c *Config) ACMECacheDir(directory string) string {
 		slug = u.Host + u.Path
 	}
 	slug = strings.Trim(nonSlug.ReplaceAllString(slug, "_"), "_.")
-	return filepath.Join(c.Root, "acme", slug)
+	return filepath.Join(c.DataDir(), "acme", slug)
 }
 
 var nonSlug = regexp.MustCompile(`[^A-Za-z0-9.-]+`)

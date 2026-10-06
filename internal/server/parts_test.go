@@ -389,7 +389,7 @@ func TestSecretUploadStagesInSecretQueue(t *testing.T) {
 	if filepath.Dir(pu.stage.Entry.Dir) != filepath.Join(vol, "queue") {
 		t.Fatalf("staged in %s", pu.stage.Entry.Dir)
 	}
-	if v := visible(t, filepath.Join(f.root, "q/drop")); len(v) != 0 {
+	if v := visible(t, filepath.Join(f.root, "data", "q/drop")); len(v) != 0 {
 		t.Fatalf("endpoint queue holds %v", v)
 	}
 	head, body := sendAll(t, c, []byte("s3cr3t"))
@@ -663,7 +663,7 @@ func TestUploadSessionGoneBeforeAttach(t *testing.T) {
 	c := chanOpen(t, srvURL, "/drop", pin)
 	head, body := c.op(t, c.putReq(t, f.user, fileMeta(content(100))), nil)
 	wantInner(t, "create in a dropped session", head, body, http.StatusNotFound)
-	if v := visible(t, filepath.Join(f.root, "q/drop")); len(v) != 0 {
+	if v := visible(t, filepath.Join(f.root, "data", "q/drop")); len(v) != 0 {
 		t.Fatalf("queue holds %v", v)
 	}
 	if n := openUploads(f); n != 0 {

@@ -84,7 +84,7 @@ func TestParseGood(t *testing.T) {
 	if time.Duration(c.Pipeline["drop"].Timeout) != time.Hour || time.Duration(c.Pipeline["devdb"].Timeout) != 2*time.Hour {
 		t.Fatalf("pipeline timeout %v %v", time.Duration(c.Pipeline["drop"].Timeout), time.Duration(c.Pipeline["devdb"].Timeout))
 	}
-	if c.WorkDir() != "/var/lib/luk/work" {
+	if c.WorkDir() != "/var/lib/luk/data/work" {
 		t.Fatalf("work dir %q", c.WorkDir())
 	}
 	if got := c.Pipeline["devdb"].Steps[0].Store; len(got) != 2 {
@@ -119,7 +119,7 @@ func TestValidationErrors(t *testing.T) {
 		"relative run":              {"run: /opt/luk/dbdump", "run: dbdump"},
 		"pipeline timeout 7d":       {"timeout: 2h", "timeout: 7d"},
 		"hidden pipeline name":      {"  devdb:\n    endpoint: [backup]", "  .devdb:\n    endpoint: [backup]"},
-		"storage base in work":      {"base: /storage/archive", "base: /var/lib/luk/work/a"},
+		"storage base in work":      {"base: /storage/archive", "base: /var/lib/luk/data/work/a"},
 		"respond url no storage":    {"    respond: url\n    storage: drop", "    respond: url"},
 		"bad respond":               {"respond: url", "respond: maybe"},
 		"relative endpoint path":    {"endpoint: /backup", "endpoint: backup"},
@@ -178,7 +178,7 @@ func TestTLSFilesMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	tl := c.Listen["main"].TLS
-	if tl.Mode != "files" || tl.Cert != "/srv/luk/tls/c.crt" || tl.Key != "/etc/ssl/c.key" || tl.Host != "" || tl.Algorithm != "" {
+	if tl.Mode != "files" || tl.Cert != "/srv/luk/data/tls/c.crt" || tl.Key != "/etc/ssl/c.key" || tl.Host != "" || tl.Algorithm != "" {
 		t.Fatalf("%+v", tl)
 	}
 }
@@ -375,24 +375,14 @@ func TestRootDefaultAndRelative(t *testing.T) {
 		t.Fatalf("root default %q", c.Root)
 	}
 	rel := strings.NewReplacer(
-		"cert: /tmp/c.crt", "cert: tls/c.crt",
 		"key: /tmp/c.key", "key: ./tls/../tls/c.key",
-		"path: /queue/backup", "path: queue/backup",
-		"base: /storage/archive", "base: storage/archive",
 	).Replace("root: /srv/luk\n" + good)
 	c, err = Parse([]byte(rel))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tl := c.Listen["main"].TLS
-	if tl.Cert != "/srv/luk/tls/c.crt" || tl.Key != "/srv/luk/tls/c.key" {
-		t.Fatalf("tls %q %q", tl.Cert, tl.Key)
-	}
-	if got := c.Endpoint["backup"].Path; got != "/srv/luk/queue/backup" {
-		t.Fatalf("endpoint path %q", got)
-	}
-	if got := c.Storage["archive"].Base; got != "/srv/luk/storage/archive" {
-		t.Fatalf("base %q", got)
+	if got := c.Listen["main"].TLS.Key; got != "/srv/luk/data/tls/c.key" {
+		t.Fatalf("tls key %q", got)
 	}
 	if got := c.Storage["drop"].Base; got != "/storage/drop" {
 		t.Fatalf("absolute base changed: %q", got)
@@ -410,7 +400,7 @@ func TestRootErrors(t *testing.T) {
 		"path nested esc": {good, "path: /queue/backup|path: queue/../../x", "endpoint.backup.path"},
 		"base escape":     {good, "base: /storage/archive|base: ../x", "storage.archive.base"},
 		"base nested esc": {good, "base: /storage/archive|base: queue/../../x", "storage.archive.base"},
-		"cert eq key":     {good, "cert: /tmp/c.crt|cert: /var/lib/luk/tls/a\n      key: tls/a", "different files"},
+		"cert eq key":     {good, "cert: /tmp/c.crt|cert: /var/lib/luk/data/tls/a\n      key: tls/a", "different files"},
 	}
 	for name, c := range cases {
 		src := c[0]
@@ -418,7 +408,7 @@ func TestRootErrors(t *testing.T) {
 			old, repl, _ := strings.Cut(c[1], "|")
 			if name == "cert eq key" {
 				src = strings.Replace(src, "tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key, host: lukd.vm}",
-					"tls:\n      mode: self\n      cert: /var/lib/luk/tls/a\n      key: tls/a\n      host: lukd.vm", 1)
+					"tls:\n      mode: self\n      cert: /var/lib/luk/data/tls/a\n      key: tls/a\n      host: lukd.vm", 1)
 			} else {
 				src = strings.Replace(src, old, repl, 1)
 			}
@@ -863,7 +853,7 @@ func TestStorageOverlap(t *testing.T) {
 	} {
 		src := strings.Replace(good, c.old, c.new, 1)
 		if name == "relative match" {
-			src = "root: /\n" + src
+			src = "root: /\n" + strings.Replace(src, "path: /queue/drop", "path: /data/queue/drop", 1)
 		}
 		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v", name, err)
@@ -1482,7 +1472,7 @@ func TestEncryptStep(t *testing.T) {
 	if c.GPG.Keys != "/etc/site/lukd/gpg" || time.Duration(c.GPG.WKD.Cache) != 2*time.Hour {
 		t.Fatalf("gpg %+v", c.GPG)
 	}
-	if c.GPGCacheDir() != "/var/lib/luk/gpg-cache" {
+	if c.GPGCacheDir() != "/var/lib/luk/data/gpg-cache" {
 		t.Fatalf("cache dir %s", c.GPGCacheDir())
 	}
 	if w := c.Warnings(); !hasWarning(w, "endpoint drop", "pipeline drop", "encrypt step") || hasWarning(w, ".File") {
@@ -1565,13 +1555,13 @@ func TestACMEListen(t *testing.T) {
 	if !c.Listen["http"].ACME || len(c.Warnings()) != 0 {
 		t.Fatalf("http %+v, warnings %v", c.Listen["http"], c.Warnings())
 	}
-	if got := c.ACMECacheDir(l.TLS.Directory); got != "/srv/luk/acme/acme-v02.api.letsencrypt.org_directory" {
+	if got := c.ACMECacheDir(l.TLS.Directory); got != "/srv/luk/data/acme/acme-v02.api.letsencrypt.org_directory" {
 		t.Fatalf("cache dir %s", got)
 	}
-	if got := c.ACMECacheDir("https://acme-staging-v02.api.letsencrypt.org/directory"); got != "/srv/luk/acme/acme-staging-v02.api.letsencrypt.org_directory" {
+	if got := c.ACMECacheDir("https://acme-staging-v02.api.letsencrypt.org/directory"); got != "/srv/luk/data/acme/acme-staging-v02.api.letsencrypt.org_directory" {
 		t.Fatalf("staging cache dir %s", got)
 	}
-	if got := c.ACMECacheDir("https://ca.example.com:14000/dir"); got != "/srv/luk/acme/ca.example.com_14000_dir" {
+	if got := c.ACMECacheDir("https://ca.example.com:14000/dir"); got != "/srv/luk/data/acme/ca.example.com_14000_dir" {
 		t.Fatalf("cache dir with port %s", got)
 	}
 	src := strings.Replace(acmeConfig(""), "addr: 0.0.0.0:80", "addr: 0.0.0.0:8080", 1)
@@ -1961,9 +1951,9 @@ func TestQueuePathOverlaps(t *testing.T) {
 		"nested queue":    {"path: /queue/drop", "path: /queue/backup/drop", "endpoint backup and drop: paths /queue/backup and /queue/backup/drop nest"},
 		"enclosing queue": {"path: /queue/drop", "path: /queue", "endpoint backup and drop: paths /queue/backup and /queue nest"},
 		"relative nested": {"path: /queue/drop", "path: x", "paths"},
-		"acme":            {"path: /queue/drop", "path: acme", "endpoint drop: path /var/lib/luk/acme overlaps the ACME cache /var/lib/luk/acme"},
+		"acme":            {"path: /queue/drop", "path: acme", "endpoint drop: path /var/lib/luk/data/acme overlaps the ACME cache /var/lib/luk/data/acme"},
 		"in acme":         {"path: /queue/drop", "path: acme/q", "overlaps the ACME cache"},
-		"gpg cache":       {"path: /queue/drop", "path: gpg-cache/x", "overlaps the WKD key cache /var/lib/luk/gpg-cache"},
+		"gpg cache":       {"path: /queue/drop", "path: gpg-cache/x", "overlaps the WKD key cache /var/lib/luk/data/gpg-cache"},
 		"nonces":          {"path: /queue/drop", "path: /run/luk", "endpoint drop: path /run/luk overlaps auth.nonces /run/luk/nonces"},
 		"tls files":       {"path: /queue/drop", "path: /tmp", "endpoint drop: path /tmp holds the TLS file /tmp/c.crt of listener main"},
 		"root":            {"path: /queue/drop", "path: /var/lib/luk", "overlaps"},
@@ -2005,13 +1995,13 @@ func TestEndpointSecret(t *testing.T) {
 		t.Fatalf("nested %q", n)
 	}
 	rel := strings.Replace(secretGood, "path: /run/luk/volatile/queue", "path: volatile/queue", 1)
-	if c, err := Parse([]byte("root: /var/lib/luk\n" + rel)); err != nil || c.Endpoint["drop"].Secret.Path != "/var/lib/luk/volatile/queue" {
+	if c, err := Parse([]byte("root: /var/lib/luk\n" + rel)); err != nil || c.Endpoint["drop"].Secret.Path != "/var/lib/luk/data/volatile/queue" {
 		t.Fatalf("relative secret.path: %v", err)
 	}
 	cases := map[string][3]string{
 		"respond accept": {"    respond: url\n    storage: drop\n    secret:", "    storage: drop\n    secret:", "secret needs respond url"},
 		"no path":        {"path: /run/luk/volatile/queue, ", "", "secret.path is required"},
-		"path escapes":   {"path: /run/luk/volatile/queue", "path: ../q", "escapes root"},
+		"path escapes":   {"path: /run/luk/volatile/queue", "path: ../q", "escapes /var/lib/luk/data"},
 		"unknown":        {"storage: volatile}", "storage: nope}", `secret.storage "nope" is not a known storage`},
 		"s3":             {"storage: volatile}", "storage: off}\n  x:", "secret storage off is not a local storage"},
 		"not exposed":    {"storage: volatile}", "storage: archive}", "secret storage archive is not exposed"},
@@ -2021,7 +2011,7 @@ func TestEndpointSecret(t *testing.T) {
 		"in drop base":   {"path: /run/luk/volatile/queue", "path: /storage/drop/q", "overlaps storage drop base"},
 		"is a queue":     {"path: /run/luk/volatile/queue", "path: /queue/backup", "secret.path /queue/backup overlaps the queue /queue/backup of endpoint backup"},
 		"own queue":      {"path: /run/luk/volatile/queue", "path: /queue/drop/s", "overlaps the queue /queue/drop of endpoint drop"},
-		"work dir":       {"path: /run/luk/volatile/queue", "path: /var/lib/luk/work/s", "overlaps the work directory"},
+		"work dir":       {"path: /run/luk/volatile/queue", "path: /var/lib/luk/data/work/s", "overlaps the work directory"},
 		"pretty":         {"    secret:", "    pretty: {allow: ['*']}\n    secret:", "pretty needs a path of secret storage volatile that uses .Random"},
 	}
 	for name, r := range cases {

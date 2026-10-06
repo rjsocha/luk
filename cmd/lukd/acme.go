@@ -49,22 +49,22 @@ func acmeCmd(cfgPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "acme",
 		Short: "Certificates of the tls mode acme listeners",
-		Long: "Certificates of the tls mode acme listeners, in the caches under <root>/acme/.\n" +
+		Long: "Certificates of the tls mode acme listeners, in the caches under <root>/data/acme/.\n" +
 			"The running receive role renews and swaps them itself; these commands talk to\n" +
 			"it only through files in the cache directories (no SIGHUP needed). Run as\n" +
-			"root they run again as the owner of <root>/acme (the service user), or of\n" +
-			"<root> while <root>/acme does not exist.",
+			"root they run again as the owner of <root>/data/acme (the service user), or\n" +
+			"of <root>/data while <root>/data/acme does not exist.",
 		PersistentPreRunE: func(*cobra.Command, []string) error {
 			cfg, err := config.Load(*cfgPath)
 			if err != nil {
 				return err
 			}
 			// Without the cache yet, root still runs them as the owner of
-			// root: it must not create or write the cache itself, under
-			// a root the service user owns.
-			dir := filepath.Join(cfg.Root, "acme")
+			// <root>/data: it must not create or write the cache itself,
+			// under a directory the service user owns.
+			dir := filepath.Join(cfg.DataDir(), "acme")
 			if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
-				dir = cfg.Root
+				return asServiceUser("lukd tls acme", cfg)
 			}
 			return asOwner("lukd tls acme", dir)
 		},
@@ -84,7 +84,7 @@ func acmeCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			running, err := server.RoleRunning(cfg.Root, "receive")
+			running, err := server.RoleRunning(cfg.DataDir(), "receive")
 			if err != nil {
 				return err
 			}
@@ -200,10 +200,10 @@ func acmeListener(cfg *config.Config, host string) (*config.Listen, error) {
 }
 
 // acmeRows reads every certificate of every cache directory under
-// <root>/acme. The daemon state of status.json is added when the receive
+// <root>/data/acme. The daemon state of status.json is added when the receive
 // role runs; a file left by a stopped one is ignored.
 func acmeRows(cfg *config.Config, running bool, now time.Time) ([]acmeRow, error) {
-	base := filepath.Join(cfg.Root, "acme")
+	base := filepath.Join(cfg.DataDir(), "acme")
 	fi, err := os.Lstat(base)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -326,7 +326,7 @@ func renewACME(cfg *config.Config, host string, timeout time.Duration, w io.Writ
 	if err != nil {
 		return err
 	}
-	running, err := server.RoleRunning(cfg.Root, "receive")
+	running, err := server.RoleRunning(cfg.DataDir(), "receive")
 	if err != nil {
 		return err
 	}
@@ -421,7 +421,7 @@ func revokeACME(cfg *config.Config, host string, reason acme.CRLReasonCode, yes 
 		return err
 	}
 	fmt.Fprintf(w, "%s: removed %s\n", host, p)
-	running, err := server.RoleRunning(cfg.Root, "receive")
+	running, err := server.RoleRunning(cfg.DataDir(), "receive")
 	if err != nil {
 		return err
 	}

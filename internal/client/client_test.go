@@ -82,7 +82,7 @@ expose:
 		t.Fatal(err)
 	}
 	for _, d := range []string{"q/backup", "q/drop"} {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
+		if err := os.MkdirAll(filepath.Join(root, "data", d), 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}

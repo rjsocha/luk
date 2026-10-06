@@ -35,7 +35,7 @@ func tooMany(t *testing.T, f *fixture, signer ssh.Signer, body []byte) {
 }
 
 func (f *fixture) owned(content []byte, owner string) int {
-	l := store.Local{Base: filepath.Join(f.root, "s/drop"), Hardlink: true}
+	l := store.Local{Base: filepath.Join(f.root, "data", "s/drop"), Hardlink: true}
 	return l.Owned(fileMeta(content).SHA256, owner)
 }
 

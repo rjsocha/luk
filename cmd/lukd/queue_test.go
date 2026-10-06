@@ -13,7 +13,7 @@ import (
 
 func failureRecord(t *testing.T, root, id string, outcomes ...pipeline.Outcome) string {
 	t.Helper()
-	dir := filepath.Join(root, "q/backup/failed")
+	dir := filepath.Join(root, "data", "q/backup/failed")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}

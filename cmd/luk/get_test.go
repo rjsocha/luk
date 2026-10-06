@@ -55,7 +55,7 @@ func newPrivateEnv(t *testing.T) *privateEnv {
 	var pub, otherPub string
 	e.key, pub = newKeyFile(t)
 	e.other, otherPub = newKeyFile(t)
-	crt, key := filepath.Join(e.root, "tls/s.crt"), filepath.Join(e.root, "tls/s.key")
+	crt, key := filepath.Join(e.root, "data/tls/s.crt"), filepath.Join(e.root, "data/tls/s.key")
 	var err error
 	if e.pin, err = tlsself.Generate(crt, key, "luk.test", tlsself.ECDSAP256); err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func (e *privateEnv) sidecar(t *testing.T, link string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Join(e.root, "s/drop/.db/meta", path.Base(u.Path)+".json")
+	return filepath.Join(e.root, "data/s/drop/.db/meta", path.Base(u.Path)+".json")
 }
 
 func TestGetPrivate(t *testing.T) {
@@ -239,7 +239,7 @@ func TestGetOnceAndFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := filepath.Join(e.root, "s/drop/file", path.Base(u.Path))
+	data := filepath.Join(e.root, "data/s/drop/file", path.Base(u.Path))
 	if err := os.Chmod(data, 0o600); err != nil {
 		t.Fatal(err)
 	}

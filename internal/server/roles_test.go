@@ -39,6 +39,9 @@ type roleEnv struct {
 func newRoleEnv(t *testing.T) *roleEnv {
 	t.Helper()
 	e := &roleEnv{dir: t.TempDir(), root: t.TempDir(), addr: freePort(t), user: newSigner(t)}
+	if err := os.Mkdir(filepath.Join(e.root, "data"), 0o750); err != nil {
+		t.Fatal(err)
+	}
 	text := fmt.Sprintf(`
 root: %s
 listen: {main: {addr: "%s", public: "http://%s"}}
@@ -169,19 +172,19 @@ func TestReceiveQueuesWithoutRunning(t *testing.T) {
 	var logs syncBuf
 	e.start(t, Receive, &logs)
 	e.upload(t, "a.txt", false, "hello")
-	qdir := filepath.Join(e.root, "q/drop")
+	qdir := filepath.Join(e.root, "data", "q/drop")
 	ents := entries(t, qdir)
 	if len(ents) != 1 || !exists(filepath.Join(qdir, ents[0], "meta.json")) || !exists(filepath.Join(qdir, ents[0], "payload")) {
 		t.Fatalf("queue %v", ents)
 	}
 	time.Sleep(300 * time.Millisecond)
-	if exists(filepath.Join(e.root, "s/drop/file/a.txt")) {
+	if exists(filepath.Join(e.root, "data", "s/drop/file/a.txt")) {
 		t.Fatal("receive ran the pipeline")
 	}
 	if len(entries(t, qdir)) != 1 {
 		t.Fatal("queue entry gone")
 	}
-	if exists(status.Path(e.root)) {
+	if exists(status.Path(e.cfg.DataDir())) {
 		t.Fatal("receive wrote status.json")
 	}
 }
@@ -189,7 +192,7 @@ func TestReceiveQueuesWithoutRunning(t *testing.T) {
 // commit puts an accepted entry for the drop pipeline into the queue.
 func (e *roleEnv) commit(t *testing.T, id, file, body string) {
 	t.Helper()
-	qdir := filepath.Join(e.root, "q/drop")
+	qdir := filepath.Join(e.root, "data", "q/drop")
 	if err := os.MkdirAll(qdir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +211,7 @@ func (e *roleEnv) commit(t *testing.T, id, file, body string) {
 func TestProcessPicksUpCommitted(t *testing.T) {
 	fastPickup(t)
 	e := newRoleEnv(t)
-	half := filepath.Join(e.root, "q/drop/half")
+	half := filepath.Join(e.root, "data", "q/drop/half")
 	if err := os.MkdirAll(half, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -220,18 +223,18 @@ func TestProcessPicksUpCommitted(t *testing.T) {
 	start := time.Now()
 	e.commit(t, "id-1", "kept.txt", "payload")
 	waitFor(t, "stored", func() bool {
-		b, err := os.ReadFile(filepath.Join(e.root, "s/drop/file/kept.txt"))
+		b, err := os.ReadFile(filepath.Join(e.root, "data", "s/drop/file/kept.txt"))
 		return err == nil && string(b) == "payload"
 	})
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("picked up after %s", d)
 	}
-	waitFor(t, "queue entry removed", func() bool { return !exists(filepath.Join(e.root, "q/drop/id-1")) })
+	waitFor(t, "queue entry removed", func() bool { return !exists(filepath.Join(e.root, "data", "q/drop/id-1")) })
 	if !exists(half) {
 		t.Fatal("process removed an entry being received")
 	}
 	waitFor(t, "status", func() bool {
-		st, _, err := status.Open(status.Path(e.root))
+		st, _, err := status.Open(status.Path(e.cfg.DataDir()))
 		if err != nil {
 			return false
 		}
@@ -247,7 +250,7 @@ func TestProcessWokenOnCommit(t *testing.T) {
 	e.start(t, Process, &logs)
 	e.commit(t, "id-1", "kept.txt", "payload")
 	start := time.Now()
-	waitFor(t, "stored", func() bool { return exists(filepath.Join(e.root, "s/drop/file/kept.txt")) })
+	waitFor(t, "stored", func() bool { return exists(filepath.Join(e.root, "data", "s/drop/file/kept.txt")) })
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("picked up after %s", d)
 	}
@@ -264,7 +267,7 @@ func TestProcessWokenOnBurst(t *testing.T) {
 	}
 	waitFor(t, "all stored", func() bool {
 		for i := range n {
-			if !exists(filepath.Join(e.root, "s/drop/file", fmt.Sprintf("f%d.txt", i))) {
+			if !exists(filepath.Join(e.root, "data", "s/drop/file", fmt.Sprintf("f%d.txt", i))) {
 				return false
 			}
 		}
@@ -302,7 +305,7 @@ func TestOnceClaimWhileProcessRebuildsCatalog(t *testing.T) {
 	for i := range n {
 		urls = append(urls, e.upload(t, fmt.Sprintf("once%d", i), true, fmt.Sprintf("body%d", i)).URL)
 	}
-	base := filepath.Join(e.root, "s/drop/file")
+	base := filepath.Join(e.root, "data", "s/drop/file")
 	waitFor(t, "stored", func() bool {
 		for i := range n {
 			if !exists(filepath.Join(base, fmt.Sprintf("once%d", i))) {
@@ -391,7 +394,7 @@ pipeline:
 	}
 	// The queue directory of the new endpoint is watched: a commit is
 	// picked up long before the poll.
-	qdir := filepath.Join(e.root, "q/extra")
+	qdir := filepath.Join(e.root, "data", "q/extra")
 	q := queue.New(0, nil)
 	ent, n, sum, err := q.Receive(context.Background(), qdir, "id-x", strings.NewReader("extra"), 0, nil, "", nil)
 	if err != nil {
@@ -402,7 +405,7 @@ pipeline:
 	if err := q.Commit(ent, pipeline.QueueMeta{Pipelines: []string{"extra"}, Vars: vars, Sidecar: sc}); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "stored", func() bool { return exists(filepath.Join(e.root, "s/drop/file/extra.txt")) })
+	waitFor(t, "stored", func() bool { return exists(filepath.Join(e.root, "data", "s/drop/file/extra.txt")) })
 }
 
 func TestRoleRunsOncePerRoot(t *testing.T) {
@@ -423,24 +426,24 @@ func TestProcessResumesQueue(t *testing.T) {
 	slowPickup(t)
 	e := newRoleEnv(t)
 	e.commit(t, "left-over", "kept.txt", "payload")
-	half := filepath.Join(e.root, "q/drop/half")
+	half := filepath.Join(e.root, "data", "q/drop/half")
 	if err := os.MkdirAll(half, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	old := `[{"pipeline":"gone","sender":"alice","tags":[],"last_id":"x","last_received":"","last_success":"2026-01-01T00:00:00Z","size":1}]`
-	writeStatus(t, e.root, []byte(old), 0o640)
+	writeStatus(t, e.cfg.DataDir(), []byte(old), 0o640)
 	var logs syncBuf
 	e.start(t, Process, &logs)
 	waitFor(t, "stored", func() bool {
-		b, err := os.ReadFile(filepath.Join(e.root, "s/drop/file/kept.txt"))
+		b, err := os.ReadFile(filepath.Join(e.root, "data", "s/drop/file/kept.txt"))
 		return err == nil && string(b) == "payload"
 	})
-	waitFor(t, "queue entry removed", func() bool { return !exists(filepath.Join(e.root, "q/drop/left-over")) })
+	waitFor(t, "queue entry removed", func() bool { return !exists(filepath.Join(e.root, "data", "q/drop/left-over")) })
 	if !exists(half) {
 		t.Fatal("process removed an entry being received")
 	}
 	waitFor(t, "status", func() bool {
-		st, _, err := status.Open(status.Path(e.root))
+		st, _, err := status.Open(status.Path(e.cfg.DataDir()))
 		if err != nil {
 			return false
 		}
@@ -452,11 +455,11 @@ func TestProcessResumesQueue(t *testing.T) {
 func TestReceiveRemovesHalfReceived(t *testing.T) {
 	e := newRoleEnv(t)
 	e.commit(t, "committed", "kept.txt", "payload")
-	half := filepath.Join(e.root, "q/drop/20261004T100000Z-0123abcd")
+	half := filepath.Join(e.root, "data", "q/drop/20261004T100000Z-0123abcd")
 	if err := os.MkdirAll(half, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	other := filepath.Join(e.root, "q/drop/inner/20261004T100000Z-0123abcd")
+	other := filepath.Join(e.root, "data", "q/drop/inner/20261004T100000Z-0123abcd")
 	if err := os.MkdirAll(other, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +471,7 @@ func TestReceiveRemovesHalfReceived(t *testing.T) {
 	if !exists(other) {
 		t.Fatal("a directory not named like an entry removed")
 	}
-	if !exists(filepath.Join(e.root, "q/drop/committed/meta.json")) {
+	if !exists(filepath.Join(e.root, "data", "q/drop/committed/meta.json")) {
 		t.Fatal("committed entry removed")
 	}
 }
@@ -486,15 +489,15 @@ func TestRolesCancelledBeforeStart(t *testing.T) {
 
 func TestProcessStatusCorruptMovedAside(t *testing.T) {
 	e := newRoleEnv(t)
-	writeStatus(t, e.root, []byte("not json"), 0o640)
+	writeStatus(t, e.cfg.DataDir(), []byte("not json"), 0o640)
 	var logs strings.Builder
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := Process(ctx, e.cfg, slog.New(slog.NewTextHandler(&logs, nil))); err != nil {
 		t.Fatalf("process: %v", err)
 	}
-	ms, _ := filepath.Glob(status.Path(e.root) + ".corrupt-*")
-	if len(ms) != 1 || !strings.Contains(logs.String(), ms[0]) || !strings.Contains(logs.String(), status.Path(e.root)) {
+	ms, _ := filepath.Glob(status.Path(e.cfg.DataDir()) + ".corrupt-*")
+	if len(ms) != 1 || !strings.Contains(logs.String(), ms[0]) || !strings.Contains(logs.String(), status.Path(e.cfg.DataDir())) {
 		t.Fatalf("aside %v, logs %s", ms, logs.String())
 	}
 }
@@ -504,7 +507,7 @@ func TestProcessStatusUnreadableFails(t *testing.T) {
 		t.Skip("root reads any file")
 	}
 	e := newRoleEnv(t)
-	writeStatus(t, e.root, []byte("[]"), 0o000)
+	writeStatus(t, e.cfg.DataDir(), []byte("[]"), 0o000)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := Process(ctx, e.cfg, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "status") {
@@ -538,8 +541,8 @@ func TestRolesAlive(t *testing.T) {
 			e := newRoleEnv(t)
 			var logs syncBuf
 			e.start(t, c.role, &logs)
-			p := status.AlivePath(e.root, c.name)
-			for _, d := range []string{status.Dir(e.root), status.RoleDir(e.root, c.name)} {
+			p := status.AlivePath(e.cfg.DataDir(), c.name)
+			for _, d := range []string{status.Dir(e.cfg.DataDir()), status.RoleDir(e.cfg.DataDir(), c.name)} {
 				if fi, err := os.Stat(d); err != nil || fi.Mode().Perm() != 0o750 {
 					t.Fatalf("%s: %v %v", d, fi, err)
 				}
@@ -572,7 +575,7 @@ func TestRolesAlive(t *testing.T) {
 				return err == nil && string(after) == string(b)
 			})
 			other := map[string]string{"receive": "process", "process": "receive"}[c.name]
-			if exists(status.RoleDir(e.root, other)) {
+			if exists(status.RoleDir(e.cfg.DataDir(), other)) {
 				t.Fatalf("%s created the status directory of %s", c.name, other)
 			}
 		})
@@ -585,13 +588,13 @@ func TestRolesAlive(t *testing.T) {
 func TestReceiveAcceptedAfterMark(t *testing.T) {
 	e := newRoleEnv(t)
 	mark := time.Now().Add(time.Hour).UnixNano()
-	if err := os.WriteFile(queue.MarkPath(e.root), []byte(fmt.Sprintf(`{"mark":%d}`, mark)), 0o640); err != nil {
+	if err := os.WriteFile(queue.MarkPath(e.cfg.DataDir()), []byte(fmt.Sprintf(`{"mark":%d}`, mark)), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	var logs syncBuf
 	e.start(t, Receive, &logs)
 	e.upload(t, "a.txt", false, "hello")
-	qdir := filepath.Join(e.root, "q/drop")
+	qdir := filepath.Join(e.root, "data", "q/drop")
 	ents := entries(t, qdir)
 	if len(ents) != 1 {
 		t.Fatalf("queue %v", ents)
@@ -607,7 +610,7 @@ func TestReceiveAcceptedAfterMark(t *testing.T) {
 	if m.Sidecar.Accepted <= mark {
 		t.Fatalf("accepted %d, not after the mark %d", m.Sidecar.Accepted, mark)
 	}
-	b, err = os.ReadFile(queue.MarkPath(e.root))
+	b, err = os.ReadFile(queue.MarkPath(e.cfg.DataDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

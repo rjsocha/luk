@@ -67,7 +67,7 @@ func newRunEnv(t *testing.T, pipeline string) *env {
 		t.Fatal(err)
 	}
 	for _, d := range []string{"queue/up", "a", "b", "c", "work", "status/process"} {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
+		if err := os.MkdirAll(filepath.Join(root, "data", d), 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -123,7 +123,7 @@ test ! -e "$LUK_IN/x.bin.meta.json"
 cat "$LUK_IN/up.txt" "$LUK_IN/x.bin" > "$LUK_OUT/final.txt"
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - store: a\n      - run: %s\n      - store: b\n", s1, s2))
-	stale := filepath.Join(e.root, "work", "id1", "p", "1", "out")
+	stale := filepath.Join(e.root, "data", "work", "id1", "p", "1", "out")
 	if err := os.MkdirAll(stale, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -143,8 +143,8 @@ cat "$LUK_IN/up.txt" "$LUK_IN/x.bin" > "$LUK_OUT/final.txt"
 	if got := e.read(t, "b/file/robert.socha/final.txt"); got != "DATA-ID1x" {
 		t.Fatalf("final.txt %q", got)
 	}
-	gone(t, filepath.Join(e.root, "a/file/robert.socha/stale.txt"))
-	gone(t, filepath.Join(e.root, "a/file/robert.socha/up.txt.meta.json"))
+	gone(t, filepath.Join(e.root, "data", "a/file/robert.socha/stale.txt"))
+	gone(t, filepath.Join(e.root, "data", "a/file/robert.socha/up.txt.meta.json"))
 	sc := e.sidecar(t, "a/.db/meta/robert.socha/up.txt.json")
 	if sc.ID != "id1" || sc.Sender != "robert.socha" || string(sc.Meta) != `{"kind":"upper"}` || sc.Size != 8 || sc.SHA256 != sha("DATA-ID1") || sc.Produced != "up.txt" {
 		t.Fatalf("up.txt sidecar %+v meta %s", sc, sc.Meta)
@@ -152,7 +152,7 @@ cat "$LUK_IN/up.txt" "$LUK_IN/x.bin" > "$LUK_OUT/final.txt"
 	if sc := e.sidecar(t, "a/.db/meta/robert.socha/x.bin.json"); sc.ID != "id1" || sc.Meta != nil || sc.Size != 1 {
 		t.Fatalf("x.bin sidecar %+v", sc)
 	}
-	gone(t, filepath.Join(e.root, "work", "id1"))
+	gone(t, filepath.Join(e.root, "data", "work", "id1"))
 	gone(t, j.Entry.Dir)
 }
 
@@ -164,7 +164,7 @@ pwd > "$LUK_OUT/pwd"
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n        env: {FOO: bar}\n      - store: a\n", s))
 	e.runOne(t, "id2")
-	w := filepath.Join(e.root, "work", "id2", "p", "1")
+	w := filepath.Join(e.root, "data", "work", "id2", "p", "1")
 	env := e.read(t, "a/file/robert.socha/env")
 	for _, want := range []string{
 		"LUK_ID=id2", "LUK_SENDER=robert.socha", "LUK_ENDPOINT=up", "LUK_PIPELINE=p",
@@ -202,8 +202,12 @@ func waitDead(t *testing.T, pid int) {
 
 func childPid(t *testing.T, e *env, id string) int {
 	t.Helper()
+	b, err := os.ReadFile(filepath.Join(e.root, "child-"+id))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var pid int
-	if _, err := fmt.Sscan(e.read(t, "child-"+id), &pid); err != nil {
+	if _, err := fmt.Sscan(string(b), &pid); err != nil {
 		t.Fatal(err)
 	}
 	return pid
@@ -298,8 +302,8 @@ func TestRunBadOut(t *testing.T) {
 			if r == nil || r["step"] != float64(1) {
 				t.Fatalf("logs %v", e.logs.records(t))
 			}
-			gone(t, filepath.Join(e.root, "work", "b1"))
-			if ents, _ := os.ReadDir(filepath.Join(e.root, "a", "file")); len(ents) != 0 {
+			gone(t, filepath.Join(e.root, "data", "work", "b1"))
+			if ents, _ := os.ReadDir(filepath.Join(e.root, "data", "a", "file")); len(ents) != 0 {
 				t.Fatalf("stored %v", ents)
 			}
 		})
@@ -310,10 +314,10 @@ func TestRunStoreFailureFailsPipeline(t *testing.T) {
 	s := script(t, `echo x > "$LUK_OUT/f"
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - store: a\n", s))
-	if err := os.MkdirAll(filepath.Join(e.root, "a", "file", "robert.socha"), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Join(e.root, "data", "a", "file", "robert.socha"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("/tmp", filepath.Join(e.root, "a", "file", "robert.socha", "f")); err != nil {
+	if err := os.Symlink("/tmp", filepath.Join(e.root, "data", "a", "file", "robert.socha", "f")); err != nil {
 		t.Fatal(err)
 	}
 	e.runOne(t, "sf")
@@ -321,7 +325,7 @@ func TestRunStoreFailureFailsPipeline(t *testing.T) {
 	if r == nil || r["step"] != float64(2) || !strings.Contains(fmt.Sprint(r["error"]), "invalid path") {
 		t.Fatalf("logs %v", e.logs.records(t))
 	}
-	gone(t, filepath.Join(e.root, "work", "sf"))
+	gone(t, filepath.Join(e.root, "data", "work", "sf"))
 }
 
 func TestRunSetIntoOnePathVersions(t *testing.T) {
@@ -330,7 +334,7 @@ echo two > "$LUK_OUT/f2"
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - store: c\n", s))
 	e.runOne(t, "v1")
-	ents, err := os.ReadDir(filepath.Join(e.root, "c", "file"))
+	ents, err := os.ReadDir(filepath.Join(e.root, "data", "c", "file"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +466,7 @@ echo boom >&2
 exit 2
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - store: a\n      - run: %s\n  q:\n    endpoint: [up]\n    steps:\n      - store: b\n", bad))
-	st := status.New(status.Path(e.root))
+	st := status.New(status.Path(e.cfg.DataDir()))
 	d := e.dispatcher()
 	d.SetStatus(st)
 	j := e.enqueue(t, "st1", "up", "p", "q")
@@ -485,7 +489,7 @@ exit 2
 	if q.Pipeline != "q" || q.LastSuccess == "" || q.LastFailure != "" {
 		t.Fatalf("q %+v", q)
 	}
-	if _, err := os.Stat(status.Path(e.root)); err != nil {
+	if _, err := os.Stat(status.Path(e.cfg.DataDir())); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -496,7 +500,7 @@ func TestInterruptedNotReported(t *testing.T) {
 sleep 30
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n        env: {PIDFILE: %s}\n", s, pidfile))
-	st := status.New(status.Path(e.root))
+	st := status.New(status.Path(e.cfg.DataDir()))
 	d := e.dispatcher()
 	d.SetStatus(st)
 	d.Submit(e.enqueue(t, "st2", "up", "p"))
@@ -540,7 +544,7 @@ printf x > "$LUK_OUT/x"
 		t.Fatal(err)
 	}
 	d.Wait()
-	w1 := filepath.Join(e.root, "work", "id7", "p", "1")
+	w1 := filepath.Join(e.root, "data", "work", "id7", "p", "1")
 	m := envLines(e.read(t, "a/file/robert.socha/env1"))
 	for k, want := range map[string]string{
 		"LUK_FILE": w1 + "/in/f.txt", "LUK_NAME": "f.txt", "LUK_ROOT": e.root, "LUK_STEP": "1",
@@ -607,7 +611,7 @@ if [ "$LUK_STEP" = 2 ]; then cat "$LUK_IN"/* > "$LUK_OUT/all.bin"; fi
 		}
 		want := strings.Split(strings.TrimSpace(string(b)), "\n")
 		m := envLines(string(b))
-		work := filepath.Join(e.root, "work", "id11", "p", strconv.Itoa(step))
+		work := filepath.Join(e.root, "data", "work", "id11", "p", strconv.Itoa(step))
 		sent := runstep.Meta(work, func(k string) (string, bool) { v, ok := m[k]; return v, ok })
 		got := runstep.Vars(work, e.root, sent)
 		sort.Strings(got)
@@ -623,7 +627,7 @@ printf 'disk full\033[2J\n' > "$LUK_WORK/fail"
 exit 3
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n", bad))
-	st := status.New(status.Path(e.root))
+	st := status.New(status.Path(e.cfg.DataDir()))
 	d := e.dispatcher()
 	d.SetStatus(st)
 	if err := d.Submit(e.enqueue(t, "f1", "up", "p")); err != nil {
@@ -652,7 +656,7 @@ printf ' \n' > "$LUK_WORK/fail"
 exit 1
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - run: %s\n", ok, empty))
-	st := status.New(status.Path(e.root))
+	st := status.New(status.Path(e.cfg.DataDir()))
 	d := e.dispatcher()
 	d.SetStatus(st)
 	if err := d.Submit(e.enqueue(t, "f2", "up", "p")); err != nil {
@@ -699,7 +703,7 @@ cat "$LUK_IN/up.txt" "$LUK_IN/x.bin" > "$LUK_OUT/final.txt"
 	if got := e.read(t, "b/file/robert.socha/final.txt"); got != "DATA-ID1x" {
 		t.Fatalf("final.txt %q", got)
 	}
-	gone(t, filepath.Join(e.root, "work", "id1"))
+	gone(t, filepath.Join(e.root, "data", "work", "id1"))
 	gone(t, j.Entry.Dir)
 }
 
@@ -733,7 +737,7 @@ func TestRunTeeLastStep(t *testing.T) {
 	if b, err := os.ReadFile(seen); err != nil || string(b) != "data-id1" {
 		t.Fatalf("tee saw %q %v", b, err)
 	}
-	gone(t, filepath.Join(e.root, "work", "id1"))
+	gone(t, filepath.Join(e.root, "data", "work", "id1"))
 	gone(t, j.Entry.Dir)
 }
 
@@ -766,7 +770,7 @@ func TestRunTeeWritesOut(t *testing.T) {
 			if r == nil || r["step"] != float64(1) || !strings.HasPrefix(fmt.Sprint(r["error"]), "run "+s+": "+want[name]) {
 				t.Fatalf("logs %v", e.logs.records(t))
 			}
-			if ents, _ := os.ReadDir(filepath.Join(e.root, "a", "file")); len(ents) != 0 {
+			if ents, _ := os.ReadDir(filepath.Join(e.root, "data", "a", "file")); len(ents) != 0 {
 				t.Fatalf("stored %v", ents)
 			}
 		})

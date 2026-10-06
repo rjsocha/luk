@@ -24,13 +24,13 @@ func queueCmd(cfgPath *string) *cobra.Command {
 			"is deleted; what stays is its record: what the upload was and how each\n" +
 			"pipeline ended. The sender sends the upload again. The commands work on\n" +
 			"files and may run while lukd runs. Run as root they run again as the owner\n" +
-			"of root (the service user), so the files stay readable by lukd.",
+			"of <root>/data (the service user), so the files stay readable by lukd.",
 		PersistentPreRunE: func(*cobra.Command, []string) error {
 			cfg, err := config.Load(*cfgPath)
 			if err != nil {
 				return err
 			}
-			return asOwner("lukd queue", cfg.Root)
+			return asServiceUser("lukd queue", cfg)
 		},
 	}
 	var asJSON bool

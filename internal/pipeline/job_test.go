@@ -65,7 +65,7 @@ luk-job fail --message boom || exit 1
 echo unreachable
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n        env: {PATH: %s}\n", s, filepath.Dir(lukJob)+":/usr/bin:/bin"))
-	st := status.New(status.Path(e.root))
+	st := status.New(status.Path(e.cfg.DataDir()))
 	d := e.dispatcher()
 	d.SetStatus(st)
 	if err := d.Submit(e.enqueue(t, "j2", "up", "p")); err != nil {

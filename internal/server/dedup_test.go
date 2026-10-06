@@ -48,7 +48,7 @@ func (f *fixture) dropFile(t *testing.T, u string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Join(f.root, "s/drop/file", strings.TrimPrefix(pu.Path, "/d/"))
+	return filepath.Join(f.root, "data", "s/drop/file", strings.TrimPrefix(pu.Path, "/d/"))
 }
 
 func (f *fixture) download(t *testing.T, u string) (int, string) {
@@ -97,7 +97,7 @@ func TestDedupSameOwnerReadsNoBody(t *testing.T) {
 	if !shared(t, f.dropFile(t, first.URL), f.dropFile(t, second.URL)) {
 		t.Fatal("the two links do not share the content")
 	}
-	if e := entries(t, filepath.Join(f.root, "q/drop")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "q/drop")); len(e) != 0 {
 		t.Fatalf("queue left %v", e)
 	}
 	// A stream sent again carries the size and sha256 of the first answer.

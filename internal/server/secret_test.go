@@ -85,7 +85,7 @@ func (f *secretFixture) runs(t *testing.T) int {
 // nothing.
 func (f *secretFixture) wantEmpty(t *testing.T, when string) {
 	t.Helper()
-	for _, d := range []string{filepath.Join(f.root, "q/drop"), filepath.Join(f.root, "s/drop/file")} {
+	for _, d := range []string{filepath.Join(f.root, "data", "q/drop"), filepath.Join(f.root, "data", "s/drop/file")} {
 		if v := visible(t, d); len(v) != 0 {
 			t.Fatalf("%s: %s holds %v", when, d, v)
 		}
@@ -196,11 +196,11 @@ func TestSecretOthersUnchanged(t *testing.T) {
 		if !strings.HasPrefix(out.URL, "https://lukd.vm:8443/d/") || strings.HasPrefix(out.URL, "https://lukd.vm:8443/d/volatile/") {
 			t.Fatalf("url %s", out.URL)
 		}
-		if q := visible(t, filepath.Join(f.root, "q/drop")); len(q) != 1 {
+		if q := visible(t, filepath.Join(f.root, "data", "q/drop")); len(q) != 1 {
 			t.Fatalf("endpoint queue %v", q)
 		}
 		f.settle(t)
-		if got, err := os.ReadFile(filepath.Join(f.root, "s/drop/file", path.Base(out.URL))); err != nil || string(got) != "plain" {
+		if got, err := os.ReadFile(filepath.Join(f.root, "data", "s/drop/file", path.Base(out.URL))); err != nil || string(got) != "plain" {
 			t.Fatalf("stored %q %v", got, err)
 		}
 		if n := f.runs(t); n != i+1 {
@@ -273,7 +273,7 @@ func TestSecretLinks(t *testing.T) {
 	if q := visible(t, filepath.Join(f.vol, "queue")); len(q) != 1 || q[0] != ans.ID {
 		t.Fatalf("replace queue %v", q)
 	}
-	if q := visible(t, filepath.Join(f.root, "q/drop")); len(q) != 0 {
+	if q := visible(t, filepath.Join(f.root, "data", "q/drop")); len(q) != 0 {
 		t.Fatalf("endpoint queue %v", q)
 	}
 	f.settle(t)
@@ -315,7 +315,7 @@ func TestNestedExposeReserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := store.Sidecar{ID: "old", Endpoint: "drop", Size: 3, Client: wire.Meta{Portal: wire.PortalDirect}}
-	if _, err := (store.Local{Base: filepath.Join(f.root, "s/drop"), Conflict: "version"}).Store(src, "volatile", sc); err != nil {
+	if _, err := (store.Local{Base: filepath.Join(f.root, "data", "s/drop"), Conflict: "version"}).Store(src, "volatile", sc); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{"/d/volatile", "/d/volatile/"} {

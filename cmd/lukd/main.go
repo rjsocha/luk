@@ -106,7 +106,7 @@ func rootCmd() *cobra.Command {
 			"checks that the service user (--user) can read every configuration input:\n" +
 			"config.yaml, config.d, ssh.d, the tls files, the eab key file, gpg.keys and\n" +
 			"the passwords. The part that reads the files of the service user (running\n" +
-			"state, storage bases) then runs again as the owner of the root.\n" +
+			"state, storage bases) then runs again as the owner of <root>/data.\n" +
 			"A relay step or a jobs entry of a run step whose job has no file in\n" +
 			rund.DefaultJobs + " is a warning when that directory is readable, and so is\n" +
 			"one whose readable job file does not load (with the reason), a job no relay\n" +
@@ -122,7 +122,7 @@ func rootCmd() *cobra.Command {
 				return err
 			}
 			errw := cmd.ErrOrStderr()
-			// Run again by root as the owner of root: only the part that
+			// Run again by root as the owner of <root>/data: only the part that
 			// reads the files of the service user.
 			if os.Getenv(reexecEnv) == "1" && geteuid() != 0 {
 				failed, err := checkOwned(cfg, errw, noRunning)
@@ -178,12 +178,12 @@ func rootCmd() *cobra.Command {
 			}
 			// Root leaves the files of the service user (running state,
 			// storage bases), which it may replace with a FIFO or a
-			// symlink, to a run as the owner of root (see asOwner). A
-			// missing root holds none of them.
+			// symlink, to a run as the owner of <root>/data (see
+			// asServiceUser). A missing <root>/data holds none of them.
 			var code exitCode
 			err = nil
-			if _, lerr := os.Lstat(cfg.Root); geteuid() == 0 && !errors.Is(lerr, os.ErrNotExist) {
-				err = asOwner("lukd check", cfg.Root)
+			if _, lerr := os.Lstat(cfg.DataDir()); geteuid() == 0 && !errors.Is(lerr, os.ErrNotExist) {
+				err = asServiceUser("lukd check", cfg)
 			}
 			switch {
 			case errors.As(err, &code):
@@ -257,7 +257,7 @@ func rootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return status.Print(cmd.OutOrStdout(), status.Path(cfg.Root), asJSON)
+			return status.Print(cmd.OutOrStdout(), status.Path(cfg.DataDir()), asJSON)
 		},
 	}
 	statusCmd.Flags().BoolVar(&asJSON, "json", false, "print the raw status.json")

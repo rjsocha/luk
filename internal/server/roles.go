@@ -83,7 +83,7 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if err := prepareDirs(cfg, "receive"); err != nil {
 		return err
 	}
-	lock, err := lockRole(cfg.Root, "receive")
+	lock, err := lockRole(cfg.DataDir(), "receive")
 	if err != nil {
 		return err
 	}
@@ -106,18 +106,18 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if err := s.persistNonces(cfg.Auth.Nonces); err != nil {
 		return err
 	}
-	mark := queue.MarkPath(cfg.Root)
+	mark := queue.MarkPath(cfg.DataDir())
 	if err := s.accepted.Persist(mark, func(err error) {
 		s.log.Warn("acceptance mark not written", "file", mark, "error", err)
 	}); err != nil {
 		return fmt.Errorf("acceptance mark: %w", err)
 	}
-	aside, err := s.quota.Open(quota.Path(cfg.Root))
+	aside, err := s.quota.Open(quota.Path(cfg.DataDir()))
 	if err != nil {
 		return fmt.Errorf("quota state: %w", err)
 	}
 	if aside != "" {
-		log.Warn("quota state corrupt, moved aside, starting with full buckets", "file", quota.Path(cfg.Root), "aside", aside)
+		log.Warn("quota state corrupt, moved aside, starting with full buckets", "file", quota.Path(cfg.DataDir()), "aside", aside)
 	}
 	var servers []*http.Server
 	defer func() {
@@ -133,7 +133,7 @@ func Receive(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		}
 		return fmt.Errorf("queue: %w", err)
 	}
-	beat, err := startAlive(cfg.Root, "receive", log)
+	beat, err := startAlive(cfg.DataDir(), "receive", log)
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if err := prepareDirs(cfg, "process"); err != nil {
 		return err
 	}
-	lock, err := lockRole(cfg.Root, "process")
+	lock, err := lockRole(cfg.DataDir(), "process")
 	if err != nil {
 		return err
 	}
@@ -195,7 +195,7 @@ func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	defer stopHup()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	stPath := status.Path(cfg.Root)
+	stPath := status.Path(cfg.DataDir())
 	st, aside, err := status.Open(stPath)
 	if err != nil {
 		return fmt.Errorf("status: %w", err)
@@ -216,7 +216,7 @@ func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	}
 	var cur atomic.Pointer[config.Config]
 	cur.Store(cfg)
-	beat, err := startAlive(cfg.Root, "process", log)
+	beat, err := startAlive(cfg.DataDir(), "process", log)
 	if err != nil {
 		return err
 	}
@@ -254,8 +254,8 @@ var Version = "dev"
 // role's periodic work (receive: expiry, process: queue maintenance,
 // pickup, storage maintenance, watch evaluation) touches the file, so its
 // mtime goes stale when that loop hangs.
-func startAlive(root, role string, log *slog.Logger) (func(time.Time), error) {
-	a, err := status.StartAlive(root, role, Version, time.Now())
+func startAlive(data, role string, log *slog.Logger) (func(time.Time), error) {
+	a, err := status.StartAlive(data, role, Version, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("liveness file: %w", err)
 	}
@@ -407,14 +407,14 @@ func watchQueues(ctx context.Context, wake chan struct{}, log *slog.Logger) func
 	}
 }
 
-// lockRole holds <root>/.lukd-<name>.lock until the file is closed, so a
+// lockRole holds <root>/data/<name>.lock until the file is closed, so a
 // role runs once per root: two process roles would run the pipelines
 // twice, two receive roles would expire and claim the same files.
-func lockRole(root, name string) (*os.File, error) {
-	if err := os.MkdirAll(root, 0o750); err != nil {
-		return nil, fmt.Errorf("%s: %v (%s)", root, err, dirHint)
+func lockRole(data, name string) (*os.File, error) {
+	if err := os.MkdirAll(data, 0o750); err != nil {
+		return nil, fmt.Errorf("%s: %v (%s)", data, err, dirHint)
 	}
-	p := filepath.Join(root, ".lukd-"+name+".lock")
+	p := filepath.Join(data, name+".lock")
 	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o640)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
@@ -432,7 +432,7 @@ func lockRole(root, name string) (*os.File, error) {
 	}
 	if errors.Is(err, syscall.EWOULDBLOCK) {
 		f.Close()
-		return nil, fmt.Errorf("another lukd runs the %s role on %s (%s is locked)", name, root, p)
+		return nil, fmt.Errorf("another lukd runs the %s role on %s (%s is locked)", name, data, p)
 	}
 	if err != nil {
 		f.Close()

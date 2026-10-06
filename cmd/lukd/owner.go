@@ -8,6 +8,8 @@ import (
 	"os/user"
 	"strconv"
 	"syscall"
+
+	"luk/internal/config"
 )
 
 const reexecEnv = "LUKD_REEXEC"
@@ -79,6 +81,21 @@ func asOwner(cmdName, root string) error {
 		return reexecAs(uint32(owner), uint32(gid), groups)
 	}
 	return fmt.Errorf("%s must run as root or as %s (owner of %s)", cmdName, name, root)
+}
+
+// asServiceUser is asOwner for the commands that work on the files of the
+// service user below <root>/data: root and data must not be symlinks
+// (<root> is root's, but a symlink there is still refused), and the
+// owner of data is the service user.
+func asServiceUser(cmdName string, cfg *config.Config) error {
+	fi, err := os.Lstat(cfg.Root)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: %s is a symlink", cmdName, cfg.Root)
+	}
+	return asOwner(cmdName, cfg.DataDir())
 }
 
 func reexec(uid, gid uint32, groups []uint32) error {

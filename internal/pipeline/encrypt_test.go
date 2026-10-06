@@ -46,7 +46,7 @@ func newGPGEnv(t *testing.T, pipeline string, keyFiles map[string][]byte, wkd ma
 		t.Fatal(err)
 	}
 	for _, d := range []string{"queue/up", "a", "b", "c", "work", "gpg-cache", "status/process"} {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
+		if err := os.MkdirAll(filepath.Join(root, "data", d), 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -76,7 +76,7 @@ func (g *gpgEnv) run(t *testing.T, id string) {
 
 func (g *gpgEnv) raw(t *testing.T, rel string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(g.root, rel))
+	b, err := os.ReadFile(filepath.Join(g.root, "data", rel))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,10 +129,10 @@ func TestEncryptRoundTrip(t *testing.T) {
 		m.Plain.Name != "f.txt" || m.Plain.Size != 8 || m.Plain.SHA256 != sha("data-id1") {
 		t.Fatalf("meta %s", sc.Meta)
 	}
-	if _, err := os.Stat(filepath.Join(g.root, "gpg-cache", "robert@example.net.pgp")); err != nil {
+	if _, err := os.Stat(filepath.Join(g.root, "data", "gpg-cache", "robert@example.net.pgp")); err != nil {
 		t.Errorf("wkd key not cached: %v", err)
 	}
-	gone(t, filepath.Join(g.root, "work", "id1", "p"))
+	gone(t, filepath.Join(g.root, "data", "work", "id1", "p"))
 	gpgDecrypt(t, msg, robert, "data-id1", "loopback")
 }
 
@@ -305,7 +305,7 @@ func TestEncryptUnusableRecipient(t *testing.T) {
 	if r == nil || !strings.Contains(fmt.Sprint(r["error"]), "strict") || r["step"] != float64(1) {
 		t.Fatalf("strict: %v", g.logs.records(t))
 	}
-	if exists(filepath.Join(g.root, "a", "file", "robert.socha", "f.txt.gpg")) {
+	if exists(filepath.Join(g.root, "data", "a", "file", "robert.socha", "f.txt.gpg")) {
 		t.Fatal("stored despite strict failure")
 	}
 }
@@ -318,7 +318,7 @@ func TestEncryptNoUsableRecipient(t *testing.T) {
 	if r == nil || !strings.Contains(fmt.Sprint(r["error"]), "no usable recipient") {
 		t.Fatalf("logs %v", g.logs.records(t))
 	}
-	if exists(filepath.Join(g.root, "a", "file", "robert.socha", "f.txt.gpg")) {
+	if exists(filepath.Join(g.root, "data", "a", "file", "robert.socha", "f.txt.gpg")) {
 		t.Fatal("stored without recipients")
 	}
 }

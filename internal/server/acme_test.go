@@ -182,13 +182,13 @@ listen:
 func TestACMECacheDir(t *testing.T) {
 	root := t.TempDir()
 	cfg := acmeTestConfig(t, root, "https://ca.example.com:14000/dir", "0.0.0.0:8443", "127.0.0.1:8080")
-	if err := os.MkdirAll(filepath.Join(root, "acme"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "data", "acme"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := prepareDirs(cfg, "receive"); err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range []string{filepath.Join(root, "acme"), filepath.Join(root, "acme", "ca.example.com_14000_dir")} {
+	for _, d := range []string{filepath.Join(root, "data", "acme"), filepath.Join(root, "data", "acme", "ca.example.com_14000_dir")} {
 		fi, err := os.Stat(d)
 		if err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
 			t.Fatalf("%s: %v %v", d, fi, err)
@@ -199,7 +199,7 @@ func TestACMECacheDir(t *testing.T) {
 	if err := prepareDirs(other, "process"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(other.Root, "acme")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(other.DataDir(), "acme")); !os.IsNotExist(err) {
 		t.Fatalf("process role created the acme cache: %v", err)
 	}
 }

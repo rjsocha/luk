@@ -21,7 +21,7 @@ const dirHint = "the directory must be owned by the service user and inside Read
 func prepareDirs(cfg *config.Config, role string) error {
 	tls := role == "receive"
 	var errs []error
-	for _, d := range []string{status.RoleDir(cfg.Root, role), cfg.WorkDir(), cfg.GPGCacheDir()} {
+	for _, d := range []string{status.RoleDir(cfg.DataDir(), role), cfg.WorkDir(), cfg.GPGCacheDir()} {
 		if d != "" {
 			errs = append(errs, prepareWritable(d))
 		}

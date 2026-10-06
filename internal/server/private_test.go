@@ -143,7 +143,7 @@ func (f *privateFixture) sidecar(t *testing.T, link string) store.Sidecar {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return sidecarOf(t, filepath.Join(f.root, "s/drop"), filepath.Base(u.Path))
+	return sidecarOf(t, filepath.Join(f.root, "data", "s/drop"), filepath.Base(u.Path))
 }
 
 func wantStatus(t *testing.T, what string, rec *httptest.ResponseRecorder, code int) {
@@ -527,7 +527,7 @@ func TestPrivateReplaceKeepsAccess(t *testing.T) {
 	if rec := f.get(t, getReq{signer: f.user, link: link}); rec.Code != http.StatusOK || rec.Body.String() != "v2" {
 		t.Fatalf("replaced: %d %q", rec.Code, rec.Body)
 	}
-	if sc := sidecarOf(t, filepath.Join(f.root, "s/archive"), "c.txt"); sc.Client.Access != wire.AccessPrivate {
+	if sc := sidecarOf(t, filepath.Join(f.root, "data", "s/archive"), "c.txt"); sc.Client.Access != wire.AccessPrivate {
 		t.Fatalf("archive copy of the replace has access %q", sc.Client.Access)
 	}
 }

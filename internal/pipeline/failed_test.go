@@ -195,7 +195,7 @@ func TestPendingAndResumeIgnoreFailed(t *testing.T) {
 
 func TestStatusFailedCount(t *testing.T) {
 	e := newEnv(t, 1)
-	st := status.New(status.Path(e.root))
+	st := status.New(status.Path(e.cfg.DataDir()))
 	d := e.dispatcher()
 	d.SetStatus(st)
 	d.Submit(e.enqueue(t, "n1", "up", "fail"))
@@ -229,7 +229,7 @@ func TestStatusFailedCount(t *testing.T) {
 func TestExpireFailed(t *testing.T) {
 	bad := script(t, `echo x > "$LUK_OUT/f"; exit 1`)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n", bad))
-	st := status.New(status.Path(e.root))
+	st := status.New(status.Path(e.cfg.DataDir()))
 	d := e.dispatcher()
 	d.SetStatus(st)
 	e.runOne(t, "x1")

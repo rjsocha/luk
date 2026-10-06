@@ -28,6 +28,9 @@ storage:
 	if err := os.WriteFile(cfg, []byte(text), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(root, "data"), 0o750); err != nil {
+		t.Fatal(err)
+	}
 	return cfg, root
 }
 
@@ -48,10 +51,10 @@ func TestStatusCommand(t *testing.T) {
 		t.Fatalf("missing file: %q %v", out, err)
 	}
 	// The process role creates the directory (see prepareDirs).
-	if err := os.MkdirAll(filepath.Dir(status.Path(root)), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(status.Path(filepath.Join(root, "data"))), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	st := status.New(status.Path(root))
+	st := status.New(status.Path(filepath.Join(root, "data")))
 	if err := st.Record(status.Result{Pipeline: "archive", Sender: "robert.socha", ID: "id1", Size: 7}); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +63,7 @@ func TestStatusCommand(t *testing.T) {
 		t.Fatalf("table: %q %v", out, err)
 	}
 	out, err = runLukd(t, "status", "--json", "-c", cfg)
-	raw, _ := os.ReadFile(status.Path(root))
+	raw, _ := os.ReadFile(status.Path(filepath.Join(root, "data")))
 	if err != nil || out != string(raw) {
 		t.Fatalf("json: %q %v", out, err)
 	}
@@ -81,10 +84,10 @@ func TestFlagGuard(t *testing.T) {
 func TestStatusCommandWatch(t *testing.T) {
 	cfg, root := statusConfig(t)
 	// The process role creates the directory (see prepareDirs).
-	if err := os.MkdirAll(filepath.Dir(status.Path(root)), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(status.Path(filepath.Join(root, "data"))), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	st := status.New(status.Path(root))
+	st := status.New(status.Path(filepath.Join(root, "data")))
 	if err := st.SetWatch([]status.Watch{{Storage: "archive", Rule: 1, Pipeline: "archive", Origin: "db1-prod", File: "db.sql", State: "CRIT",
 		Message: "db1-prod/db.sql: last copy 31h ago (every 26h)", NewestReceived: "2026-10-03T05:00:00Z", Size: 4 << 30, Copies: 2,
 		Evaluated: "2026-10-04T12:00:00Z"}}); err != nil {

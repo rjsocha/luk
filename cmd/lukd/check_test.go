@@ -50,7 +50,7 @@ func TestCheckAgainstRunningRole(t *testing.T) {
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, err := os.Stat(filepath.Join(root, ".lukd-process.running.json")); err == nil {
+		if _, err := os.Stat(filepath.Join(root, "data", "process.running.json")); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -191,8 +191,8 @@ func TestCheckAsRootLeavesServiceFilesToOwner(t *testing.T) {
 	writeIdentity(t, cfgPath)
 	os.Chmod(cfgPath, 0o644)
 	fakeUser(t, true)
-	os.MkdirAll(filepath.Join(root, "s"), 0o750)
-	for _, p := range []string{filepath.Join(root, "s", "archive"), filepath.Join(root, ".lukd-receive.lock"), filepath.Join(root, ".lukd-receive.running.json")} {
+	os.MkdirAll(filepath.Join(root, "data", "s"), 0o750)
+	for _, p := range []string{filepath.Join(root, "data", "s", "archive"), filepath.Join(root, "data", "receive.lock"), filepath.Join(root, "data", "receive.running.json")} {
 		if err := syscall.Mkfifo(p, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -228,7 +228,7 @@ func TestCheckAsRootLeavesServiceFilesToOwner(t *testing.T) {
 // Run again as the owner, lukd check does only the part root left to it.
 func TestCheckOwnerPart(t *testing.T) {
 	cfgPath, root := statusConfig(t)
-	base := filepath.Join(root, "s", "archive")
+	base := filepath.Join(root, "data", "s", "archive")
 	os.MkdirAll(base, 0o750)
 	os.WriteFile(filepath.Join(base, "junk"), nil, 0o640)
 	t.Setenv(reexecEnv, "1")

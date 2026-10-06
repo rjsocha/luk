@@ -158,7 +158,7 @@ func (f *fixture) fetch(t *testing.T, link string) (int, string) {
 
 func (f *fixture) dropSidecar(t *testing.T, link string) store.Sidecar {
 	t.Helper()
-	return sidecarOf(t, filepath.Join(f.root, "s/drop"), path.Base(link))
+	return sidecarOf(t, filepath.Join(f.root, "data", "s/drop"), path.Base(link))
 }
 
 func wantNoLink(t *testing.T, what string, rec *httptest.ResponseRecorder) {
@@ -185,7 +185,7 @@ func TestLinkRemove(t *testing.T) {
 		t.Fatalf("after: %d", code)
 	}
 	name := path.Base(link)
-	for _, p := range []string{filepath.Join(f.root, "s/drop/file", name), filepath.Join(f.root, "s/drop/.db/meta", name+".json")} {
+	for _, p := range []string{filepath.Join(f.root, "data", "s/drop/file", name), filepath.Join(f.root, "data", "s/drop/.db/meta", name+".json")} {
 		if exists(p) {
 			t.Errorf("%s left", p)
 		}
@@ -206,7 +206,7 @@ func TestLinkRemoveClaimedAndExpired(t *testing.T) {
 	sc := f.dropSidecar(t, link)
 	sc.Expires = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
 	b, _ := json.Marshal(sc)
-	if err := os.WriteFile(filepath.Join(f.root, "s/drop/.db/meta", path.Base(link)+".json"), b, 0o640); err != nil {
+	if err := os.WriteFile(filepath.Join(f.root, "data", "s/drop/.db/meta", path.Base(link)+".json"), b, 0o640); err != nil {
 		t.Fatal(err)
 	}
 	wantNoLink(t, "expired ttl", f.link(t, linkReq{signer: f.user, action: wire.LinkTTL, ttl: "1d", link: link}))
@@ -312,7 +312,7 @@ func TestLinkReplace(t *testing.T) {
 	if rec.Code != 200 || rec.Body.String() != "new content" {
 		t.Fatalf("download %d %q", rec.Code, rec.Body)
 	}
-	if e := entries(t, filepath.Join(f.root, "q/drop")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "q/drop")); len(e) != 0 {
 		t.Fatalf("queue left %v", e)
 	}
 }
@@ -376,10 +376,10 @@ func TestLinkReplaceFailureKeepsOld(t *testing.T) {
 			if sc := f.dropSidecar(t, link); sc.SHA256 != before.SHA256 || sc.Updated != "" {
 				t.Fatalf("sidecar changed: %+v", sc)
 			}
-			if v := visible(t, filepath.Join(f.root, "s/copy/file")); len(v) != 1 {
+			if v := visible(t, filepath.Join(f.root, "data", "s/copy/file")); len(v) != 1 {
 				t.Fatalf("copy holds %v", v)
 			}
-			if b, err := os.ReadFile(filepath.Join(f.root, "s/copy/file/fixed")); err != nil || string(b) != "old" {
+			if b, err := os.ReadFile(filepath.Join(f.root, "data", "s/copy/file/fixed")); err != nil || string(b) != "old" {
 				t.Fatalf("copy %q %v", b, err)
 			}
 			failed, err := pipeline.ListFailed(f.srv.config())
@@ -422,11 +422,11 @@ func TestLinkReplaceFailureRemovesOtherStores(t *testing.T) {
 	if code, body := f.fetch(t, link); code != 200 || body != "old" {
 		t.Fatalf("after a failed replace: %d %q", code, body)
 	}
-	v := visible(t, filepath.Join(f.root, "s/copy/file"))
+	v := visible(t, filepath.Join(f.root, "data", "s/copy/file"))
 	if len(v) != 1 {
 		t.Fatalf("copy holds %v", v)
 	}
-	if b, err := os.ReadFile(filepath.Join(f.root, "s/copy/file", v[0])); err != nil || string(b) != "old" {
+	if b, err := os.ReadFile(filepath.Join(f.root, "data", "s/copy/file", v[0])); err != nil || string(b) != "old" {
 		t.Fatalf("copy %q %v", b, err)
 	}
 }
@@ -690,7 +690,7 @@ func (f *fixture) setSidecar(t *testing.T, link string, fn func(*store.Sidecar))
 	sc := f.dropSidecar(t, link)
 	fn(&sc)
 	b, _ := json.Marshal(sc)
-	if err := os.WriteFile(filepath.Join(f.root, "s/drop/.db/meta", path.Base(link)+".json"), b, 0o640); err != nil {
+	if err := os.WriteFile(filepath.Join(f.root, "data", "s/drop/.db/meta", path.Base(link)+".json"), b, 0o640); err != nil {
 		t.Fatal(err)
 	}
 }

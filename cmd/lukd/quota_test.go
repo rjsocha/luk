@@ -72,6 +72,9 @@ storage:
 	if err := os.WriteFile(p, []byte(text), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(root, "data"), 0o750); err != nil {
+		t.Fatal(err)
+	}
 	return p, root, certFile
 }
 
@@ -105,7 +108,7 @@ logs      * -      1G/1d   1G     passive  (catch-all)
 }
 
 func TestQuotaLs(t *testing.T) {
-	cfgPath, root, _ := quotaConfig(t)
+	cfgPath, _, _ := quotaConfig(t)
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +116,7 @@ func TestQuotaLs(t *testing.T) {
 	now := time.Now()
 	at := now.Add(-50 * time.Hour)
 	b := quota.New(slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return at })
-	if _, err := b.Open(quota.Path(root)); err != nil {
+	if _, err := b.Open(quota.Path(cfg.DataDir())); err != nil {
 		t.Fatal(err)
 	}
 	host := &wire.Identity{Type: "certificate", CA: "hosts", KeyID: "db1.example.org", Principals: []string{"db1.example.org"}}

@@ -92,7 +92,7 @@ func TestQuotaStream(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "1800" {
 		t.Fatalf("%d %q: %s", rec.Code, rec.Header().Get("Retry-After"), rec.Body)
 	}
-	if e := entries(t, filepath.Join(f.root, "q/backup")); len(e) != 1 {
+	if e := entries(t, filepath.Join(f.root, "data", "q/backup")); len(e) != 1 {
 		t.Fatalf("queue %v", e)
 	}
 	if c := do(50); c != http.StatusAccepted {
@@ -132,7 +132,7 @@ func TestQuotaDedupIsFree(t *testing.T) {
 
 func TestQuotaPassive(t *testing.T) {
 	f, _ := quotaFixture(t, `{mode: passive, rate: 100/1h, burst: 300}`)
-	p := filepath.Join(f.root, "quota.json")
+	p := filepath.Join(f.root, "data", "quota.json")
 	if _, err := f.srv.quota.Open(p); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestQuotaPassive(t *testing.T) {
 // The buckets live in a file under root: a restart does not refill them.
 func TestQuotaPersisted(t *testing.T) {
 	f, now := quotaFixture(t, `{rate: 100/1h, burst: 300}`)
-	p := filepath.Join(f.root, "quota.json")
+	p := filepath.Join(f.root, "data", "quota.json")
 	if _, err := f.srv.quota.Open(p); err != nil {
 		t.Fatal(err)
 	}

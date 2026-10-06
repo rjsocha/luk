@@ -69,7 +69,7 @@ func newGroupEnv(t *testing.T, concurrency int) *env {
 	}
 	root := t.TempDir()
 	for _, d := range []string{"queue/up", "s", "work", "status/process"} {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
+		if err := os.MkdirAll(filepath.Join(root, "data", d), 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -173,7 +173,7 @@ func TestGroupOrder(t *testing.T) {
 func TestGroupFailureSkipsLaterOrders(t *testing.T) {
 	e := newGroupEnv(t, 1)
 	g := newGates(t)
-	st := status.New(status.Path(e.root))
+	st := status.New(status.Path(e.cfg.DataDir()))
 	d := e.dispatcher()
 	d.SetStatus(st)
 	j := e.enqueueGrouped(t, "f1", "bad", "hok", "after", "last", "free")

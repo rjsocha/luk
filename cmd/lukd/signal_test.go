@@ -26,7 +26,7 @@ func TestEarlySignals(t *testing.T) {
 	go func() { done <- cmd.Execute() }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, err := os.Stat(filepath.Join(root, ".lukd-process.running.json")); err == nil {
+		if _, err := os.Stat(filepath.Join(root, "data", "process.running.json")); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {

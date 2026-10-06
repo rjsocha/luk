@@ -272,21 +272,21 @@ func TestAcceptKey(t *testing.T) {
 		t.Fatalf("%+v", out)
 	}
 	f.settle(t)
-	got, err := os.ReadFile(filepath.Join(f.root, "s/archive/file/f"))
+	got, err := os.ReadFile(filepath.Join(f.root, "data", "s/archive/file/f"))
 	if err != nil || string(got) != "dump" {
 		t.Fatalf("stored %q %v", got, err)
 	}
 	var sc struct {
 		ID, Sender, Endpoint, Expires string
 	}
-	b, err := os.ReadFile(filepath.Join(f.root, "s/archive/.db/meta/f.json"))
+	b, err := os.ReadFile(filepath.Join(f.root, "data", "s/archive/.db/meta/f.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(b, &sc); err != nil || sc.ID != out.ID || sc.Sender != "robert.socha" || sc.Endpoint != "backup" || sc.Expires != "" {
 		t.Fatalf("sidecar %s", b)
 	}
-	if e := entries(t, filepath.Join(f.root, "q/backup")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "q/backup")); len(e) != 0 {
 		t.Fatalf("queue left %v", e)
 	}
 }
@@ -333,11 +333,11 @@ func TestRespondURL(t *testing.T) {
 		t.Fatalf("%+v", out2)
 	}
 	f.settle(t)
-	got, err := os.ReadFile(filepath.Join(f.root, "s/drop/file", name))
+	got, err := os.ReadFile(filepath.Join(f.root, "data", "s/drop/file", name))
 	if err != nil || string(got) != "x" {
 		t.Fatalf("stored %q %v", got, err)
 	}
-	b, err := os.ReadFile(filepath.Join(f.root, "s/drop/.db/meta", name+".json"))
+	b, err := os.ReadFile(filepath.Join(f.root, "data", "s/drop/.db/meta", name+".json"))
 	if err != nil || !strings.Contains(string(b), `"expires":"`+out.Expires+`"`) {
 		t.Fatalf("sidecar %s %v", b, err)
 	}
@@ -405,7 +405,7 @@ func TestDropPrettyURL(t *testing.T) {
 	if rec.Code != 200 || rec.Body.String() != "hello" {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
-	if got, err := os.ReadFile(filepath.Join(f.root, "s/archive/file", name)); err != nil || string(got) != "hello" {
+	if got, err := os.ReadFile(filepath.Join(f.root, "data", "s/archive/file", name)); err != nil || string(got) != "hello" {
 		t.Fatalf("archive: %q %v", got, err)
 	}
 }
@@ -441,7 +441,7 @@ func TestInternalErrorIsGeneric(t *testing.T) {
 	f := newFixture(t)
 	var logs bytes.Buffer
 	f.srv.log = slog.New(slog.NewTextHandler(&logs, nil))
-	if err := os.RemoveAll(filepath.Join(f.root, "q/backup")); err != nil {
+	if err := os.RemoveAll(filepath.Join(f.root, "data", "q/backup")); err != nil {
 		t.Fatal(err)
 	}
 	body := []byte("x")
@@ -491,11 +491,11 @@ func TestIngestHostCertificate(t *testing.T) {
 	rec, _ := f.do(t, req{signer: f.hostCert(t), path: "/backup", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, Tags: []string{"prod"}}, body: []byte("host data")})
 	out := receipt(t, rec, http.StatusAccepted)
 	f.settle(t)
-	got, err := os.ReadFile(filepath.Join(f.root, "s/archive/file", out.ID))
+	got, err := os.ReadFile(filepath.Join(f.root, "data", "s/archive/file", out.ID))
 	if err != nil || string(got) != "host data" {
 		t.Fatalf("stored %q %v", got, err)
 	}
-	b, err := os.ReadFile(filepath.Join(f.root, "s/archive/.db/meta", out.ID+".json"))
+	b, err := os.ReadFile(filepath.Join(f.root, "data", "s/archive/.db/meta", out.ID+".json"))
 	if err != nil || !strings.Contains(string(b), `"sender":"hosts:luk.vm"`) {
 		t.Fatalf("sidecar %s %v", b, err)
 	}
@@ -556,7 +556,7 @@ func TestExpiresOnceClamped(t *testing.T) {
 	}
 	expiresAbout(t, "once answer", out.Expires, before, 7*24*time.Hour)
 	f.settle(t)
-	sc := sidecarOf(t, filepath.Join(f.root, "s/drop"), path.Base(out.URL))
+	sc := sidecarOf(t, filepath.Join(f.root, "data", "s/drop"), path.Base(out.URL))
 	if !sc.Client.Once {
 		t.Errorf("once lost: %+v", sc)
 	}
@@ -616,8 +616,8 @@ func TestExpiresPerStorage(t *testing.T) {
 		t.Errorf("answer of the respond storage: %+v", out)
 	}
 	expiresAbout(t, "answer", out.Expires, before, 48*time.Hour)
-	expiresAbout(t, "drop", sidecarOf(t, filepath.Join(f.root, "s/drop"), path.Base(out.URL)).Expires, before, 48*time.Hour)
-	expiresAbout(t, "archive", sidecarOf(t, filepath.Join(f.root, "s/archive"), "a.txt").Expires, before, time.Hour)
+	expiresAbout(t, "drop", sidecarOf(t, filepath.Join(f.root, "data", "s/drop"), path.Base(out.URL)).Expires, before, 48*time.Hour)
+	expiresAbout(t, "archive", sidecarOf(t, filepath.Join(f.root, "data", "s/archive"), "a.txt").Expires, before, time.Hour)
 }
 
 func TestExpiresRespondAccept(t *testing.T) {
@@ -636,7 +636,7 @@ func TestExpiresRespondAccept(t *testing.T) {
 	}
 	f.settle(t)
 	for name, want := range map[string]time.Duration{"plain": 2 * time.Hour, "short": 30 * time.Minute, "long": 2 * time.Hour} {
-		s := sidecarOf(t, filepath.Join(f.root, "s/archive"), name).Expires
+		s := sidecarOf(t, filepath.Join(f.root, "data", "s/archive"), name).Expires
 		exp, err := time.Parse(time.RFC3339, s)
 		if err != nil || exp.Before(before.Add(want-time.Second)) || exp.After(time.Now().Add(want)) {
 			t.Errorf("%s: expires %q, want about %v", name, s, want)
@@ -659,8 +659,8 @@ func TestExpiresAcceptFanOut(t *testing.T) {
 		t.Errorf("storages differ, the answer names none: %+v", out)
 	}
 	f.settle(t)
-	expiresAbout(t, "archive", sidecarOf(t, filepath.Join(f.root, "s/archive"), "a").Expires, before, time.Hour)
-	expiresAbout(t, "keep", sidecarOf(t, filepath.Join(f.root, "s/keep"), "a").Expires, before, 21*24*time.Hour)
+	expiresAbout(t, "archive", sidecarOf(t, filepath.Join(f.root, "data", "s/archive"), "a").Expires, before, time.Hour)
+	expiresAbout(t, "keep", sidecarOf(t, filepath.Join(f.root, "data", "s/keep"), "a").Expires, before, 21*24*time.Hour)
 }
 
 func TestNoSpaceBeforeBody(t *testing.T) {
@@ -675,7 +675,7 @@ func TestNoSpaceBeforeBody(t *testing.T) {
 	if read != 0 {
 		t.Fatalf("body read %d bytes", read)
 	}
-	if e := entries(t, filepath.Join(f.root, "q/drop")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "q/drop")); len(e) != 0 {
 		t.Fatalf("queue %v", e)
 	}
 }
@@ -807,7 +807,7 @@ func TestSignedHashMismatch(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("short body: %d %s", rec.Code, rec.Body)
 	}
-	if e := entries(t, filepath.Join(f.root, "q/backup")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "q/backup")); len(e) != 0 {
 		t.Fatalf("queue left %v", e)
 	}
 }
@@ -818,7 +818,7 @@ func TestStreamOverMaxSize(t *testing.T) {
 	if rec.Code != 413 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
-	if e := entries(t, filepath.Join(f.root, "q/backup")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "q/backup")); len(e) != 0 {
 		t.Fatalf("queue left %v", e)
 	}
 }
@@ -902,7 +902,7 @@ func TestDryRunScheduleAndStages(t *testing.T) {
 	m.DryRun = false
 	rec, _ = f.do(t, req{signer: f.user, path: "/backup", meta: m, body: body})
 	receipt(t, rec, http.StatusAccepted)
-	pending, err := queue.Pending(filepath.Join(f.root, "q/backup"))
+	pending, err := queue.Pending(filepath.Join(f.root, "data", "q/backup"))
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("%v %v", pending, err)
 	}
@@ -952,7 +952,7 @@ func TestDryRunEchoedAndVerified(t *testing.T) {
 	}
 	f.settle(t)
 	for _, d := range []string{"q/backup", "q/drop", "s/archive/file", "s/drop/file"} {
-		if e := entries(t, filepath.Join(f.root, d)); len(e) != 0 {
+		if e := entries(t, filepath.Join(f.root, "data", d)); len(e) != 0 {
 			t.Fatalf("%s: %v", d, e)
 		}
 	}
@@ -983,7 +983,7 @@ func TestUnstorableNameBeforeBody(t *testing.T) {
 	if read != 0 {
 		t.Fatalf("body read %d bytes", read)
 	}
-	if e := entries(t, filepath.Join(f.root, "q/backup")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "q/backup")); len(e) != 0 {
 		t.Fatalf("queue %v", e)
 	}
 }
@@ -1016,10 +1016,10 @@ func TestDotFileStored(t *testing.T) {
 	rec, _ := f.do(t, req{signer: f.user, path: "/backup", meta: m, body: body})
 	receipt(t, rec, http.StatusAccepted)
 	f.settle(t)
-	if got, err := os.ReadFile(filepath.Join(f.root, "s/archive/file/.bashrc")); err != nil || string(got) != "rc" {
+	if got, err := os.ReadFile(filepath.Join(f.root, "data", "s/archive/file/.bashrc")); err != nil || string(got) != "rc" {
 		t.Fatalf("stored %q %v", got, err)
 	}
-	if sc := sidecarOf(t, filepath.Join(f.root, "s/archive"), ".bashrc"); sc.Client.File != ".bashrc" {
+	if sc := sidecarOf(t, filepath.Join(f.root, "data", "s/archive"), ".bashrc"); sc.Client.File != ".bashrc" {
 		t.Fatalf("sidecar %+v", sc)
 	}
 }
@@ -1165,7 +1165,7 @@ func TestHostnameAndOriginPaths(t *testing.T) {
 		t.Fatalf("without --backup: %d read %d %s", rec.Code, read, rec.Body)
 	}
 	f.settle(t)
-	if b, err := os.ReadFile(filepath.Join(f.root, "s/archive/file/db1.example.net/f")); err != nil || string(b) != "dump" {
+	if b, err := os.ReadFile(filepath.Join(f.root, "data", "s/archive/file/db1.example.net/f")); err != nil || string(b) != "dump" {
 		t.Fatalf("stored under the hostname: %q %v", b, err)
 	}
 
@@ -1173,7 +1173,7 @@ func TestHostnameAndOriginPaths(t *testing.T) {
 	rec, _ = f.do(t, req{signer: f.user, path: "/backup", meta: fileMeta(body, "prod"), body: body})
 	receipt(t, rec, http.StatusAccepted)
 	f.settle(t)
-	if _, err := os.Stat(filepath.Join(f.root, "s/archive/file/robert.socha/f")); err != nil {
+	if _, err := os.Stat(filepath.Join(f.root, "data", "s/archive/file/robert.socha/f")); err != nil {
 		t.Fatalf("origin falls back to the sender: %v", err)
 	}
 }
@@ -1304,7 +1304,7 @@ func TestPortalOwner(t *testing.T) {
 		rec = httptest.NewRecorder()
 		f.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://lukd.vm:8443"+u.Path, nil))
 		page := rec.Body.String()
-		sc := sidecarOf(t, filepath.Join(f.root, "s/drop"), path.Base(u.Path))
+		sc := sidecarOf(t, filepath.Join(f.root, "data", "s/drop"), path.Base(u.Path))
 		if tc.want == "" {
 			if rec.Code != 200 || strings.Contains(page, "<dt>Sent by</dt>") || strings.Contains(page, "robert.socha") || sc.Owner != "" || !sc.Client.NoOwner {
 				t.Errorf("%s: owner shown, sidecar %q: %d %s", tc.name, sc.Owner, rec.Code, page)
@@ -1327,7 +1327,7 @@ func TestRevealSecretType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sc := sidecarOf(t, filepath.Join(f.root, "s/drop"), path.Base(u.Path)); sc.Client.Type != meta.Type {
+	if sc := sidecarOf(t, filepath.Join(f.root, "data", "s/drop"), path.Base(u.Path)); sc.Client.Type != meta.Type {
 		t.Fatalf("sidecar type %q", sc.Client.Type)
 	}
 	rec = httptest.NewRecorder()

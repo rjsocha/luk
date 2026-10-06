@@ -108,7 +108,7 @@ func newEnv(t *testing.T, concurrency int) *env {
 	root := t.TempDir()
 	cfg := parseCfg(t, fmt.Sprintf(cfgTmpl, root, concurrency))
 	for _, d := range []string{"queue/up", "queue/other", "a", "b", "status/process"} {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
+		if err := os.MkdirAll(filepath.Join(root, "data", d), 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -164,7 +164,7 @@ func (e *env) enqueueWith(t *testing.T, id, endpoint string, mut func(*Job), pip
 
 func (e *env) read(t *testing.T, rel string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(e.root, rel))
+	b, err := os.ReadFile(filepath.Join(e.root, "data", rel))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestRunStepFailsAfterStore(t *testing.T) {
 	if got := e.read(t, "a/file/robert.socha/f.txt"); got != "data-id2" {
 		t.Fatalf("a: %q", got)
 	}
-	gone(t, filepath.Join(e.root, "b/file/r-id2"))
+	gone(t, filepath.Join(e.root, "data", "b/file/r-id2"))
 	gone(t, j.Entry.Dir)
 	r := find(e.logs.records(t), "pipeline failed", "fail")
 	if r == nil {
@@ -361,7 +361,7 @@ func TestResume(t *testing.T) {
 		}
 		d.Wait()
 	}
-	ents, err := os.ReadDir(filepath.Join(e.root, "b", "file"))
+	ents, err := os.ReadDir(filepath.Join(e.root, "data", "b", "file"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +468,7 @@ func TestSubmitSameEntryOnce(t *testing.T) {
 		t.Fatalf("ran %d times", n)
 	}
 	gone(t, j.Entry.Dir)
-	ents, _ := os.ReadDir(filepath.Join(e.root, "b", "file"))
+	ents, _ := os.ReadDir(filepath.Join(e.root, "data", "b", "file"))
 	if len(ents) != 1 {
 		t.Fatalf("b holds %d entries", len(ents))
 	}
@@ -488,8 +488,8 @@ func TestDuplicatePipelineRunsOnce(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("%d done logs", n)
 	}
-	gone(t, filepath.Join(e.root, "b/file/r-dp.1"))
-	ents, _ := os.ReadDir(filepath.Join(e.root, "b", "file"))
+	gone(t, filepath.Join(e.root, "data", "b/file/r-dp.1"))
+	ents, _ := os.ReadDir(filepath.Join(e.root, "data", "b", "file"))
 	if len(ents) != 1 {
 		t.Fatalf("b holds %d entries", len(ents))
 	}
@@ -525,7 +525,7 @@ func TestQueueMetaKeepsHostname(t *testing.T) {
 
 func TestStoreDedupLogged(t *testing.T) {
 	e := newEnv(t, 1)
-	st, _, err := status.Open(status.Path(e.root))
+	st, _, err := status.Open(status.Path(e.cfg.DataDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +563,7 @@ func TestStoreDedupLogged(t *testing.T) {
 	if s := fmt.Sprint(done["stored"]); !strings.Contains(s, "a:robert.socha/f.txt (dedup)") || !strings.Contains(s, "b:r-d2") {
 		t.Fatalf("stored %v", done["stored"])
 	}
-	des, _ := os.ReadDir(filepath.Join(e.root, "a/file/robert.socha"))
+	des, _ := os.ReadDir(filepath.Join(e.root, "data", "a/file/robert.socha"))
 	if len(des) != 1 {
 		t.Fatalf("a holds %d files", len(des))
 	}
@@ -633,7 +633,7 @@ func TestStoreRefreshesWatch(t *testing.T) {
 	e := newEnv(t, 1)
 	every := config.Duration(time.Hour)
 	e.cfg.Storage["b"].Watch = []config.Watch{{Origin: config.StringList{"robert.socha"}, Every: &every}, {Origin: config.StringList{"none"}, Every: &every}}
-	st, _, err := status.Open(status.Path(e.root))
+	st, _, err := status.Open(status.Path(e.cfg.DataDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,7 +660,7 @@ func TestStoreRefreshesWatch(t *testing.T) {
 		ws[0].State != "OK" || ws[0].Copies != 1 || ws[1].Rule != 2 || ws[1].State != "WARN" {
 		t.Fatalf("watch %+v", ws)
 	}
-	b, _ := os.ReadFile(status.Path(e.root))
+	b, _ := os.ReadFile(status.Path(e.cfg.DataDir()))
 	if !strings.Contains(string(b), `"watch": [`) || !strings.Contains(string(b), `"origin": "robert.socha"`) {
 		t.Fatalf("status.json:\n%s", b)
 	}
@@ -676,7 +676,7 @@ func TestStoreRefreshesWatch(t *testing.T) {
 func TestStoreOlderWarned(t *testing.T) {
 	e := newEnv(t, 1)
 	e.cfg.Storage["a"].Conflict = "replace"
-	st, _, err := status.Open(status.Path(e.root))
+	st, _, err := status.Open(status.Path(e.cfg.DataDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

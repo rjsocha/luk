@@ -56,7 +56,7 @@ func quotaCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rows, err := quota.Report(quota.Path(cfg.Root), time.Now())
+			rows, err := quota.Report(quota.Path(cfg.DataDir()), time.Now())
 			if err != nil {
 				return err
 			}

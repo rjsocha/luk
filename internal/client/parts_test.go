@@ -109,7 +109,7 @@ func (e *partsEnv) stream(endpoint string, data []byte) Options {
 // queued is the sha256 of the payload of the backup queue entry id.
 func (e *partsEnv) queued(t *testing.T, id string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(e.root, "q/backup", id, "payload"))
+	b, err := os.ReadFile(filepath.Join(e.root, "data", "q/backup", id, "payload"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func (e *partsEnv) queued(t *testing.T, id string) string {
 // ended without a commit.
 func (e *partsEnv) staged(t *testing.T) []string {
 	t.Helper()
-	ents, err := os.ReadDir(filepath.Join(e.root, "q/backup"))
+	ents, err := os.ReadDir(filepath.Join(e.root, "data", "q/backup"))
 	if err != nil {
 		t.Fatal(err)
 	}

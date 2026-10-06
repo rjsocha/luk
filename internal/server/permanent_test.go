@@ -94,7 +94,7 @@ func TestPermanentUploadServesLast(t *testing.T) {
 		t.Fatalf("list %+v", a.Links)
 	}
 	// A version that is not the current one is listed as a plain link.
-	cur := filepath.Join(f.root, "s/drop/.db/permanent/permanent/rev/hosts.krl/current")
+	cur := filepath.Join(f.root, "data", "s/drop/.db/permanent/permanent/rev/hosts.krl/current")
 	if err := os.Rename(cur, cur+".away"); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestPermanentUploadServesLast(t *testing.T) {
 	if code, _ := f.fetch(t, perm); code != http.StatusNotFound {
 		t.Fatalf("after removing v3: %d", code)
 	}
-	if got := entries(t, filepath.Join(f.root, "s/drop/.db/permanent/permanent/rev/hosts.krl")); len(got) != 0 {
+	if got := entries(t, filepath.Join(f.root, "data", "s/drop/.db/permanent/permanent/rev/hosts.krl")); len(got) != 0 {
 		t.Fatalf("permanent directory %v", got)
 	}
 	f.sendPermanent(t, clock, "rev/hosts.krl", "four")
@@ -254,7 +254,7 @@ func TestPermanentExpiredVersionIs404(t *testing.T) {
 	// The published copy still holds the old expiry: the request checks
 	// the version itself.
 	expired := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
-	meta := filepath.Join(f.root, "s/drop/.db/permanent/permanent/rev/hosts.krl/current/meta.json")
+	meta := filepath.Join(f.root, "data", "s/drop/.db/permanent/permanent/rev/hosts.krl/current/meta.json")
 	b, err := os.ReadFile(meta)
 	if err != nil {
 		t.Fatal(err)

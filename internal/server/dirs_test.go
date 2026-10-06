@@ -13,12 +13,12 @@ func dirsConfig(root string) *config.Config {
 	return &config.Config{
 		Root: root,
 		Listen: map[string]*config.Listen{"l": {Addr: ":1", TLS: &config.TLS{Mode: "self",
-			Cert: filepath.Join(root, "tls", "tls.crt"),
-			Key:  filepath.Join(root, "tls", "tls.key"),
+			Cert: filepath.Join(root, "data", "tls", "tls.crt"),
+			Key:  filepath.Join(root, "data", "tls", "tls.key"),
 		}}},
-		Endpoint: map[string]*config.Endpoint{"b": {Path: filepath.Join(root, "queue", "b")}},
+		Endpoint: map[string]*config.Endpoint{"b": {Path: filepath.Join(root, "data", "queue", "b")}},
 		Storage: map[string]*config.Storage{
-			"a": {Type: "local", Base: filepath.Join(root, "storage", "a")},
+			"a": {Type: "local", Base: filepath.Join(root, "data", "storage", "a")},
 			"s": {Type: "s3", Bucket: "x"},
 		},
 	}
@@ -30,7 +30,7 @@ func TestPrepareDirsCreates(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range []string{"queue/b", "storage/a", "storage/a/.db", "storage/a/file", "tls", "work", "gpg-cache"} {
-		fi, err := os.Stat(filepath.Join(root, d))
+		fi, err := os.Stat(filepath.Join(root, "data", d))
 		if err != nil || !fi.IsDir() {
 			t.Fatalf("%s not created: %v", d, err)
 		}
@@ -38,7 +38,7 @@ func TestPrepareDirsCreates(t *testing.T) {
 			t.Errorf("%s mode %o", d, perm)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(root, "storage", "s")); err == nil {
+	if _, err := os.Stat(filepath.Join(root, "data", "storage", "s")); err == nil {
 		t.Error("s3 storage got a directory")
 	}
 }
@@ -58,7 +58,7 @@ func TestPrepareDirsNotADirectory(t *testing.T) {
 
 func TestPrepareDirsOldLayout(t *testing.T) {
 	root := t.TempDir()
-	base := filepath.Join(root, "storage", "a")
+	base := filepath.Join(root, "data", "storage", "a")
 	if err := os.MkdirAll(filepath.Join(base, ".luk"), 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestPrepareDirsUnreadableTLS(t *testing.T) {
 	}
 	root := t.TempDir()
 	cfg := dirsConfig(root)
-	if err := os.MkdirAll(filepath.Join(root, "tls"), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "data", "tls"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(cfg.Listen["l"].TLS.Key, nil, 0o000); err != nil {

@@ -254,7 +254,7 @@ func TestReloadKeys(t *testing.T) {
 	wantCode(t, "new limit", e.upload(t, second, "/backup", "dump"), http.StatusRequestEntityTooLarge, "limit 2")
 	e.settle(t)
 	var stored []string
-	for _, n := range entries(t, filepath.Join(e.root, "s/archive/file")) {
+	for _, n := range entries(t, filepath.Join(e.root, "data", "s/archive/file")) {
 		if !strings.HasPrefix(n, ".") {
 			stored = append(stored, n)
 		}
@@ -340,7 +340,7 @@ func TestReloadRandomAlphabet(t *testing.T) {
 	wantCode(t, "after", e.upload(t, e.user, "/backup", "b"), http.StatusAccepted, `"size": 1`)
 	e.settle(t)
 	var names []string
-	for _, n := range entries(t, filepath.Join(e.root, "s/archive/file")) {
+	for _, n := range entries(t, filepath.Join(e.root, "data", "s/archive/file")) {
 		if !strings.HasPrefix(n, ".") {
 			names = append(names, n)
 		}
@@ -379,7 +379,7 @@ func TestReloadRefusedOnRestartSetting(t *testing.T) {
 			if err := writeRunning(cur.cfg, "receive"); err != nil {
 				t.Fatal(err)
 			}
-			lock, err := lockRole(e.root, "receive")
+			lock, err := lockRole(cur.cfg.DataDir(), "receive")
 			if err != nil {
 				t.Fatal(err)
 			}

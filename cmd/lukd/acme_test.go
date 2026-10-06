@@ -65,7 +65,7 @@ listen:
 		t.Fatal(err)
 	}
 	prod, stage := cfg.ACMECacheDir(config.DefaultACMEDirectory), cfg.ACMECacheDir(stagingDirectory)
-	other := filepath.Join(root, "acme", "ca.example.com_14000_dir")
+	other := filepath.Join(root, "data", "acme", "ca.example.com_14000_dir")
 	issuer := testIssuer(t)
 	for dir, names := range map[string][]string{prod: {"a.example.com", "gone.example.com"}, stage: {"s.example.com"}, other: {"x.example.com"}} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -137,9 +137,9 @@ func writeStatus(t *testing.T, dir string, st acmecert.Status) {
 }
 
 // holdReceive takes the lock of the receive role as a running lukd does.
-func holdReceive(t *testing.T, root string) {
+func holdReceive(t *testing.T, data string) {
 	t.Helper()
-	f, err := os.OpenFile(filepath.Join(root, ".lukd-receive.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(filepath.Join(data, "receive.lock"), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestACMELs(t *testing.T) {
 
 	// With the receive role running the status columns come from its
 	// status.json.
-	holdReceive(t, cfg.Root)
+	holdReceive(t, cfg.DataDir())
 	out, err = runLukd(t, "tls", "acme", "ls", "-c", cfgPath)
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestACMELs(t *testing.T) {
 func TestACMEPrune(t *testing.T) {
 	cfgPath, cfg := acmeCacheConfig(t)
 	prod, stage := cfg.ACMECacheDir(config.DefaultACMEDirectory), cfg.ACMECacheDir(stagingDirectory)
-	other := filepath.Join(cfg.Root, "acme", "ca.example.com_14000_dir")
+	other := filepath.Join(cfg.DataDir(), "acme", "ca.example.com_14000_dir")
 	gone, x := acmecert.CertFile(prod, "gone.example.com"), acmecert.CertFile(other, "x.example.com")
 	out, err := runLukd(t, "tls", "acme", "prune", "--dry-run", "-c", cfgPath)
 	if err != nil || out != "would remove "+gone+"\nwould remove "+x+"\n" {
@@ -264,7 +264,7 @@ func TestACMEPrune(t *testing.T) {
 }
 
 // TestACMEAsOwner covers the decision of the acme commands for the
-// calling uid against the owner of <root>/acme.
+// calling uid against the owner of <root>/data/acme.
 func TestACMEAsOwner(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("runs as root")
@@ -290,7 +290,7 @@ func TestACMEAsOwner(t *testing.T) {
 	if u, err := user.Current(); err == nil {
 		name = u.Username
 	}
-	want := "lukd tls acme must run as root or as " + name + " (owner of " + filepath.Join(cfg.Root, "acme") + ")"
+	want := "lukd tls acme must run as root or as " + name + " (owner of " + filepath.Join(cfg.DataDir(), "acme") + ")"
 	if _, err := runLukd(t, "tls", "acme", "prune", "-c", cfgPath); err == nil || err.Error() != want || called {
 		t.Fatalf("reexeced root: %v", err)
 	}
@@ -500,7 +500,7 @@ func TestACMEPruneOnlyCertificates(t *testing.T) {
 	if err := os.WriteFile(pem, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	acme := filepath.Join(cfg.Root, "acme")
+	acme := filepath.Join(cfg.DataDir(), "acme")
 	if err := os.RemoveAll(acme); err != nil {
 		t.Fatal(err)
 	}
@@ -518,15 +518,15 @@ func TestACMEPruneOnlyCertificates(t *testing.T) {
 	}
 }
 
-// Without <root>/acme, root still runs the acme commands as the owner of
-// root: it never creates or writes anything in a directory the service
-// user could put back as a symlink.
+// Without <root>/data/acme, root still runs the acme commands as the owner
+// of <root>/data: it never creates or writes anything in a directory the
+// service user could put back as a symlink.
 func TestACMEAsOwnerWithoutCache(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("runs as root")
 	}
 	cfgPath, cfg := acmeCacheConfig(t)
-	if err := os.RemoveAll(filepath.Join(cfg.Root, "acme")); err != nil {
+	if err := os.RemoveAll(filepath.Join(cfg.DataDir(), "acme")); err != nil {
 		t.Fatal(err)
 	}
 	var gotUID uint32
@@ -544,7 +544,7 @@ func TestACMEAsOwnerWithoutCache(t *testing.T) {
 			t.Fatalf("%v: %v called %v uid %d", args, err, called, gotUID)
 		}
 	}
-	if _, err := os.Lstat(filepath.Join(cfg.Root, "acme")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(cfg.DataDir(), "acme")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("acme created as root: %v", err)
 	}
 }

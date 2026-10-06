@@ -42,10 +42,10 @@ pipeline:
 		!strings.HasPrefix(first.String(), "alpha 127.0.0.1:8444 sha256//") || !strings.Contains(first.String(), "\nzeta 127.0.0.1:8443 sha256//") {
 		t.Fatalf("first run:\n%s", first.String())
 	}
-	if err := os.Remove(filepath.Join(dir, "b.crt")); err != nil {
+	if err := os.Remove(filepath.Join(dir, "data", "b.crt")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(dir, "b.key")); err != nil {
+	if err := os.Remove(filepath.Join(dir, "data", "b.key")); err != nil {
 		t.Fatal(err)
 	}
 	var second bytes.Buffer
@@ -56,7 +56,7 @@ pipeline:
 	if len(l2) != 2 || l2[0] != l1[0]+" (exists)" || strings.Contains(l2[1], "(exists)") || l2[1] == l1[1] {
 		t.Fatalf("second run:\n%s", second.String())
 	}
-	if err := os.Remove(filepath.Join(dir, "b.key")); err != nil {
+	if err := os.Remove(filepath.Join(dir, "data", "b.key")); err != nil {
 		t.Fatal(err)
 	}
 	var third bytes.Buffer

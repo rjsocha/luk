@@ -43,7 +43,7 @@ func newScanEnv(t *testing.T) *scanEnv {
 	e.key, pub = newKeyFile(t)
 	_, otherPub = newKeyFile(t)
 	var err error
-	if e.pin, err = tlsself.Generate(filepath.Join(root, "tls/s.crt"), filepath.Join(root, "tls/s.key"), "luk.test", tlsself.ECDSAP256); err != nil {
+	if e.pin, err = tlsself.Generate(filepath.Join(root, "data/tls/s.crt"), filepath.Join(root, "data/tls/s.key"), "luk.test", tlsself.ECDSAP256); err != nil {
 		t.Fatal(err)
 	}
 	text := fmt.Sprintf(`
@@ -315,7 +315,7 @@ func TestMixedListener(t *testing.T) {
 	tempConfig(t)
 	addr, root := freeAddr(t), t.TempDir()
 	key, pub := newKeyFile(t)
-	spki, err := tlsself.Generate(filepath.Join(root, "tls/s.crt"), filepath.Join(root, "tls/s.key"), "luk.test", tlsself.ECDSAP256)
+	spki, err := tlsself.Generate(filepath.Join(root, "data/tls/s.crt"), filepath.Join(root, "data/tls/s.key"), "luk.test", tlsself.ECDSAP256)
 	if err != nil {
 		t.Fatal(err)
 	}

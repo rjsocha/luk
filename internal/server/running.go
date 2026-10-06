@@ -13,14 +13,15 @@ import (
 	"luk/internal/config"
 )
 
-// roles names every role; each has its lock and running file under root.
+// roles names every role; each has its lock and running file in
+// <root>/data.
 var roles = []string{"receive", "process"}
 
 // runningFile keeps the restart-only settings a role runs with, so lukd
 // check can tell a change that its reload would refuse. It is only read
 // while the role holds its lock: a file left by a stopped role is ignored.
-func runningFile(root, name string) string {
-	return filepath.Join(root, ".lukd-"+name+".running.json")
+func runningFile(data, name string) string {
+	return filepath.Join(data, name+".running.json")
 }
 
 // writeRunning replaces the running file of the role with the restart-only
@@ -30,7 +31,7 @@ func writeRunning(cfg *config.Config, role string) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(runningFile(cfg.Root, role), append(data, '\n'))
+	return writeAtomic(runningFile(cfg.DataDir(), role), append(data, '\n'))
 }
 
 func writeAtomic(p string, data []byte) error {
@@ -76,7 +77,7 @@ func RunningChanges(cfg *config.Config) (changes, notes []string, err error) {
 	next := cfg.Restart()
 	running := false
 	for _, name := range roles {
-		held, err := roleHeld(cfg.Root, name)
+		held, err := roleHeld(cfg.DataDir(), name)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -84,7 +85,7 @@ func RunningChanges(cfg *config.Config) (changes, notes []string, err error) {
 			continue
 		}
 		running = true
-		p := runningFile(cfg.Root, name)
+		p := runningFile(cfg.DataDir(), name)
 		data, err := os.ReadFile(p)
 		if errors.Is(err, os.ErrNotExist) {
 			notes = append(notes, fmt.Sprintf("the %s role runs on %s without %s: its restart-only settings are not compared", name, cfg.Root, p))
@@ -110,22 +111,22 @@ func RunningChanges(cfg *config.Config) (changes, notes []string, err error) {
 }
 
 // RoleRunning reports whether a lukd runs the role (receive or process)
-// on root, that is holds its lock.
-func RoleRunning(root, role string) (bool, error) {
-	return roleLocked(root, role, "")
+// with the data directory data (<root>/data), that is holds its lock.
+func RoleRunning(data, role string) (bool, error) {
+	return roleLocked(data, role, "")
 }
 
 // roleHeld is RoleRunning for lukd check.
-func roleHeld(root, name string) (bool, error) {
-	return roleLocked(root, name, " (lukd check --no-running skips the comparison with the running lukd)")
+func roleHeld(data, name string) (bool, error) {
+	return roleLocked(data, name, " (lukd check --no-running skips the comparison with the running lukd)")
 }
 
-// roleLocked reports whether a lukd holds the lock of the role on root;
+// roleLocked reports whether a lukd holds the lock of the role in data;
 // hint follows an error opening the lock. The probe takes a shared lock
 // for an instant; a role starting at that very moment retries its lock
 // (see lockRole).
-func roleLocked(root, name, hint string) (bool, error) {
-	p := filepath.Join(root, ".lukd-"+name+".lock")
+func roleLocked(data, name, hint string) (bool, error) {
+	p := filepath.Join(data, name+".lock")
 	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil

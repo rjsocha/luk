@@ -103,7 +103,7 @@ printf '{"kind": "upper"}' > "$LUK_OUT/up.txt.meta.json"
 		t.Fatalf("logs %v", recs)
 	}
 	sn := <-got
-	if sn.req.Job != "s3-upload" || sn.req.Work != filepath.Join(e.root, "work", "id1", "p", "2") ||
+	if sn.req.Job != "s3-upload" || sn.req.Work != filepath.Join(e.root, "data", "work", "id1", "p", "2") ||
 		sn.in != "up.txt up.txt.meta.json " || !sn.meta || !sn.empty {
 		t.Fatalf("job saw %+v", sn)
 	}
@@ -117,7 +117,7 @@ printf '{"kind": "upper"}' > "$LUK_OUT/up.txt.meta.json"
 	if r := findStep(recs, "step output", 1); r == nil || r["output"] != "converted\n" {
 		t.Fatalf("run output %v", recs)
 	}
-	gone(t, filepath.Join(e.root, "work", "id1"))
+	gone(t, filepath.Join(e.root, "data", "work", "id1"))
 	gone(t, j.Entry.Dir)
 }
 
@@ -186,7 +186,7 @@ func TestRelayFailures(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fakeRund(t, c.handle)
 			e := newRunEnv(t, "    steps:\n      - relay: s3-upload\n      - store: a\n")
-			st := status.New(status.Path(e.root))
+			st := status.New(status.Path(e.cfg.DataDir()))
 			d := e.dispatcher()
 			d.SetStatus(st)
 			if err := d.Submit(e.enqueue(t, "f1", "up", "p")); err != nil {
@@ -204,7 +204,7 @@ func TestRelayFailures(t *testing.T) {
 			if len(es) != 1 || es[0].FailedStep != 1 || !strings.HasPrefix(es[0].Error, c.err) || !strings.HasSuffix(es[0].Error, c.output) {
 				t.Fatalf("entries %+v", es)
 			}
-			if ents, _ := os.ReadDir(filepath.Join(e.root, "a", "file")); len(ents) != 0 {
+			if ents, _ := os.ReadDir(filepath.Join(e.root, "data", "a", "file")); len(ents) != 0 {
 				t.Fatalf("stored %v", ents)
 			}
 		})

@@ -167,7 +167,7 @@ func TestEncryptMissingPassword(t *testing.T) {
 		if r == nil || !strings.Contains(fmt.Sprint(r["error"]), filepath.Join(g.cfg.PasswordDir, "gone")) {
 			t.Fatalf("%s: logs %v", name, g.logs.records(t))
 		}
-		if entries, _ := os.ReadDir(filepath.Join(g.root, "a", "file", "robert.socha")); len(entries) > 0 {
+		if entries, _ := os.ReadDir(filepath.Join(g.root, "data", "a", "file", "robert.socha")); len(entries) > 0 {
 			t.Fatalf("%s: stored %v", name, entries)
 		}
 	}
@@ -244,7 +244,7 @@ printf other > "$LUK_OUT/db-2026.sql.zst"
 	if find(g.logs.records(t), "pipeline done", "p") == nil {
 		t.Fatalf("logs %v", g.logs.records(t))
 	}
-	dir := filepath.Join(g.root, "a", "file", "robert.socha")
+	dir := filepath.Join(g.root, "data", "a", "file", "robert.socha")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)

@@ -48,7 +48,7 @@ func TestRunningFileAtStartAndReload(t *testing.T) {
 	e := newRoleEnv(t)
 	var logs syncBuf
 	e.start(t, Receive, &logs)
-	p := runningFile(e.root, "receive")
+	p := runningFile(e.cfg.DataDir(), "receive")
 	fi, err := os.Stat(p)
 	if err != nil {
 		t.Fatal(err)
@@ -56,10 +56,10 @@ func TestRunningFileAtStartAndReload(t *testing.T) {
 	if fi.Mode().Perm() != 0o640 {
 		t.Fatalf("mode %v", fi.Mode())
 	}
-	if c := readRunning(t, e.root, "receive").Changes(e.cfg.Restart()); len(c) != 0 {
+	if c := readRunning(t, e.cfg.DataDir(), "receive").Changes(e.cfg.Restart()); len(c) != 0 {
 		t.Fatalf("running file differs: %v", c)
 	}
-	if exists(runningFile(e.root, "process")) {
+	if exists(runningFile(e.cfg.DataDir(), "process")) {
 		t.Fatal("receive wrote the running file of process")
 	}
 	if err := os.Remove(p); err != nil {
@@ -70,7 +70,7 @@ func TestRunningFileAtStartAndReload(t *testing.T) {
 	}
 	waitFor(t, "reload", func() bool { return strings.Contains(logs.String(), `msg="config reloaded"`) })
 	waitFor(t, "running file", func() bool { return exists(p) })
-	if c := readRunning(t, e.root, "receive").Changes(e.cfg.Restart()); len(c) != 0 {
+	if c := readRunning(t, e.cfg.DataDir(), "receive").Changes(e.cfg.Restart()); len(c) != 0 {
 		t.Fatalf("running file after reload differs: %v", c)
 	}
 }
@@ -79,10 +79,10 @@ func TestProcessWritesItsRunningFile(t *testing.T) {
 	e := newRoleEnv(t)
 	var logs syncBuf
 	e.start(t, Process, &logs)
-	if c := readRunning(t, e.root, "process").Changes(e.cfg.Restart()); len(c) != 0 {
+	if c := readRunning(t, e.cfg.DataDir(), "process").Changes(e.cfg.Restart()); len(c) != 0 {
 		t.Fatalf("running file differs: %v", c)
 	}
-	if exists(runningFile(e.root, "receive")) {
+	if exists(runningFile(e.cfg.DataDir(), "receive")) {
 		t.Fatal("process wrote the running file of receive")
 	}
 }
@@ -108,7 +108,7 @@ func TestRunningChangesLockNotHeld(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	f, err := lockRole(e.root, "receive")
+	f, err := lockRole(e.cfg.DataDir(), "receive")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestRunningChangesLockNotHeld(t *testing.T) {
 
 func TestRunningChangesWithoutRunningFile(t *testing.T) {
 	e := newRoleEnv(t)
-	f, err := lockRole(e.root, "process")
+	f, err := lockRole(e.cfg.DataDir(), "process")
 	if err != nil {
 		t.Fatal(err)
 	}

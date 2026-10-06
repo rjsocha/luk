@@ -49,7 +49,7 @@ func newVaultEnvStorage(t *testing.T, auth string, catalog bool) *vaultEnv {
 	var pub, otherPub string
 	e.key, pub = newKeyFile(t)
 	e.other, otherPub = newKeyFile(t)
-	crt, key := filepath.Join(e.root, "tls/s.crt"), filepath.Join(e.root, "tls/s.key")
+	crt, key := filepath.Join(e.root, "data/tls/s.crt"), filepath.Join(e.root, "data/tls/s.key")
 	var err error
 	if e.pin, err = tlsself.Generate(crt, key, "luk.test", tlsself.ECDSAP256); err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ expose:
   vault: {listen: secure, path: /v/, index: %t, auth: %s}
 `, e.root, addr, addr, saddr, saddr, pub, otherPub, catalog, strings.Contains(auth, "basic"), auth)
 	startLukd(t, filepath.Join(t.TempDir(), "config.yaml"), text, saddr)
-	return &vaultEnv{privateEnv: e, st: store.Local{Base: filepath.Join(e.root, "s/vault"), Conflict: "replace", Catalog: catalog},
+	return &vaultEnv{privateEnv: e, st: store.Local{Base: filepath.Join(e.root, "data/s/vault"), Conflict: "replace", Catalog: catalog},
 		url: "luk://" + saddr + "/v/#" + e.pin}
 }
 
