@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -41,6 +42,7 @@ func content(t *testing.T, f *os.File) []byte {
 }
 
 func TestCloneCopiesWhenCloneUnsupported(t *testing.T) {
+	t.Cleanup(func() { ficlone = unix.IoctlFileClone })
 	data := bytes.Repeat([]byte("0123456789abcdef"), 70000) // over 1 MiB
 	for _, e := range []error{unix.EXDEV, unix.EOPNOTSUPP, unix.EINVAL} {
 		ficlone = func(int, int) error { return e }
@@ -52,7 +54,6 @@ func TestCloneCopiesWhenCloneUnsupported(t *testing.T) {
 			t.Fatalf("%v: content differs", e)
 		}
 	}
-	ficlone = unix.IoctlFileClone
 }
 
 func TestCloneReturnsOtherErrors(t *testing.T) {
@@ -194,5 +195,29 @@ func TestPlaceName(t *testing.T) {
 		if err := Place(d, name, srcFile(t, "x"), 0o400, true); err == nil {
 			t.Errorf("%q accepted", name)
 		}
+	}
+}
+
+func TestPlaceLongName(t *testing.T) {
+	d := placeDir(t)
+	name := strings.Repeat("n", 255)
+	if err := Place(d, name, srcFile(t, "x"), 0o400, true); err != nil {
+		t.Fatal(err)
+	}
+	if n := names(t, d); !slices.Equal(n, []string{name}) {
+		t.Fatalf("entries %v", n)
+	}
+}
+
+func TestCloneRefusesNonRegular(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	_, dst := cloneFiles(t, nil)
+	if err := Clone(dst, r); err == nil {
+		t.Fatal("pipe accepted")
 	}
 }

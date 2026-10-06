@@ -87,6 +87,7 @@ func (a *volArgsV2) setName(name string) error {
 	return nil
 }
 
+// IsBtrfs reports whether path lies on btrfs.
 func IsBtrfs(path string) (bool, error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {
@@ -95,6 +96,7 @@ func IsBtrfs(path string) (bool, error) {
 	return uint32(st.Type) == SuperMagic, nil
 }
 
+// IsBtrfsFd reports whether fd lies on btrfs.
 func IsBtrfsFd(fd int) (bool, error) {
 	var st unix.Statfs_t
 	if err := unix.Fstatfs(fd, &st); err != nil {
@@ -103,6 +105,8 @@ func IsBtrfsFd(fd int) (bool, error) {
 	return uint32(st.Type) == SuperMagic, nil
 }
 
+// IsSubvolume reports whether fd is the root directory of a btrfs
+// subvolume.
 func IsSubvolume(fd int) (bool, error) {
 	ok, err := IsBtrfsFd(fd)
 	if err != nil || !ok {
@@ -115,6 +119,8 @@ func IsSubvolume(fd int) (bool, error) {
 	return st.Ino == SubvolInode && st.Mode&unix.S_IFMT == unix.S_IFDIR, nil
 }
 
+// CreateSubvolume creates the empty subvolume name in the directory
+// parentFd.
 func CreateSubvolume(parentFd int, name string) error {
 	var a volArgsV2
 	if err := a.setName(name); err != nil {
@@ -192,6 +198,9 @@ func parseRootRefs(buf []byte, n uint32) (ids []uint64, last uint64, err error) 
 	return ids, last, nil
 }
 
+// Descendants are the ids of every subvolume below id, each listed
+// after the ones inside it; id itself is not listed. Needs
+// CAP_SYS_ADMIN.
 func Descendants(fd int, id uint64) ([]uint64, error) {
 	return leavesFirst(id, func(p uint64) ([]uint64, error) { return Children(fd, p) })
 }

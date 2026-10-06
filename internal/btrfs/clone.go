@@ -37,25 +37,33 @@ func copyAt(dst, src *os.File) error {
 	if err != nil {
 		return err
 	}
+	if !fi.Mode().IsRegular() {
+		return errors.New("clone: source is not a regular file")
+	}
 	size := fi.Size()
 	var roff, woff int64
 	for roff < size {
 		n, err := unix.CopyFileRange(int(src.Fd()), &roff, int(dst.Fd()), &woff, int(min(size-roff, 1<<30)), 0)
 		if err != nil {
 			if errors.Is(err, unix.EXDEV) || errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EINVAL) {
-				_, err = io.Copy(io.NewOffsetWriter(dst, woff), io.NewSectionReader(src, roff, size-roff))
+				var c int64
+				c, err = io.Copy(io.NewOffsetWriter(dst, woff), io.NewSectionReader(src, roff, size-roff))
+				if err == nil && c != size-roff {
+					err = io.ErrUnexpectedEOF
+				}
 			}
 			return err
 		}
 		if n == 0 {
-			break
+			return io.ErrUnexpectedEOF
 		}
 	}
 	return nil
 }
 
 // Place puts a copy of src into dir as name: Clone into a new temporary
-// file .<name>.tmp-<random>, chmod to mode, then rename it to name. With
+// file .<random>.tmp (its length independent of name, which may take all
+// 255 bytes), chmod to mode, then rename it to name. With
 // noReplace an existing name is kept and the error wraps EEXIST. On any
 // failure the temporary file is removed.
 func Place(dir *os.File, name string, src *os.File, mode os.FileMode, noReplace bool) error {
@@ -63,7 +71,7 @@ func Place(dir *os.File, name string, src *os.File, mode os.FileMode, noReplace 
 		return fmt.Errorf("place %q: invalid name", name)
 	}
 	dfd := int(dir.Fd())
-	tmp := "." + name + ".tmp-" + rand.Text()
+	tmp := "." + rand.Text() + ".tmp"
 	fd, err := unix.Openat(dfd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return fmt.Errorf("place %s: %w", name, err)

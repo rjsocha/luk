@@ -7,8 +7,6 @@ import (
 	"slices"
 	"testing"
 	"unsafe"
-
-	"golang.org/x/sys/unix"
 )
 
 func TestLayout(t *testing.T) {
@@ -143,7 +141,10 @@ func TestSubvolumesOnBtrfs(t *testing.T) {
 	if err := CreateSubvolume(int(ws.Fd()), "inner"); err != nil {
 		t.Fatal(err)
 	}
-	inner, _ := os.Open(filepath.Join(dir, "ws", "inner"))
+	inner, err := os.Open(filepath.Join(dir, "ws", "inner"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := CreateSubvolume(int(inner.Fd()), "leaf"); err != nil {
 		t.Fatal(err)
 	}
@@ -167,5 +168,4 @@ func TestSubvolumesOnBtrfs(t *testing.T) {
 	if ok, _ := IsBtrfs(dir); !ok {
 		t.Fatal("LUK_TEST_BTRFS is not on btrfs")
 	}
-	_ = unix.BTRFS_SUPER_MAGIC
 }
