@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -30,6 +31,25 @@ const (
 // wire.MaxNameLen bytes.
 func ValidName(n string) bool {
 	return n != "" && !strings.HasPrefix(n, ".") && !strings.Contains(n, "/") && !wire.HasControl(n) && len(n) <= wire.MaxNameLen
+}
+
+// SetNames is the file set of in/ whose regular files are named regular:
+// those names sorted, without a <name>.meta.json next to its file <name>,
+// which is that file's meta.
+func SetNames(regular []string) []string {
+	have := make(map[string]bool, len(regular))
+	for _, n := range regular {
+		have[n] = true
+	}
+	names := []string{}
+	for n := range have {
+		if base, ok := strings.CutSuffix(n, MetaExt); ok && have[base] {
+			continue
+		}
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // CheckMeta validates a per-file meta (a JSON object of at most MaxMeta

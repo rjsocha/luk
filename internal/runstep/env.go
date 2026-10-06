@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -137,21 +136,13 @@ func ReadWork(r *os.Root) (WorkMeta, []string, error) {
 	if err != nil {
 		return m, nil, fmt.Errorf("in: %w", err)
 	}
-	regular := map[string]bool{}
+	var regular []string
 	for _, e := range ents {
 		if e.Type().IsRegular() {
-			regular[e.Name()] = true
+			regular = append(regular, e.Name())
 		}
 	}
-	var names []string
-	for n := range regular {
-		if base, ok := strings.CutSuffix(n, MetaExt); ok && regular[base] {
-			continue
-		}
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return m, names, nil
+	return m, SetNames(regular), nil
 }
 
 // decodeWorkMeta decodes b, exactly one JSON object, into m, refusing

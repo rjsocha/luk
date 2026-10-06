@@ -1,6 +1,7 @@
 package runstep
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -41,5 +42,16 @@ func TestFailText(t *testing.T) {
 	got := FailText([]byte(strings.Repeat("x", MaxFail-1) + "étail"))
 	if len(got) != MaxFail-1 || !utf8.ValidString(got) {
 		t.Fatalf("cap: %d", len(got))
+	}
+}
+
+func TestSetNames(t *testing.T) {
+	got := SetNames([]string{"b", "a.meta.json", "a", "lone.meta.json", "c.meta.json.meta.json", "c.meta.json"})
+	want := []string{"a", "b", "c.meta.json", "lone.meta.json"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%q, want %q", got, want)
+	}
+	if got := SetNames(nil); len(got) != 0 {
+		t.Fatalf("%q", got)
 	}
 }

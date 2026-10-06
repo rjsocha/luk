@@ -65,37 +65,29 @@ func readJSON(p string, limit int64) ([]byte, error) {
 }
 
 // inputs lists the files of in/ sorted by name, a <name>.meta.json next to
-// its file being that file's meta.
+// its file being that file's meta (runstep.SetNames).
 func inputs(work string) ([]inputFile, error) {
 	in := filepath.Join(work, "in")
 	ents, err := os.ReadDir(in)
 	if err != nil {
 		return nil, err
 	}
-	regular := map[string]int64{}
+	size := map[string]int64{}
+	var regular []string
 	for _, e := range ents {
 		fi, err := os.Lstat(filepath.Join(in, e.Name()))
 		if err != nil {
 			return nil, err
 		}
 		if fi.Mode().IsRegular() {
-			regular[e.Name()] = fi.Size()
+			size[e.Name()] = fi.Size()
+			regular = append(regular, e.Name())
 		}
 	}
 	list := []inputFile{}
-	for _, e := range ents {
-		name := e.Name()
-		size, ok := regular[name]
-		if !ok {
-			continue
-		}
-		if base, isMeta := strings.CutSuffix(name, runstep.MetaExt); isMeta {
-			if _, has := regular[base]; has {
-				continue
-			}
-		}
-		f := inputFile{Path: filepath.Join(in, name), Name: name, Size: size, Meta: json.RawMessage("{}")}
-		if _, has := regular[name+runstep.MetaExt]; has {
+	for _, name := range runstep.SetNames(regular) {
+		f := inputFile{Path: filepath.Join(in, name), Name: name, Size: size[name], Meta: json.RawMessage("{}")}
+		if _, has := size[name+runstep.MetaExt]; has {
 			b, err := readJSON(filepath.Join(in, name+runstep.MetaExt), runstep.MaxMeta)
 			if err != nil {
 				return nil, err
@@ -106,7 +98,6 @@ func inputs(work string) ([]inputFile, error) {
 		}
 		list = append(list, f)
 	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
 	return list, nil
 }
 
