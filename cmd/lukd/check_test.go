@@ -116,3 +116,34 @@ func TestCheckWarnsRelayWithoutJobFile(t *testing.T) {
 		t.Fatalf("unreadable run.d: %q %q %v", out, errOut, err)
 	}
 }
+
+func TestCheckWarnsRelayPipelineNotListed(t *testing.T) {
+	cfgPath, _ := statusConfig(t)
+	text, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relays := strings.Replace(string(text), "steps: [{store: archive}]", "steps: [{relay: s3-upload}, {relay: notify}, {store: archive}]", 1)
+	if err := os.WriteFile(cfgPath, []byte(relays), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	writeIdentity(t, cfgPath)
+	jobs := t.TempDir()
+	os.Chmod(jobs, 0o755)
+	for f, data := range map[string]string{
+		"s3-upload.yaml": "command: /opt/luk/s3\npipelines: [offsite]\n",
+		"notify.yaml":    "command: /opt/luk/notify\npipelines: [offsite, archive]\n",
+	} {
+		if err := os.WriteFile(filepath.Join(jobs, f), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := runJobs
+	t.Cleanup(func() { runJobs = old })
+	runJobs = jobs
+	out, errOut, err := runCheck(t, "--no-running", "-c", cfgPath)
+	want := "warning: pipeline archive: step 1: relay job s3-upload does not list the pipeline in its pipelines\n"
+	if err != nil || out != "ok\n" || errOut != want {
+		t.Fatalf("%q %q %v", out, errOut, err)
+	}
+}

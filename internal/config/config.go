@@ -2603,14 +2603,18 @@ var (
 // maxJobName caps the name of a job of lukd run.
 const maxJobName = 64
 
+// maxPipelineName caps a pipeline name, a directory name of its work
+// directories and, for lukd run, of state directories and lock files.
+const maxPipelineName = 128
+
 // ValidJobName reports whether n may name a job of lukd run (the base name
 // of its file in run.d) and so the job of a relay step.
 func ValidJobName(n string) bool { return len(n) <= maxJobName && jobName.MatchString(n) }
 
 // ValidPipelineName reports whether n may name a pipeline: [A-Za-z0-9_.-],
-// not starting with a dot or a dash. lukd run refuses a work directory of
-// any other pipeline name.
-func ValidPipelineName(n string) bool { return pipelineName.MatchString(n) }
+// not starting with a dot or a dash, at most maxPipelineName bytes. lukd
+// run refuses a work directory of any other pipeline name.
+func ValidPipelineName(n string) bool { return len(n) <= maxPipelineName && pipelineName.MatchString(n) }
 
 // ValidPasswordName reports whether n may name a password: the file of it
 // in password.d follows the name rule of a job file in run.d.

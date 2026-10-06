@@ -21,8 +21,14 @@ command: /opt/luk/s3-upload
 credentials:
   s3: /etc/site/lukd/s3.credentials
 
-# RuntimeMaxSec of the job. Default: 1h.
+# RuntimeMaxSec of the job, under 7 days. Default: 1h.
 timeout: 1h
+
+# The pipelines the job runs for, required: a request from a work
+# directory of any other pipeline is refused. List the pipelines whose
+# relay step names the job and those whose run programs call it with
+# luk-job run.
+pipelines: [offsite]
 
 # State directory kept between runs, one per job and pipeline:
 # /var/lib/lukd-run/<job>/<pipeline>, in LUK_STATE (absent without state).

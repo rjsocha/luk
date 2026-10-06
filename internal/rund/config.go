@@ -67,6 +67,7 @@ type Job struct {
 	Timeout     config.Duration   `yaml:"timeout"`
 	Env         map[string]string `yaml:"env"`
 	State       string            `yaml:"state"`
+	Pipelines   []string          `yaml:"pipelines"`
 }
 
 // checkSafe refuses a file or directory not owned by owner or writable by
@@ -256,6 +257,14 @@ func (j *Job) validate() error {
 	// RuntimeMaxSec above twice that.
 	if time.Duration(j.Timeout) >= config.MaxPipelineTimeout {
 		bad("timeout: must be under %v", config.MaxPipelineTimeout)
+	}
+	if len(j.Pipelines) == 0 {
+		bad("pipelines: required")
+	}
+	for _, p := range j.Pipelines {
+		if !config.ValidPipelineName(p) {
+			bad("pipelines: %q: invalid pipeline name", p)
+		}
 	}
 	if j.State != "" && j.State != StateLocked && j.State != StateShared {
 		bad("state %q: want %s or %s", j.State, StateLocked, StateShared)

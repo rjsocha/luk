@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -133,6 +134,9 @@ func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, 
 	work, pipeline, gid, err := CheckWork(g.Root, req.Work, peer)
 	if err != nil {
 		return refusal{err}
+	}
+	if !slices.Contains(job.Pipelines, pipeline) {
+		return refusal{fmt.Errorf("job %s: pipeline %s not allowed", req.Job, pipeline)}
 	}
 	// The path-bound variables come from the checked path and run.yaml,
 	// the free-form metadata from the request: lukd run never reads the

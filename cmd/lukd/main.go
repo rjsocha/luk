@@ -107,7 +107,8 @@ func rootCmd() *cobra.Command {
 			"config.yaml, config.d, ssh.d, the tls files, the eab key file, gpg.keys and\n" +
 			"the passwords.\n" +
 			"A relay step whose job has no file in " + rund.DefaultJobs + " is a warning when\n" +
-			"that directory is readable.",
+			"that directory is readable, and so is one whose readable job file does not\n" +
+			"list the pipeline in its pipelines.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(cfgPath)

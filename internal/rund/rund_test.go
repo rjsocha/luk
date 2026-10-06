@@ -46,6 +46,7 @@ credentials:
 timeout: 30m
 env:
   BUCKET: example-backup
+pipelines: [p, offsite]
 `
 
 func TestLoadGlobal(t *testing.T) {
@@ -86,7 +87,7 @@ func TestLoadJobsRules(t *testing.T) {
 	os.Mkdir(d, 0o755)
 	files := map[string]string{
 		"s3-upload.yaml":           s3Job,
-		"min.yaml":                 "user: nobody\ncommand: /bin/true\n",
+		"min.yaml":                 "user: nobody\ncommand: /bin/true\npipelines: [p]\n",
 		".hidden.yaml":             s3Job,
 		"notes.txt":                s3Job,
 		"old.yaml~":                s3Job,
@@ -100,14 +101,19 @@ func TestLoadJobsRules(t *testing.T) {
 		"luk-work.yaml":            "user: a\ncommand: /x\nenv:\n  LUK_WORK: /tmp\n",
 		"luk-any.yaml":             "user: a\ncommand: /x\nenv:\n  LUK_STATE: /tmp\n",
 		"bad-state.yaml":           "user: a\ncommand: /x\nstate: exclusive\n",
-		"locked.yaml":              "command: /x\nstate: locked\n",
-		"shared.yaml":              "user: a\ncommand: /x\nstate: shared\n",
-		"no-user.yaml":             "command: /x\ngroups: [luk]\n",
+		"locked.yaml":              "command: /x\nstate: locked\npipelines: [p]\n",
+		"shared.yaml":              "user: a\ncommand: /x\nstate: shared\npipelines: [p]\n",
+		"no-user.yaml":             "command: /x\ngroups: [luk]\npipelines: [p]\n",
 		"group-no-user.yaml":       "group: luk\ncommand: /x\n",
 		"no-command.yaml":          "user: a\n",
 		"short.yaml":               "user: a\ncommand: /x\ntimeout: 10ms\n",
 		"long.yaml":                "user: a\ncommand: /x\ntimeout: 168h\n",
-		"longest.yaml":             "user: a\ncommand: /x\ntimeout: 167h\n",
+		"longest.yaml":             "user: a\ncommand: /x\ntimeout: 167h\npipelines: [p]\n",
+		"no-pipelines.yaml":        "user: a\ncommand: /x\n",
+		"empty-pipelines.yaml":     "user: a\ncommand: /x\npipelines: []\n",
+		"bad-pipeline.yaml":        "user: a\ncommand: /x\npipelines: [p, 'a b']\n",
+		"dot-pipeline.yaml":        "user: a\ncommand: /x\npipelines: [.p]\n",
+		"long-pipeline.yaml":       "user: a\ncommand: /x\npipelines: [" + strings.Repeat("p", 129) + "]\n",
 		"bad-cred.yaml":            "user: a\ncommand: /x\ncredentials:\n  a:b: /x\n",
 		"group-writable.yaml":      s3Job,
 		"symlink.yaml":             "",
@@ -140,7 +146,8 @@ func TestLoadJobsRules(t *testing.T) {
 	if !slices.Equal(ok, []string{"locked", "longest", "min", "no-user", "s3-upload", "shared"}) {
 		t.Fatalf("ok %v", ok)
 	}
-	wantBad := []string{"Upper", "bad-cred", "bad-state", "broken", "dir", "group-no-user", "group-writable", "long", "luk-any", "luk-work", "no-command", "relative", "short", "symlink", "unknown-key"}
+	wantBad := []string{"Upper", "bad-cred", "bad-pipeline", "bad-state", "broken", "dir", "dot-pipeline", "empty-pipelines", "group-no-user", "group-writable",
+		"long", "long-pipeline", "luk-any", "luk-work", "no-command", "no-pipelines", "relative", "short", "symlink", "unknown-key"}
 	if !slices.Equal(bad, wantBad) {
 		t.Fatalf("bad %v", bad)
 	}
@@ -150,6 +157,9 @@ func TestLoadJobsRules(t *testing.T) {
 	}
 	if err := js.Bad["group-no-user"]; !strings.Contains(err.Error(), "needs user") {
 		t.Fatalf("group without user: %v", err)
+	}
+	if err := js.Bad["no-pipelines"]; !strings.Contains(err.Error(), "pipelines: required") {
+		t.Fatalf("no pipelines: %v", err)
 	}
 	if err := js.Bad["luk-any"]; !strings.Contains(err.Error(), "reserved") {
 		t.Fatalf("LUK_*: %v", err)
@@ -337,7 +347,7 @@ func newEnv(t *testing.T) *env {
 	os.Mkdir(jobs, 0o755)
 	write(t, filepath.Join(jobs, "s3-upload.yaml"), s3Job, 0o600)
 	write(t, filepath.Join(jobs, "broken.yaml"), "user: [\n", 0o600)
-	write(t, filepath.Join(jobs, "state.yaml"), "command: /opt/luk/state\nstate: locked\n", 0o600)
+	write(t, filepath.Join(jobs, "state.yaml"), "command: /opt/luk/state\nstate: locked\npipelines: [p]\n", 0o600)
 	conf := filepath.Join(top, "run.yaml")
 	write(t, conf, "root: "+root+"\n", 0o600)
 	e := &env{work: w, fr: &fakeRunner{}, peer: me}
@@ -808,7 +818,7 @@ func TestOneDocumentPerFile(t *testing.T) {
 	jd := filepath.Join(d, "run.d")
 	os.Mkdir(jd, 0o755)
 	write(t, filepath.Join(jd, "two.yaml"), "user: nobody\ncommand: /bin/true\n---\ncommand: /bin/false\n", 0o600)
-	write(t, filepath.Join(jd, "one.yaml"), "user: nobody\ncommand: /bin/true\n\n# end\n", 0o600)
+	write(t, filepath.Join(jd, "one.yaml"), "user: nobody\ncommand: /bin/true\npipelines: [p]\n\n# end\n", 0o600)
 	js, err := LoadJobs(jd, me)
 	if err != nil {
 		t.Fatal(err)
@@ -983,7 +993,7 @@ func TestServeJobDeadline(t *testing.T) {
 	defer func(d time.Duration) { stopGrace = d }(stopGrace)
 	stopGrace = 100 * time.Millisecond
 	e := newEnv(t)
-	write(t, filepath.Join(e.srv.Jobs, "quick.yaml"), "command: /opt/luk/q\ntimeout: 1s\n", 0o600)
+	write(t, filepath.Join(e.srv.Jobs, "quick.yaml"), "command: /opt/luk/q\ntimeout: 1s\npipelines: [p]\n", 0o600)
 	e.fr.run = func(ctx context.Context, stdout, _ io.Writer) (int, error) {
 		for ctx.Err() == nil {
 			if _, err := stdout.Write([]byte("output\n")); err != nil {
@@ -998,4 +1008,27 @@ func TestServeJobDeadline(t *testing.T) {
 	io.WriteString(c, string(runproto.Request{Job: "quick", Work: e.work}.Encode()))
 	ends(t, "unread output", errc, 10*time.Second)
 	c.Close()
+}
+
+// A job runs only for the pipelines its file lists: another pipeline is
+// refused before the work directory is looked at or a lock is created.
+func TestServePipelineAllowlist(t *testing.T) {
+	e := newEnv(t)
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
+		t.Error("job ran")
+		return 0, nil
+	}
+	for _, p := range []string{"q", "offsite2", strings.Repeat("p", 129)} {
+		w := filepath.Join(filepath.Dir(filepath.Dir(e.work)), p, "1")
+		os.MkdirAll(w, 0o750)
+		for _, job := range []string{"state", "s3-upload"} {
+			fs, err := e.exchange(t, string(runproto.Request{Job: job, Work: w}.Encode()))
+			if err == nil || len(fs) != 2 || fs[1] != (frame{'x', "1"}) {
+				t.Fatalf("%s %q: %v %q", job, p, err, fs)
+			}
+		}
+	}
+	if _, err := os.Stat(e.srv.Locks); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("locks: %v", err)
+	}
 }

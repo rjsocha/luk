@@ -2625,8 +2625,8 @@ container.
 
 Work directory: see Step contract below.
 
-Name: a pipeline name is of `[A-Za-z0-9_.-]` and does not start with a
-dot or a dash (a config error otherwise). It is a component of the work
+Name: a pipeline name is of `[A-Za-z0-9_.-]`, does not start with a
+dot or a dash and has at most 128 bytes (a config error otherwise). It is a component of the work
 directory path, and `lukd run` refuses any other name (see Jobs with
 other users).
 
@@ -4508,6 +4508,14 @@ work directory. No polkit and no sudo are involved.
     `1h`.
   - `env`: fixed environment. Every `LUK_*` name is reserved (a
     config error): lukd run sets them, see Environment and state below.
+  - `pipelines` (required): the pipelines the job runs for, valid
+    pipeline names (at most 128 bytes). A request whose work directory
+    belongs to another pipeline is refused (`job <job>: pipeline <p> not
+    allowed`) before the work directory is looked at and before any
+    lock, state directory or dynamic user exists for it, so `luk`
+    cannot make root create them for names of its choosing. List the
+    pipelines whose `relay` step names the job and those whose `run`
+    programs call it with `luk-job run`.
   - `state` (optional): `locked` or `shared`, a state directory kept
     between runs, one per job and pipeline; absent means none. See
     Environment and state below.
@@ -4523,7 +4531,7 @@ work directory. No polkit and no sudo are involved.
   `<root>/work/<id>/<pipeline>/<step>` (exactly these three levels, the
   id a queue entry id `YYYYMMDDTHHMMSSZ-<8 hex digits>`, the pipeline a
   valid pipeline name, `[A-Za-z0-9_.-]` not starting with a dot or a
-  dash, the step a decimal number from 1 without leading zeros), holds
+  dash, at most 128 bytes, listed in the job's `pipelines`, the step a decimal number from 1 without leading zeros), holds
   a control character, white space, `$` or `%` anywhere in the resolved
   path, is not a directory or is not owned by the peer. The pipeline
   name comes from that path; the request has no field for it. lukd run
@@ -4654,6 +4662,7 @@ credentials:
 timeout: 1h
 env:
   BUCKET: example-backup
+pipelines: [offsite]
 ```
 
 The job (`contrib/examples/s3-upload.sh`, installed as
@@ -4727,8 +4736,10 @@ pipeline:
   transfer dedup (store steps only) exclude it, since a delivery cannot
   be undone.
 - `lukd check` warns about a relayed job without a file in
-  `/etc/site/lukd/run.d` when it can read that directory. It never
-  requires one: run.d is root's and changes without a reload.
+  `/etc/site/lukd/run.d` when it can read that directory, and about one
+  whose file it can read and that does not list the pipeline in
+  `pipelines`. It never requires either: run.d is root's and changes
+  without a reload.
 
 `luk-job run` stays for `run` programs that call several jobs or do work
 around them, like the program above that passes its input on with

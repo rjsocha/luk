@@ -2266,3 +2266,9 @@ func TestWatchErrors(t *testing.T) {
 		t.Errorf("catch-all last: %v", err)
 	}
 }
+
+func TestValidPipelineNameLength(t *testing.T) {
+	if !ValidPipelineName(strings.Repeat("p", 128)) || ValidPipelineName(strings.Repeat("p", 129)) {
+		t.Fatal("length cap")
+	}
+}
