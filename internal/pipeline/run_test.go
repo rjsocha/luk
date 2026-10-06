@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -17,6 +16,7 @@ import (
 
 	"luk/internal/config"
 	"luk/internal/queue"
+	"luk/internal/rund/rundtest"
 	"luk/internal/runstep"
 	"luk/internal/status"
 	"luk/internal/store"
@@ -72,7 +72,50 @@ func newRunEnv(t *testing.T, pipeline string) *env {
 		}
 	}
 	free := func(string) (int64, error) { return 1 << 40, nil }
-	return &env{root: root, cfg: cfg, q: queue.New(0, free), logs: &syncBuf{}}
+	e := &env{root: root, cfg: cfg, q: queue.New(0, free), logs: &syncBuf{}}
+	e.useRund(t)
+	return e
+}
+
+// newRunEnvHold is newRunEnv with the s frame held until hold is closed.
+func newRunEnvHold(t *testing.T, pipeline string, hold chan struct{}) *env {
+	t.Helper()
+	e := newRunEnv(t, pipeline)
+	e.hold = hold
+	return e
+}
+
+// useRund points runSocket at an in-process lukd run (rundtest) resolving
+// the requests by the configuration of e and e.jobs. It starts with the
+// first dispatcher, so a test fills e.jobs, e.hold and e.requests first.
+func (e *env) useRund(t *testing.T) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "rund-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	old := runSocket
+	runSocket = filepath.Join(dir, "run.sock")
+	t.Cleanup(func() { runSocket = old })
+	sock := runSocket
+	e.jobs = map[string]rundtest.Unit{}
+	e.startRund = func() {
+		rundtest.Start(t, &rundtest.Server{Socket: sock, Resolve: rundtest.FromConfig(e.cfg, e.jobs), Hold: e.hold, Requests: e.requests})
+	}
+}
+
+// lastFailure is the error of the last failure of pipeline p.
+func (e *env) lastFailure(t *testing.T) string {
+	t.Helper()
+	recs := e.logs.records(t)
+	for i := len(recs) - 1; i >= 0; i-- {
+		if recs[i]["msg"] == "pipeline failed" && recs[i]["pipeline"] == "p" {
+			return fmt.Sprint(recs[i]["error"])
+		}
+	}
+	t.Fatalf("no failure: %v", recs)
+	return ""
 }
 
 func (e *env) runOne(t *testing.T, id string) Job {
@@ -111,7 +154,6 @@ grep -q '"pipeline":"p"' "$LUK_META"
 grep -q '"step":1' "$LUK_META"
 grep -q '"id":"id1"' "$LUK_META"
 test "$(ls "$LUK_IN")" = f.txt
-test "$(stat -c %h "$LUK_IN/f.txt")" -ge 2
 tr a-z A-Z < "$LUK_IN/f.txt" > "$LUK_OUT/up.txt"
 printf x > "$LUK_OUT/x.bin"
 printf '{"kind": "upper"}' > "$LUK_OUT/up.txt.meta.json"
@@ -164,18 +206,22 @@ pwd > "$LUK_OUT/pwd"
 `)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n        env: {FOO: bar}\n      - store: a\n", s))
 	e.runOne(t, "id2")
-	w := filepath.Join(e.root, "data", "work", "id2", "p", "1")
 	env := e.read(t, "a/file/robert.socha/env")
+	w := envLines(env)["LUK_WORK"]
+	if w == "" || strings.HasPrefix(w, e.root) {
+		t.Fatalf("workspace %q", w)
+	}
 	for _, want := range []string{
 		"LUK_ID=id2", "LUK_SENDER=robert.socha", "LUK_ENDPOINT=up", "LUK_PIPELINE=p",
-		"LUK_WORK=" + w, "LUK_IN=" + w + "/in", "LUK_OUT=" + w + "/out", "LUK_META=" + w + "/meta.json",
-		"LANG=C.UTF-8", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "FOO=bar",
+		"LUK_IN=" + w + "/in", "LUK_OUT=" + w + "/out", "LUK_META=" + w + "/meta.json",
+		"LUK_TMP=" + w + "/tmp", "TMPDIR=" + w + "/tmp",
+		"LANG=C.UTF-8", "PATH=" + os.Getenv("PATH"), "FOO=bar",
 	} {
 		if !strings.Contains("\n"+env, "\n"+want+"\n") {
 			t.Errorf("env lacks %s:\n%s", want, env)
 		}
 	}
-	if strings.Contains(env, "LUK_LEAK_TEST") || strings.Contains(env, "HOME=") {
+	if strings.Contains(env, "LUK_LEAK_TEST") || strings.Contains(env, "HOME=") || strings.Contains(env, "LUK_ROOT") {
 		t.Errorf("lukd env leaked:\n%s", env)
 	}
 	if got := e.read(t, "a/file/robert.socha/arg"); got != w {
@@ -200,9 +246,10 @@ func waitDead(t *testing.T, pid int) {
 	t.Fatalf("child %d still alive", pid)
 }
 
-func childPid(t *testing.T, e *env, id string) int {
+// childPid reads the pid a step wrote to p.
+func childPid(t *testing.T, p string) int {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(e.root, "child-"+id))
+	b, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,44 +260,29 @@ func childPid(t *testing.T, e *env, id string) int {
 	return pid
 }
 
-func TestRunTimeoutTerm(t *testing.T) {
-	s := script(t, `sleep 30 &
-echo $! > "$LUK_ROOT/child-$LUK_ID"
+// A step past the timeout fails the pipeline, and the process group of
+// the step is killed, a child that ignores SIGTERM too.
+func TestRunTimeout(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	s := script(t, `trap '' TERM
+sleep 30 &
+echo $! > "$PIDFILE"
 wait
 `)
-	e := newRunEnv(t, fmt.Sprintf("    timeout: 300ms\n    steps:\n      - run: %s\n      - store: a\n", s))
+	e := newRunEnv(t, fmt.Sprintf("    timeout: 1s\n    steps:\n      - run: %s\n        env: {PIDFILE: %s}\n      - store: a\n", s, pidfile))
 	start := time.Now()
 	e.runOne(t, "t1")
 	if el := time.Since(start); el > 5*time.Second {
 		t.Fatalf("took %v", el)
 	}
-	r := find(e.logs.records(t), "pipeline failed", "p")
-	if r == nil || r["step"] != float64(1) || !strings.Contains(fmt.Sprint(r["error"]), "timeout") {
-		t.Fatalf("logs %v", e.logs.records(t))
+	if got := e.lastFailure(t); got != "run "+s+": timeout after 1s" {
+		t.Fatalf("error %q", got)
 	}
-	waitDead(t, childPid(t, e, "t1"))
-}
-
-func TestRunTimeoutKill(t *testing.T) {
-	old := killAfter
-	killAfter = 200 * time.Millisecond
-	t.Cleanup(func() { killAfter = old })
-	s := script(t, `trap '' TERM
-sleep 30 &
-echo $! > "$LUK_ROOT/child-$LUK_ID"
-wait
-`)
-	e := newRunEnv(t, fmt.Sprintf("    timeout: 300ms\n    steps:\n      - run: %s\n      - store: a\n", s))
-	e.runOne(t, "t2")
-	r := find(e.logs.records(t), "pipeline failed", "p")
-	if r == nil || !strings.Contains(fmt.Sprint(r["error"]), "timeout") {
-		t.Fatalf("logs %v", e.logs.records(t))
-	}
-	waitDead(t, childPid(t, e, "t2"))
+	waitDead(t, childPid(t, pidfile))
 }
 
 func TestRunOutputCapped(t *testing.T) {
-	s := script(t, `dd if=/dev/zero bs=65536 count=32 2>/dev/null
+	s := script(t, `{ dd if=/dev/zero bs=65536 count=32 2>/dev/null; } >&2
 echo tail-marker >&2
 exit 3
 `)
@@ -266,45 +298,68 @@ exit 3
 	}
 }
 
-// The log of a run step is capped at 1 MiB; the next step of the pipeline
-// still sees it.
+// The log of a run step is capped at 1 MiB.
 func TestRunLogCapped(t *testing.T) {
+	release := filepath.Join(t.TempDir(), "release")
 	big := script(t, `dd if=/dev/zero bs=65536 count=32 2>/dev/null; echo x > "$LUK_OUT/f"
 `)
-	size := script(t, `wc -c < "$LUK_WORK/../1/log" | tr -d ' \n' > "$LUK_WORK/fail"; exit 1
+	wait := script(t, `while [ ! -e "$RELEASE" ]; do sleep 0.05; done
 `)
-	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - run: %s\n", big, size))
-	e.runOne(t, "c2")
-	if r := loadRecord(t, e.recordPath("up", "c2")); len(r.Pipelines) != 1 || r.Pipelines[0].Error != "1048576" {
-		t.Fatalf("record %+v", r.Pipelines)
+	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - run: %s\n        env: {RELEASE: %s}\n", big, wait, release))
+	d := e.dispatcher()
+	if err := d.Submit(e.enqueue(t, "c2", "up", "p")); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(e.root, "data", "work", "c2", "p")
+	for deadline := time.Now().Add(5 * time.Second); !exists(filepath.Join(work, "2", "log")); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("step 2 did not start")
+		}
+	}
+	fi, err := os.Stat(filepath.Join(work, "1", "log"))
+	os.WriteFile(release, nil, 0o600)
+	d.Wait()
+	if err != nil || fi.Size() != 1<<20 {
+		t.Fatalf("log %v %v", fi, err)
 	}
 }
 
 func TestRunBadOut(t *testing.T) {
-	cases := map[string]string{
-		"symlink":      `echo x > "$LUK_OUT/f"; ln -s /etc/passwd "$LUK_OUT/l"`,
-		"dir":          `echo x > "$LUK_OUT/f"; mkdir "$LUK_OUT/d"`,
-		"dotfile":      `echo x > "$LUK_OUT/f"; echo x > "$LUK_OUT/.h"`,
-		"empty":        `true`,
-		"meta array":   `echo x > "$LUK_OUT/f"; echo '[1]' > "$LUK_OUT/f.meta.json"`,
-		"meta invalid": `echo x > "$LUK_OUT/f"; echo '{' > "$LUK_OUT/f.meta.json"`,
-		"meta big":     `echo x > "$LUK_OUT/f"; { printf '{"a":"'; dd if=/dev/zero bs=1024 count=65 2>/dev/null | tr '\0' a; printf '"}'; } > "$LUK_OUT/f.meta.json"`,
-		"meta orphan":  `echo x > "$LUK_OUT/f"; echo '{}' > "$LUK_OUT/g.meta.json"`,
-		"meta of meta": `echo x > "$LUK_OUT/f"; echo '{}' > "$LUK_OUT/f.meta.json"; echo '{}' > "$LUK_OUT/f.meta.json.meta.json"`,
-		"out removed":  `rm -r "$LUK_OUT"`,
+	cases := map[string]struct{ body, err string }{
+		"symlink":      {`echo x > "$LUK_OUT/f"; ln -s /etc/passwd "$LUK_OUT/l"`, `out: "l": not a regular file`},
+		"dir":          {`echo x > "$LUK_OUT/f"; mkdir "$LUK_OUT/d"`, `out: "d": not a regular file`},
+		"fifo":         {`echo x > "$LUK_OUT/f"; mkfifo "$LUK_OUT/p"`, `out: "p": not a regular file`},
+		"dotfile":      {`echo x > "$LUK_OUT/f"; echo x > "$LUK_OUT/.h"`, `out: ".h": invalid name`},
+		"empty":        {`true`, "out: no file"},
+		"meta array":   {`echo x > "$LUK_OUT/f"; echo '[1]' > "$LUK_OUT/f.meta.json"`, "out: "},
+		"meta invalid": {`echo x > "$LUK_OUT/f"; echo '{' > "$LUK_OUT/f.meta.json"`, "out: "},
+		"meta big":     {`echo x > "$LUK_OUT/f"; { printf '{"a":"'; dd if=/dev/zero bs=1024 count=65 2>/dev/null | tr '\0' a; printf '"}'; } > "$LUK_OUT/f.meta.json"`, "out: "},
+		"meta orphan":  {`echo x > "$LUK_OUT/f"; echo '{}' > "$LUK_OUT/g.meta.json"`, "out: "},
+		"meta of meta": {`echo x > "$LUK_OUT/f"; echo '{}' > "$LUK_OUT/f.meta.json"; echo '{}' > "$LUK_OUT/f.meta.json.meta.json"`, "out: "},
+		"out removed":  {`rm -r "$LUK_OUT"`, `out: "out": `},
 	}
-	for name, body := range cases {
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			s := script(t, body+"\n")
+			s := script(t, c.body+"\n")
 			e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - store: a\n", s))
 			e.runOne(t, "b1")
 			r := find(e.logs.records(t), "pipeline failed", "p")
-			if r == nil || r["step"] != float64(1) {
+			if r == nil || r["step"] != float64(1) || !strings.HasPrefix(fmt.Sprint(r["error"]), "run "+s+": "+c.err) {
 				t.Fatalf("logs %v", e.logs.records(t))
 			}
 			gone(t, filepath.Join(e.root, "data", "work", "b1"))
 			if ents, _ := os.ReadDir(filepath.Join(e.root, "data", "a", "file")); len(ents) != 0 {
 				t.Fatalf("stored %v", ents)
+			}
+		})
+	}
+	for _, kind := range []string{"symlink", "dir", "fifo"} {
+		t.Run("tee "+kind, func(t *testing.T) {
+			s := script(t, strings.TrimPrefix(cases[kind].body, `echo x > "$LUK_OUT/f"; `)+"\n")
+			e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n        tee: true\n      - store: a\n", s))
+			e.runOne(t, "b1")
+			if got := e.lastFailure(t); got != "run "+s+": "+cases[kind].err {
+				t.Fatalf("error %q", got)
 			}
 		})
 	}
@@ -350,16 +405,14 @@ echo two > "$LUK_OUT/f2"
 }
 
 func TestRunTimeoutKillsTermTrappingChild(t *testing.T) {
-	old := killAfter
-	killAfter = 300 * time.Millisecond
-	t.Cleanup(func() { killAfter = old })
+	pidfile := filepath.Join(t.TempDir(), "pid")
 	s := script(t, `sh -c 'trap "" TERM; while :; do sleep 1; done' >/dev/null 2>&1 &
-echo $! > "$LUK_ROOT/child-$LUK_ID"
+echo $! > "$PIDFILE"
 wait
 `)
-	e := newRunEnv(t, fmt.Sprintf("    timeout: 300ms\n    steps:\n      - run: %s\n", s))
+	e := newRunEnv(t, fmt.Sprintf("    timeout: 1s\n    steps:\n      - run: %s\n        env: {PIDFILE: %s}\n", s, pidfile))
 	e.runOne(t, "t3")
-	waitDead(t, childPid(t, e, "t3"))
+	waitDead(t, childPid(t, pidfile))
 }
 
 func TestRunKillsStraysAfterExit(t *testing.T) {
@@ -461,7 +514,7 @@ sleep 30
 }
 
 func TestDispatcherReportsStatus(t *testing.T) {
-	bad := script(t, `echo some output
+	bad := script(t, `echo some output >&2
 echo boom >&2
 exit 2
 `)
@@ -544,10 +597,9 @@ printf x > "$LUK_OUT/x"
 		t.Fatal(err)
 	}
 	d.Wait()
-	w1 := filepath.Join(e.root, "data", "work", "id7", "p", "1")
 	m := envLines(e.read(t, "a/file/robert.socha/env1"))
 	for k, want := range map[string]string{
-		"LUK_FILE": w1 + "/in/f.txt", "LUK_NAME": "f.txt", "LUK_ROOT": e.root, "LUK_STEP": "1",
+		"LUK_FILE": m["LUK_IN"] + "/f.txt", "LUK_NAME": "f.txt", "LUK_STEP": "1",
 		"LUK_TAGS": "t1,t2", "LUK_HOSTNAME": "host1", "LUK_ORIGIN": "host1",
 	} {
 		if m[k] != want {
@@ -561,8 +613,8 @@ printf x > "$LUK_OUT/x"
 	if v, ok := m["LUK_NAME"]; !ok || v != "" {
 		t.Errorf("LUK_NAME %q, %v", v, ok)
 	}
-	if m["LUK_STEP"] != "3" || m["LUK_ROOT"] != e.root {
-		t.Errorf("step 3 %q root %q", m["LUK_STEP"], m["LUK_ROOT"])
+	if _, ok := m["LUK_ROOT"]; ok || m["LUK_STEP"] != "3" {
+		t.Errorf("step 3 %q", m)
 	}
 }
 
@@ -582,14 +634,12 @@ func TestRunEnvOriginWithoutHostname(t *testing.T) {
 	}
 }
 
-// A run step and a job it starts with luk-job run see the same LUK_*
-// metadata: what luk-job passes on from its environment (runstep.Meta)
-// and what lukd run derives from the path give the environment of the
-// step.
-func TestRunStepAndJobSeeSameEnv(t *testing.T) {
+// The LUK_* environment of a step is what lukd run derives from the
+// workspace, the step and the metadata lukd process sends: nothing else.
+func TestRunStepEnvIsUnitVars(t *testing.T) {
 	keep := t.TempDir()
 	s := script(t, `set -e
-env | grep '^LUK_' | sort > "$KEEP/env$LUK_STEP"
+env | grep '^LUK_\|^TMPDIR=' | sort > "$KEEP/env$LUK_STEP"
 if [ "$LUK_STEP" = 1 ]; then printf x > "$LUK_OUT/a.bin"; printf y > "$LUK_OUT/b.bin"; fi
 if [ "$LUK_STEP" = 2 ]; then cat "$LUK_IN"/* > "$LUK_OUT/all.bin"; fi
 `)
@@ -611,12 +661,19 @@ if [ "$LUK_STEP" = 2 ]; then cat "$LUK_IN"/* > "$LUK_OUT/all.bin"; fi
 		}
 		want := strings.Split(strings.TrimSpace(string(b)), "\n")
 		m := envLines(string(b))
-		work := filepath.Join(e.root, "data", "work", "id11", "p", strconv.Itoa(step))
-		sent := runstep.Meta(work, func(k string) (string, bool) { v, ok := m[k]; return v, ok })
-		got := runstep.Vars(work, e.root, sent)
+		sent := map[string]string{}
+		for _, k := range runstep.MetaNames {
+			if v, ok := m[k]; ok {
+				sent[k] = filepath.Base(v)
+				if k != "LUK_FILE" {
+					sent[k] = v
+				}
+			}
+		}
+		got := runstep.UnitVars(m["LUK_WORK"], "id11", "p", step, sent)
 		sort.Strings(got)
-		if !slices.Equal(got, want) {
-			t.Errorf("step %d:\n job %q\n run %q", step, got, want)
+		if !slices.Equal(got, want) || m["LUK_TAGS"] != "daily,prod" || m["LUK_ORIGIN"] != "db1" {
+			t.Errorf("step %d:\n unit %q\n step %q", step, got, want)
 		}
 	}
 }

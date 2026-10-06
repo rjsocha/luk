@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,10 @@ import (
 	"strings"
 	"testing"
 
+	"luk/internal/pipeline"
 	"luk/internal/queue"
+	"luk/internal/rund/rundtest"
+	"luk/internal/runproto"
 	"luk/internal/store"
 	"luk/internal/wire"
 )
@@ -36,6 +40,15 @@ func newSecretFixture(t *testing.T, mod func(string) string) *secretFixture {
 	if err := os.WriteFile(prog, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	sock := filepath.Join(tmp, "run.sock")
+	old := pipeline.SetRunSocket(sock)
+	t.Cleanup(func() { pipeline.SetRunSocket(old) })
+	rundtest.Start(t, &rundtest.Server{Socket: sock, Resolve: func(r runproto.StepRequest) (rundtest.Unit, error) {
+		if r.Pipeline != "mark" || r.Step != 1 || r.Job != "" {
+			return rundtest.Unit{}, fmt.Errorf("pipeline %s step %d: not a run or relay step", r.Pipeline, r.Step)
+		}
+		return rundtest.Unit{Argv: []string{prog}, Env: []string{"PATH=" + os.Getenv("PATH")}}, nil
+	}})
 	f := newFixtureWith(t, func(s string) string {
 		s = strings.NewReplacer(
 			`respond: url, storage: drop}`,

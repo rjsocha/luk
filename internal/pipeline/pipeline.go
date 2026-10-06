@@ -226,6 +226,8 @@ type Dispatcher struct {
 	// start, so entries of an endpoint removed by a reload still run.
 	dirs map[string]bool
 	wg   sync.WaitGroup
+	// units counts the units of the run steps (see Units).
+	units unitGauge
 }
 
 func NewDispatcher(cfg *config.Config, q *queue.Queue, log *slog.Logger) *Dispatcher {
@@ -728,31 +730,26 @@ func (d *Dispatcher) runPipeline(j Job, name string) (bool, Outcome) {
 				set = next
 				continue
 			}
-			if s.Run.Job != "" {
-				return i + 1, fmt.Errorf("run %s: %w", s.Run, errNotSupported)
-			}
-			if s.Run.Program != "" {
-				next, tail, err := runStep(j, p, i+1, s, set, stepDir(work, i+1), cfg.Root, d.stop)
+			if s.Run.Set() || s.Relay != "" {
+				kind, what := kindRun, "run "+s.Run.String()
+				switch {
+				case s.Relay != "":
+					kind, what = kindRelay, "relay "+s.Relay
+				case s.Tee:
+					kind = kindTee
+				}
+				next, tail, err := d.unitStep(j, p, i+1, kind, set, stepDir(work, i+1))
 				if err != nil {
 					logged = tail
 					var sf stepFailed
-					if errors.As(err, &sf) {
+					if errors.As(err, &sf) || errors.Is(err, errInterrupted) {
 						return i + 1, err
 					}
 					output = tail
-					return i + 1, fmt.Errorf("run %s: %w", s.Run, err)
+					return i + 1, fmt.Errorf("%s: %w", what, err)
 				}
 				d.stepOutput(j, name, i+1, tail)
 				set = next
-				continue
-			}
-			if s.Relay != "" {
-				tail, err := relayStep(j, p, i+1, s, set, stepDir(work, i+1), cfg.Root, d.stop)
-				if err != nil {
-					logged, output = tail, tail
-					return i + 1, fmt.Errorf("relay %s: %w", s.Relay, err)
-				}
-				d.stepOutput(j, name, i+1, tail)
 				continue
 			}
 			for _, sn := range s.Store {

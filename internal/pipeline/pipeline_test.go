@@ -17,6 +17,8 @@ import (
 
 	"luk/internal/config"
 	"luk/internal/queue"
+	"luk/internal/rund/rundtest"
+	"luk/internal/runproto"
 	"luk/internal/status"
 	"luk/internal/store"
 	"luk/internal/wire"
@@ -101,6 +103,12 @@ type env struct {
 	cfg  *config.Config
 	q    *queue.Queue
 	logs *syncBuf
+	// The in-process lukd run of the run and relay steps (see useRund):
+	// the jobs of run.d, the slot hold and the requests seen.
+	jobs      map[string]rundtest.Unit
+	hold      chan struct{}
+	requests  chan runproto.StepRequest
+	startRund func()
 }
 
 func newEnv(t *testing.T, concurrency int) *env {
@@ -113,7 +121,9 @@ func newEnv(t *testing.T, concurrency int) *env {
 		}
 	}
 	free := func(string) (int64, error) { return 1 << 40, nil }
-	return &env{root: root, cfg: cfg, q: queue.New(0, free), logs: &syncBuf{}}
+	e := &env{root: root, cfg: cfg, q: queue.New(0, free), logs: &syncBuf{}}
+	e.useRund(t)
+	return e
 }
 
 // parseCfg parses a config of cfgTmpl. The second step of pipeline cloud
@@ -132,7 +142,16 @@ func parseCfg(t *testing.T, text string) *config.Config {
 }
 
 func (e *env) dispatcher() *Dispatcher {
+	e.rund()
 	return NewDispatcher(e.cfg, e.q, slog.New(slog.NewJSONHandler(e.logs, nil)))
+}
+
+// rund starts the lukd run of e once.
+func (e *env) rund() {
+	if e.startRund != nil {
+		e.startRund()
+		e.startRund = nil
+	}
 }
 
 func (e *env) enqueue(t *testing.T, id, endpoint string, pipelines ...string) Job {

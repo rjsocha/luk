@@ -52,6 +52,7 @@ func newGPGEnv(t *testing.T, pipeline string, keyFiles map[string][]byte, wkd ma
 	}
 	free := func(string) (int64, error) { return 1 << 40, nil }
 	g := &gpgEnv{env: &env{root: root, cfg: cfg, q: queue.New(0, free), logs: &syncBuf{}}, keys: keys, wkd: wkd}
+	g.useRund(t)
 	g.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, ok := g.wkd[r.URL.Query().Get("l")]
 		if !ok {

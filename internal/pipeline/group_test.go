@@ -78,7 +78,9 @@ func newGroupEnv(t *testing.T, concurrency int) *env {
 		t.Fatal(err)
 	}
 	free := func(string) (int64, error) { return 1 << 40, nil }
-	return &env{root: root, cfg: groupCfg(t, root, concurrency, nil), q: queue.New(0, free), logs: &syncBuf{}}
+	e := &env{root: root, cfg: groupCfg(t, root, concurrency, nil), q: queue.New(0, free), logs: &syncBuf{}}
+	e.useRund(t)
+	return e
 }
 
 // enqueueGrouped queues id for pipelines with their stages from the

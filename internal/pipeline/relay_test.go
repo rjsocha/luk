@@ -1,56 +1,88 @@
 package pipeline
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"luk/internal/jobchan"
+	"luk/internal/rund/rundtest"
 	"luk/internal/runproto"
-	"luk/internal/runstep"
 	"luk/internal/status"
 	"luk/internal/wire"
 )
 
-// fakeRund makes relay steps connect to a socket served by handle, one
-// connection at a time.
-func fakeRund(t *testing.T, handle func(r runproto.Request, c net.Conn, fw *runproto.FrameWriter)) {
+// fakeRund serves runSocket instead of the lukd run of e: for each request
+// it answers s, reads the inputs up to go and hands the channel and the
+// connection to unit, whose result is the exit status.
+func fakeRund(t *testing.T, e *env, unit func(ch *jobchan.Conn, c *net.UnixConn, fw *runproto.FrameWriter) int) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "run.sock")
-	l, err := net.Listen("unix", sock)
+	e.startRund = nil
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: runSocket, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { l.Close() })
-	old := runSocket
-	runSocket = sock
-	t.Cleanup(func() { runSocket = old })
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		l.Close()
+		wg.Wait()
+	})
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
-			c, err := l.Accept()
+			c, err := l.AcceptUnix()
 			if err != nil {
 				return
 			}
-			r, err := runproto.ReadRequest(bufio.NewReaderSize(c, runproto.MaxRequest))
-			if err != nil {
-				t.Error(err)
-				c.Close()
-				continue
-			}
-			handle(r, c, runproto.NewFrameWriter(c))
-			c.Close()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer c.Close()
+				_, f, err := runproto.ReadStepRequest(c)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				ch, err := jobchan.FromFile(f)
+				f.Close()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				defer ch.Close()
+				fw := runproto.NewFrameWriter(c)
+				fw.Started()
+				for {
+					fr, fd, err := ch.Recv()
+					if fd != nil {
+						fd.Close()
+					}
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					if fr.T == jobchan.TGo {
+						break
+					}
+				}
+				code := unit(ch, c, fw)
+				ch.Close()
+				fw.Exit(code)
+			}()
 		}
 	}()
 }
 
 func (e *env) debugDispatcher() *Dispatcher {
+	e.rund()
 	return NewDispatcher(e.cfg, e.q, slog.New(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 }
 
@@ -64,34 +96,22 @@ func findStep(recs []map[string]any, msg string, step int) map[string]any {
 }
 
 func TestRelayPassesSetOn(t *testing.T) {
+	seen := filepath.Join(t.TempDir(), "seen")
 	s1 := script(t, `set -e
 echo converted
 tr a-z A-Z < "$LUK_IN/f.txt" > "$LUK_OUT/up.txt"
 printf '{"kind": "upper"}' > "$LUK_OUT/up.txt.meta.json"
 `)
-	type seen struct {
-		req   runproto.Request
-		in    string
-		meta  bool
-		empty bool
-	}
-	got := make(chan seen, 1)
-	fakeRund(t, func(r runproto.Request, _ net.Conn, fw *runproto.FrameWriter) {
-		var sn seen
-		sn.req = r
-		ents, _ := os.ReadDir(filepath.Join(r.Work, "in"))
-		for _, e := range ents {
-			sn.in += e.Name() + " "
-		}
-		sn.meta = exists(filepath.Join(r.Work, "meta.json"))
-		outs, err := os.ReadDir(filepath.Join(r.Work, "out"))
-		sn.empty = err == nil && len(outs) == 0
-		got <- sn
-		io.WriteString(fw.Stream(runproto.Stdout), "uploaded\n")
-		io.WriteString(fw.Stream(runproto.Stderr), "2 files\n")
-		fw.Exit(0)
-	})
+	job := script(t, `set -e
+ls "$LUK_IN" | tr '\n' ' ' > "$SEEN"
+test -f "$LUK_META"
+test -z "$(ls -A "$LUK_OUT")"
+echo uploaded
+echo "2 files" >&2
+`)
 	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - relay: s3-upload\n      - store: a\n", s1))
+	e.jobs["s3-upload"] = rundtest.Unit{Argv: []string{job}, Env: []string{"SEEN=" + seen}}
+	e.requests = make(chan runproto.StepRequest, 2)
 	d := e.debugDispatcher()
 	j := e.enqueue(t, "id1", "up", "p")
 	if err := d.Submit(j); err != nil {
@@ -102,16 +122,20 @@ printf '{"kind": "upper"}' > "$LUK_OUT/up.txt.meta.json"
 	if find(recs, "pipeline done", "p") == nil {
 		t.Fatalf("logs %v", recs)
 	}
-	sn := <-got
-	if sn.req.Job != "s3-upload" || sn.req.Work != filepath.Join(e.root, "data", "work", "id1", "p", "2") ||
-		sn.in != "up.txt up.txt.meta.json " || !sn.meta || !sn.empty {
-		t.Fatalf("job saw %+v", sn)
+	<-e.requests
+	if r := <-e.requests; r.Pipeline != "p" || r.Step != 2 || r.ID != "id1" || r.Job != "" {
+		t.Fatalf("request %+v", r)
+	}
+	if b, err := os.ReadFile(seen); err != nil || string(b) != "up.txt up.txt.meta.json " {
+		t.Fatalf("job saw %q %v", b, err)
 	}
 	sc := e.sidecar(t, "a/.db/meta/robert.socha/up.txt.json")
 	if string(sc.Meta) != `{"kind":"upper"}` || sc.Produced != "up.txt" || sc.SHA256 != sha("DATA-ID1") {
 		t.Fatalf("sidecar %+v meta %s", sc, sc.Meta)
 	}
-	if r := findStep(recs, "step output", 2); r == nil || r["level"] != "DEBUG" || r["output"] != "uploaded\n2 files\n" {
+	// stdout and stderr of a unit are two streams: their order is not kept.
+	if r := findStep(recs, "step output", 2); r == nil || r["level"] != "DEBUG" ||
+		r["output"] != "uploaded\n2 files\n" && r["output"] != "2 files\nuploaded\n" {
 		t.Fatalf("relay output %v", recs)
 	}
 	if r := findStep(recs, "step output", 1); r == nil || r["output"] != "converted\n" {
@@ -122,12 +146,10 @@ printf '{"kind": "upper"}' > "$LUK_OUT/up.txt.meta.json"
 }
 
 func TestRelayOnUploadLastStep(t *testing.T) {
-	fakeRund(t, func(r runproto.Request, _ net.Conn, fw *runproto.FrameWriter) {
-		b, _ := os.ReadFile(filepath.Join(r.Work, "in", "f.txt"))
-		io.WriteString(fw.Stream(runproto.Stdout), string(b))
-		fw.Exit(0)
-	})
+	job := script(t, `cat "$LUK_IN/f.txt"
+`)
 	e := newRunEnv(t, "    steps:\n      - store: a\n      - relay: s3-upload\n")
+	e.jobs["s3-upload"] = rundtest.Unit{Argv: []string{job}}
 	d := e.debugDispatcher()
 	if err := d.Submit(e.enqueue(t, "id1", "up", "p")); err != nil {
 		t.Fatal(err)
@@ -146,11 +168,8 @@ func TestRelayOnUploadLastStep(t *testing.T) {
 }
 
 func TestRelayOutputNotLoggedAtInfo(t *testing.T) {
-	fakeRund(t, func(_ runproto.Request, _ net.Conn, fw *runproto.FrameWriter) {
-		io.WriteString(fw.Stream(runproto.Stdout), "quiet\n")
-		fw.Exit(0)
-	})
 	e := newRunEnv(t, "    steps:\n      - relay: s3-upload\n      - store: a\n")
+	e.jobs["s3-upload"] = rundtest.Unit{Argv: []string{script(t, "echo quiet\n")}}
 	e.runOne(t, "id1")
 	recs := e.logs.records(t)
 	if find(recs, "pipeline done", "p") == nil || findStep(recs, "step output", 1) != nil {
@@ -160,32 +179,32 @@ func TestRelayOutputNotLoggedAtInfo(t *testing.T) {
 
 func TestRelayFailures(t *testing.T) {
 	cases := map[string]struct {
-		handle func(r runproto.Request, c net.Conn, fw *runproto.FrameWriter)
+		job    string // the script of the job; empty: none in run.d
+		fake   func(ch *jobchan.Conn, c *net.UnixConn, fw *runproto.FrameWriter) int
 		err    string
 		output string
 	}{
-		"exit status": {func(_ runproto.Request, _ net.Conn, fw *runproto.FrameWriter) {
-			io.WriteString(fw.Stream(runproto.Stdout), "partial\n")
-			io.WriteString(fw.Stream(runproto.Stderr), "bucket gone\n")
-			fw.Exit(3)
-		}, "relay s3-upload: exit status 3", "partial\nbucket gone\n"},
-		"refused": {func(_ runproto.Request, _ net.Conn, fw *runproto.FrameWriter) {
-			io.WriteString(fw.Stream(runproto.Stderr), "lukd run: unknown job s3-upload")
-			fw.Exit(1)
-		}, "relay s3-upload: exit status 1", "lukd run: unknown job s3-upload"},
-		"closed": {func(runproto.Request, net.Conn, *runproto.FrameWriter) {},
-			"relay s3-upload: connection closed before the exit status", ""},
-		"protocol": {func(_ runproto.Request, c net.Conn, _ *runproto.FrameWriter) { c.Write([]byte("garbage")) },
-			"relay s3-upload: unknown frame type", ""},
-		"wrote out": {func(r runproto.Request, _ net.Conn, fw *runproto.FrameWriter) {
-			os.WriteFile(filepath.Join(r.Work, "out", "x"), nil, 0o640)
-			fw.Exit(0)
-		}, "relay s3-upload: relay step wrote out/x", ""},
+		"exit status": {job: "echo partial >&2\necho bucket gone >&2\nexit 3\n",
+			err: "relay s3-upload: exit status 3", output: "partial\nbucket gone\n"},
+		"refused": {err: "relay s3-upload: exit status 1", output: "lukd run: job \"s3-upload\": unknown\n"},
+		"closed": {fake: func(_ *jobchan.Conn, c *net.UnixConn, _ *runproto.FrameWriter) int { c.Close(); return 0 },
+			err: "relay s3-upload: connection closed before the exit status"},
+		"protocol": {fake: func(_ *jobchan.Conn, c *net.UnixConn, _ *runproto.FrameWriter) int {
+			c.Write([]byte("garbage"))
+			c.Close()
+			return 0
+		}, err: "relay s3-upload: unknown frame type"},
+		"wrote out": {job: "echo x > \"$LUK_OUT/x\"\n", err: "relay s3-upload: relay step wrote out/x"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			fakeRund(t, c.handle)
 			e := newRunEnv(t, "    steps:\n      - relay: s3-upload\n      - store: a\n")
+			switch {
+			case c.fake != nil:
+				fakeRund(t, e, c.fake)
+			case c.job != "":
+				e.jobs["s3-upload"] = rundtest.Unit{Argv: []string{script(t, c.job)}}
+			}
 			st := status.New(status.Path(e.cfg.DataDir()))
 			d := e.dispatcher()
 			d.SetStatus(st)
@@ -212,10 +231,8 @@ func TestRelayFailures(t *testing.T) {
 }
 
 func TestRelayNoSocket(t *testing.T) {
-	old := runSocket
-	runSocket = filepath.Join(t.TempDir(), "none")
-	t.Cleanup(func() { runSocket = old })
 	e := newRunEnv(t, "    steps:\n      - relay: s3-upload\n      - store: a\n")
+	runSocket = filepath.Join(t.TempDir(), "none")
 	e.runOne(t, "n1")
 	r := find(e.logs.records(t), "pipeline failed", "p")
 	if r == nil || !strings.HasPrefix(fmt.Sprint(r["error"]), "relay s3-upload: dial unix ") {
@@ -223,58 +240,49 @@ func TestRelayNoSocket(t *testing.T) {
 	}
 }
 
-// blockingRund serves a job that prints started and runs until the
-// connection is closed, which closed then reports.
-func blockingRund(t *testing.T) (started, closed chan struct{}) {
-	started, closed = make(chan struct{}), make(chan struct{})
-	fakeRund(t, func(_ runproto.Request, c net.Conn, fw *runproto.FrameWriter) {
-		io.WriteString(fw.Stream(runproto.Stdout), "started\n")
-		close(started)
-		io.Copy(io.Discard, c)
-		close(closed)
-	})
-	return started, closed
+// blockingJob makes s3-upload of e a job that prints started, writes its
+// pid to the returned file and runs until it is killed.
+func blockingJob(t *testing.T, e *env) (pidfile string) {
+	pidfile = filepath.Join(t.TempDir(), "pid")
+	job := script(t, `echo started
+echo $$ > "$PIDFILE.tmp"; mv "$PIDFILE.tmp" "$PIDFILE"
+sleep 30
+`)
+	e.jobs["s3-upload"] = rundtest.Unit{Argv: []string{job}, Env: []string{"PIDFILE=" + pidfile}}
+	return pidfile
 }
 
-func TestRelayTimeoutClosesConnection(t *testing.T) {
-	_, closed := blockingRund(t)
-	e := newRunEnv(t, "    timeout: 300ms\n    steps:\n      - relay: s3-upload\n      - store: a\n")
+func TestRelayTimeoutStopsJob(t *testing.T) {
+	e := newRunEnv(t, "    timeout: 1s\n    steps:\n      - relay: s3-upload\n      - store: a\n")
+	pidfile := blockingJob(t, e)
 	start := time.Now()
 	e.runOne(t, "t1")
 	if el := time.Since(start); el > 5*time.Second {
 		t.Fatalf("took %v", el)
 	}
-	select {
-	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("connection not closed")
-	}
+	waitDead(t, childPid(t, pidfile))
 	r := find(e.logs.records(t), "pipeline failed", "p")
-	if r == nil || fmt.Sprint(r["error"]) != "relay s3-upload: timeout after 300ms" || r["output"] != "started\n" {
+	if r == nil || fmt.Sprint(r["error"]) != "relay s3-upload: timeout after 1s" || r["output"] != "started\n" {
 		t.Fatalf("logs %v", e.logs.records(t))
 	}
 }
 
 func TestCloseInterruptsRelay(t *testing.T) {
-	started, closed := blockingRund(t)
 	e := newRunEnv(t, "    steps:\n      - relay: s3-upload\n      - store: a\n")
+	pidfile := blockingJob(t, e)
 	d := e.dispatcher()
 	j := e.enqueue(t, "i1", "up", "p")
 	if err := d.Submit(j); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("job did not start")
+	for deadline := time.Now().Add(5 * time.Second); !exists(pidfile); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("job did not start")
+		}
 	}
 	d.Close()
 	d.Wait()
-	select {
-	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("connection not closed")
-	}
+	waitDead(t, childPid(t, pidfile))
 	if !exists(filepath.Join(j.Entry.Dir, "meta.json")) {
 		t.Fatal("queue entry removed")
 	}
@@ -284,22 +292,13 @@ func TestCloseInterruptsRelay(t *testing.T) {
 	}
 }
 
-// A relay step passes on the metadata of its work directory: lukd run
-// derives from it and the path the environment a run step there has.
+// A relay step passes on the metadata of its set in the request; the job
+// gets it as its environment.
 func TestRelaySendsMetadata(t *testing.T) {
-	type seen struct{ job, run []string }
-	got := make(chan seen, 1)
-	var root string
-	fakeRund(t, func(r runproto.Request, _ net.Conn, fw *runproto.FrameWriter) {
-		run, err := runstep.WorkEnv(r.Work, root)
-		if err != nil {
-			t.Error(err)
-		}
-		got <- seen{runstep.Vars(r.Work, root, r.Env), run}
-		fw.Exit(0)
-	})
+	seen := filepath.Join(t.TempDir(), "env")
 	e := newRunEnv(t, "    steps:\n      - relay: s3-upload\n      - store: a\n")
-	root = e.root
+	e.jobs["s3-upload"] = rundtest.Unit{Argv: []string{script(t, "env > \"$SEEN\"\n")}, Env: []string{"SEEN=" + seen}}
+	e.requests = make(chan runproto.StepRequest, 1)
 	d := e.dispatcher()
 	j := e.enqueueWith(t, "id1", "up", func(j *Job) {
 		j.Vars.Tags, j.Vars.Hostname = []string{"daily"}, "db1"
@@ -309,8 +308,19 @@ func TestRelaySendsMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.Wait()
-	sn := <-got
-	if !slices.Equal(sn.job, sn.run) || !slices.Contains(sn.job, "LUK_TAGS=daily") {
-		t.Fatalf("\n job %q\n run %q", sn.job, sn.run)
+	want := map[string]string{
+		"LUK_SENDER": "robert.socha", "LUK_ENDPOINT": "up", "LUK_FILE": "f.txt", "LUK_NAME": "f.txt",
+		"LUK_TAGS": "daily", "LUK_HOSTNAME": "db1", "LUK_ORIGIN": "db1",
+	}
+	if r := <-e.requests; r.Pipeline != "p" || r.Step != 1 || r.ID != "id1" || r.Job != "" || !maps.Equal(r.Env, want) {
+		t.Fatalf("request %+v", r)
+	}
+	b, err := os.ReadFile(seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := envLines(string(b))
+	if m["LUK_TAGS"] != "daily" || m["LUK_ORIGIN"] != "db1" || m["LUK_FILE"] != m["LUK_IN"]+"/f.txt" || m["LUK_ID"] != "id1" {
+		t.Fatalf("env %v", m)
 	}
 }

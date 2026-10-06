@@ -62,13 +62,6 @@ var MetaNames = []string{"LUK_SENDER", "LUK_ENDPOINT", "LUK_FILE", "LUK_NAME", "
 // LUK_FILE, whose form CleanMeta fixes).
 const MaxMetaValue = 1 << 10
 
-// varOrder is the order of the LUK_* metadata variables; the names not in
-// MetaNames are derived from the work directory path and the root.
-var varOrder = []string{
-	"LUK_WORK", "LUK_IN", "LUK_OUT", "LUK_META", "LUK_ID", "LUK_SENDER", "LUK_ENDPOINT", "LUK_PIPELINE",
-	"LUK_FILE", "LUK_NAME", "LUK_ROOT", "LUK_STEP", "LUK_TAGS", "LUK_HOSTNAME", "LUK_ORIGIN",
-}
-
 // safeValue reports whether v can be the value of a variable: valid UTF-8
 // without a control character. Neither an exec environment nor a
 // systemd-run --setenv carries a NUL, and a newline or another control
@@ -120,31 +113,6 @@ func cleanMeta(env map[string]string, file func(string) bool) map[string]string 
 	return m
 }
 
-// Vars is the LUK_* metadata environment of the work directory work
-// (<root>/work/<id>/<pipeline>/<step>) as NAME=value entries in a fixed
-// order: LUK_WORK, LUK_IN, LUK_OUT, LUK_META, LUK_ID, LUK_PIPELINE and
-// LUK_STEP from work, LUK_ROOT root, the others from meta after
-// CleanMeta. A variable without a safe value is left out.
-func Vars(work, root string, meta map[string]string) []string {
-	step := filepath.Dir(work)
-	v := CleanMeta(work, meta)
-	v["LUK_WORK"] = work
-	v["LUK_IN"] = filepath.Join(work, "in")
-	v["LUK_OUT"] = filepath.Join(work, "out")
-	v["LUK_META"] = filepath.Join(work, "meta.json")
-	v["LUK_ID"] = filepath.Base(filepath.Dir(step))
-	v["LUK_PIPELINE"] = filepath.Base(step)
-	v["LUK_STEP"] = filepath.Base(work)
-	v["LUK_ROOT"] = root
-	var env []string
-	for _, k := range varOrder {
-		if x, ok := v[k]; ok && safeValue(x) {
-			env = append(env, k+"="+x)
-		}
-	}
-	return env
-}
-
 // Meta is the metadata a client of lukd run passes on for the work
 // directory work: the names of MetaNames that lookup finds, after
 // CleanMeta.
@@ -156,17 +124,6 @@ func Meta(work string, lookup func(string) (string, bool)) map[string]string {
 		}
 	}
 	return CleanMeta(work, env)
-}
-
-// Env is Vars of the work directory work, whose meta.json is m and whose
-// set has the file names names; root is LUK_ROOT. LUK_FILE is there only
-// for a set of exactly one file.
-func Env(work, root string, m WorkMeta, names []string) []string {
-	meta := uploadMeta(m, names)
-	if n, ok := meta["LUK_FILE"]; ok {
-		meta["LUK_FILE"] = filepath.Join(work, "in", n)
-	}
-	return Vars(work, root, meta)
 }
 
 // StepMeta is the free-form metadata lukd process passes on in a step
@@ -241,20 +198,6 @@ func uploadMeta(m WorkMeta, names []string) map[string]string {
 	meta["LUK_HOSTNAME"] = host
 	meta["LUK_ORIGIN"] = origin
 	return meta
-}
-
-// WorkEnv is Env of the work directory work, read with ReadWork.
-func WorkEnv(work, root string) ([]string, error) {
-	r, err := os.OpenRoot(work)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	m, names, err := ReadWork(r)
-	if err != nil {
-		return nil, err
-	}
-	return Env(work, root, m, names), nil
 }
 
 // ReadWork reads the work directory open as r: meta.json (a regular file,

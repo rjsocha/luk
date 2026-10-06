@@ -11,7 +11,7 @@ import (
 	"luk/internal/status"
 )
 
-// lukJob is the luk-job binary built once for the step scripts.
+// lukJob is the luk-job binary built once for the step scripts, on PATH.
 var lukJob string
 
 func TestMain(m *testing.M) {
@@ -28,6 +28,8 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(dir)
 		os.Exit(1)
 	}
+	// The run programs of rundtest get the PATH of the test.
+	os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
