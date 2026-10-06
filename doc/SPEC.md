@@ -219,10 +219,11 @@ COMPLETE, ABORT, KEEPALIVE: empty
 
 ### One operation per session
 
-- A session carries one OP (kind 1, number 0), signed. Inside the
-  channel only `luk-upload@v2`, `luk-link@v2` and `luk-list@v2` verify
-  (any other namespace is 401); their signed texts end with `h`, which
-  binds the signature to this one session.
+- A session carries one OP (kind 1, number 0; another number is 400
+  `bad channel request` in the clear, the attempt is free), signed.
+  Inside the channel only `luk-upload@v2`, `luk-link@v2` and
+  `luk-list@v2` verify (any other namespace is 401); their signed texts
+  end with `h`, which binds the signature to this one session.
 - A second OP is 409 `the session has had its operation`, in the clear,
   and leaves the session alone, whether it opened or not: anybody can
   name a session by the id in the clear and replay its messages.

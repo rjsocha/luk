@@ -332,6 +332,23 @@ func TestChannelWrongPath(t *testing.T) {
 	wantOuter(t, "transport to another path", resp, http.StatusNotFound)
 }
 
+// The OP has number 0; another number is a malformed header and leaves
+// the session to an OP with number 0, of any attempt.
+func TestChannelOpNumber(t *testing.T) {
+	f, srvURL, pin := chanFixture(t, nil)
+	c := chanOpen(t, srvURL, wire.EndpointsPath, pin)
+	req := channel.Request{Method: http.MethodGet, Target: wire.EndpointsPath}
+	resp := c.post(t, c.path, channel.Nonce{Kind: channel.KindOp, Number: 1}, opPlain(t, req, nil))
+	wantOuter(t, "OP number 1", resp, http.StatusBadRequest)
+	if f.srv.chans.get(c.sess.ID()) == nil {
+		t.Fatal("session ended by an OP with number 1")
+	}
+	resp = c.post(t, c.path, channel.Nonce{Kind: channel.KindOp, Attempt: 3}, opPlain(t, req, nil))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("OP attempt 3: %d", resp.StatusCode)
+	}
+}
+
 func TestChannelSessionEndsAfterOp(t *testing.T) {
 	f, srvURL, pin := chanFixture(t, nil)
 	c := chanOpen(t, srvURL, wire.EndpointsPath, pin)

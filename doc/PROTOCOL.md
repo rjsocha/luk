@@ -274,8 +274,9 @@ bit  0       last     1 on the final frame of the message
 
 `nonce = kind<<60 | number<<28 | attempt<<16 | frame<<1 | last`.
 
-The OP of a session is kind 1, number 0, attempt 0 (`luk`); lukd does not
-check its number and attempt, but a client MUST send exactly that.
+The OP of a session is kind 1, number 0: lukd answers an OP with another
+number 400 `bad channel request` in the clear and leaves the session
+alone. The attempt is free; `luk` sends attempt 0.
 
 #### Frames
 
@@ -413,7 +414,7 @@ The answers lukd sends in the clear:
 |---|---|---|
 | 400 | `empty channel request`, `unknown channel request` | an empty body, an unknown first byte |
 | 400 | `bad handshake` | handshake body over 64 bytes or not a message 1 |
-| 400 | `bad channel request` | a clear header that does not parse (unknown kind, frame bits set) |
+| 400 | `bad channel request` | a clear header that does not parse (unknown kind, frame bits set, an OP number other than 0) |
 | 400 | `bad channel message` | a frame of the message does not open, or the stream is truncated |
 | 404 | `no endpoint <path>`, `no channel` | handshake on a path without an endpoint; lukd without identity key |
 | 404 | `unknown session` | no session of that id on that Host, path and listener (expired, evicted, lost in a restart, another lukd) |

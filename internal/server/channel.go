@@ -360,6 +360,11 @@ func (s *Server) chanTransport(w http.ResponseWriter, r *http.Request, sn *snaps
 		chanFail(w, readStatus(err), "bad channel request")
 		return
 	}
+	// The OP has number 0; only its attempt counts up.
+	if n.Kind == channel.KindOp && n.Number != 0 {
+		chanFail(w, http.StatusBadRequest, "bad channel request")
+		return
+	}
 	cs := s.chans.get(id)
 	if cs == nil || cs.host != strings.ToLower(r.Host) || cs.path != r.URL.Path || cs.listener != l.cfg.Name {
 		chanFail(w, http.StatusNotFound, "unknown session")
