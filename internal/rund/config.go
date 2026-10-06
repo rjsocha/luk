@@ -44,6 +44,9 @@ const (
 	StateShared = "shared"
 	// maxUser is the length systemd recommends for a user name.
 	maxUser = 31
+	// RunDir holds the socket of lukd run, the nonce cache and the
+	// volatile secrets; a job never sees it.
+	RunDir = "/run/luk"
 )
 
 var (
@@ -372,8 +375,14 @@ func DynamicUser(job, pipeline string) string {
 // group of the peer; without a user the job gets a dynamic user per job
 // and pipeline. vars is the LUK_* metadata of work (runstep.Vars), set
 // after the job's env and before LUK_JOB, LUK_TMP and LUK_STATE, one
-// --setenv argument each.
-func (j *Job) Argv(unit, name, pipeline, work, peerGroup string, vars []string) []string {
+// --setenv argument each. The job sees neither the directory of the lukd
+// configuration of g nor RunDir, and of the root of g only work, at the
+// same path (see sandbox).
+func (j *Job) Argv(g *Global, unit, name, pipeline, work, peerGroup string, vars []string) ([]string, error) {
+	box, err := j.sandbox(g, work)
+	if err != nil {
+		return nil, err
+	}
 	a := []string{"systemd-run", "--wait", "--collect", "--pipe", "--quiet", "--expand-environment=no", "--unit=" + unit}
 	if j.User != "" {
 		a = append(a, "--uid="+j.User)
@@ -386,6 +395,7 @@ func (j *Job) Argv(unit, name, pipeline, work, peerGroup string, vars []string) 
 	}
 	a = append(a, "-p", "SupplementaryGroups="+strings.Join(j.SupplementaryGroups(peerGroup), " "))
 	a = append(a, "-p", "PrivateTmp=yes")
+	a = append(a, box...)
 	if j.State != "" {
 		a = append(a, "-p", "StateDirectory="+StateDir+"/"+name+"/"+pipeline, "-p", "StateDirectoryMode=0700")
 	}
@@ -403,5 +413,49 @@ func (j *Job) Argv(unit, name, pipeline, work, peerGroup string, vars []string) 
 	if j.State != "" {
 		a = append(a, "--setenv=LUK_STATE="+StatePath(name, pipeline))
 	}
-	return append(a, j.Command, work)
+	return append(a, j.Command, work), nil
+}
+
+// sandbox is the part of the namespace of a job that hides what the group
+// of the peer may read: the directory of the lukd configuration
+// (identity key, passwords, TLS settings) and RunDir become inaccessible,
+// the root (keys, storages, queues, other work directories) an empty
+// read-only tmpfs with only work bound back, read-write and at the same
+// path, so LUK_WORK, LUK_IN, LUK_OUT and LUK_META stay valid. The
+// credentials of the job are read by systemd before the namespace is set
+// up. work is the path CheckWork accepted, passed as is.
+func (j *Job) sandbox(g *Global, work string) ([]string, error) {
+	conf := filepath.Dir(g.Config)
+	for _, p := range []string{g.Root, conf, work} {
+		if err := unitPath(p); err != nil {
+			return nil, err
+		}
+	}
+	if !strings.HasPrefix(work, g.Root+"/") {
+		return nil, fmt.Errorf("work %q: not under %s", work, g.Root)
+	}
+	for _, d := range []string{g.Root, conf, RunDir} {
+		if j.Command == d || strings.HasPrefix(j.Command, d+"/") {
+			return nil, fmt.Errorf("command %s: hidden from the job under %s", j.Command, d)
+		}
+	}
+	return []string{
+		"-p", "InaccessiblePaths=-" + conf,
+		"-p", "InaccessiblePaths=-" + RunDir,
+		"-p", "TemporaryFileSystem=" + g.Root + ":ro",
+		"-p", "BindPaths=" + work,
+	}, nil
+}
+
+// unitPath requires p to be a clean absolute path other than / without a
+// character systemd-run splits, unquotes or expands in a property
+// (white space, quotes, backslash, colon, $, %) or a control character.
+func unitPath(p string) error {
+	if !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" {
+		return fmt.Errorf("path %q: not a clean absolute path below /", p)
+	}
+	if strings.ContainsFunc(p, func(r rune) bool { return unsafePathRune(r) || strings.ContainsRune(`"'\:`, r) }) {
+		return fmt.Errorf("path %q: control character, white space, quote, backslash, colon, $ or %% in the path", p)
+	}
+	return nil
 }

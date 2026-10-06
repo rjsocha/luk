@@ -167,7 +167,11 @@ func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, 
 	// work directory.
 	vars := runstep.Vars(work, g.Root, req.Env)
 	unit := UnitName(req.Job)
-	argv := job.Argv(unit, req.Job, pipeline, work, group, vars)
+	argv, err := job.Argv(g, unit, req.Job, pipeline, work, group, vars)
+	if err != nil {
+		s.Log.Error("job refused", "job", req.Job, "err", err)
+		return refusal{fmt.Errorf("job %s: unavailable", req.Job)}
+	}
 	who := job.User
 	if who == "" {
 		who = DynamicUser(req.Job, pipeline)

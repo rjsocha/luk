@@ -3029,7 +3029,7 @@ The variables:
   its `file` is not a valid name: the file in `in/` is then named by the
   id).
 - `LUK_ROOT`: the luk `root` (for a job: `root` of `run.yaml`, the same
-  directory).
+  directory, inside the job an empty tmpfs but for the work directory).
 - `LUK_STEP`: the step number, 1-based, as in the work directory.
 - `LUK_TAGS`: the client tags joined with `,`.
 - `LUK_HOSTNAME`: `backup.hostname` when present, else empty.
@@ -3225,8 +3225,10 @@ purpose.
   the passwords when the step runs, so a changed file takes effect with
   the next run, without a reload; a missing or empty one fails the step.
   Only the process role reads them: `lukd-receive.service` and
-  `lukd-run@.service` hide `password.d` (`InaccessiblePaths=`). The run
-  programs of the process role share its user and can read them.
+  `lukd-run@.service` hide `password.d` (`InaccessiblePaths=`), and a
+  job of lukd run never sees the configuration directory (see Jobs with
+  other users). The run programs of the process role share its user and
+  can read them.
 - Recipients stay required: `insecure` adds to the keys, never replaces
   them. The recipients are looked up only when the set has a file for the
   `.gpg` path.
@@ -4658,6 +4660,8 @@ work directory. No polkit and no sudo are involved.
   (--uid=<user> | -p DynamicUser=yes -p User=<dynamic user>)
   --working-directory=<work> [--gid=<group>]
   -p SupplementaryGroups=<peer group> [<groups>] -p PrivateTmp=yes
+  -p InaccessiblePaths=-<config dir> -p InaccessiblePaths=-/run/luk
+  -p TemporaryFileSystem=<root>:ro -p BindPaths=<work>
   [-p StateDirectory=lukd-run/<job>/<pipeline> -p StateDirectoryMode=0700]
   -p LoadCredential=... -p RuntimeMaxSec=<timeout> [--setenv=K=V ...]
   --setenv=LUK_WORK=<work> ... --setenv=LUK_ORIGIN=<origin>
@@ -4675,6 +4679,36 @@ work directory. No polkit and no sudo are involved.
   of its work directory beyond that. `<peer group>` is the primary group
   of the peer (passwd), by name, or the numeric gid when it has no name or
   one that is not a plain account name.
+- Sandbox of a job: the job runs as another user with credentials of
+  its own, but with the peer's group, so it would read whatever that
+  group reads. Its unit hides all of that:
+  - `<config dir>`, the directory of `config` of `run.yaml` (default
+    `/etc/site/lukd`), is inaccessible as a whole: the identity key,
+    `password.d`, `config.yaml` and `config.d`, `run.yaml` and run.d,
+    and every other file there. `LoadCredential=` still reads a
+    credential from it, since systemd reads the credentials as root
+    before it sets up the namespace of the job.
+  - `/run/luk` is inaccessible: the socket of lukd run, the nonce cache
+    and the volatile secrets.
+  - `<root>` is an empty read-only tmpfs (the TLS and ACME keys, the
+    storages, the queues and the other work directories are gone) with
+    only `<work>` bound back, read-write and at the same path, so
+    `LUK_WORK`, `LUK_IN`, `LUK_OUT`, `LUK_META`, the argument and the
+    current directory stay valid. `LUK_ROOT` names the tmpfs.
+  - The `-` of `InaccessiblePaths=` skips a missing directory; the bind
+    of `<work>` has none, so a work directory gone before the start
+    fails the job.
+  - The job sees the rest of the system as its user and groups allow,
+    `/tmp` and `/var/tmp` private (`PrivateTmp=yes`), and its state
+    directory. A storage, queue, nonce cache or volatile directory
+    configured outside `<root>` and `/run/luk` is not hidden.
+  - `command` must lie outside `<root>`, `<config dir>` and `/run/luk`,
+    which the job cannot reach; `<root>`, `<config dir>` and `<work>`
+    must be clean absolute paths other than `/` without white space, a
+    control character, a quote, a backslash, a colon, `$` or `%`
+    (systemd-run splits, unquotes or expands them in a property).
+    Otherwise the request is refused as `job <job>: unavailable`, the
+    reason in the journal.
 - Deadlines: the request must arrive, and a refusal be read, within 5
   seconds of the connection; a peer that sends nothing, half a line or
   does not read the refusal is cut off then. A job waiting for its state
@@ -4723,8 +4757,10 @@ work directory. No polkit and no sudo are involved.
   `DynamicUser=yes` implies `ProtectSystem=strict`,
   `ProtectHome=read-only`, `PrivateTmp=yes`, `NoNewPrivileges=yes`,
   `RestrictSUIDSGID=yes` and `RemoveIPC=yes`: the job reads the system
-  and the work directory but writes only its own `/tmp` and `/var/tmp`,
-  which are removed with the unit, and its state directory. That fits
+  (as hidden by the sandbox above) and the work directory but writes
+  only its own `/tmp` and `/var/tmp`, which are removed with the unit,
+  its state directory and the work directory where its groups may
+  (`out/`, when the `run` program opens it to the group). That fits
   jobs that deliver the inputs elsewhere (an upload to S3, rsync to
   another host, a notification); a job that writes other local files
   needs a `user`.

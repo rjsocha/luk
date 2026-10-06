@@ -190,11 +190,18 @@ func TestArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	j.State = StateLocked
+	g := &Global{Root: "/var/lib/luk", Config: "/etc/site/lukd/config.yaml"}
 	vars := []string{"LUK_WORK=/var/lib/luk/work/a/offsite/1", "LUK_PIPELINE=offsite", "LUK_TAGS=a b,$HOME"}
-	got := strings.Join(j.Argv("lukd-run-s3-1", "s3-upload", "offsite", "/var/lib/luk/work/a/offsite/1", "luk", vars), " ")
+	a, err := j.Argv(g, "lukd-run-s3-1", "s3-upload", "offsite", "/var/lib/luk/work/a/offsite/1", "luk", vars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(a, " ")
 	want := "systemd-run --wait --collect --pipe --quiet --expand-environment=no --unit=lukd-run-s3-1 --uid=luk-s3 " +
 		"--working-directory=/var/lib/luk/work/a/offsite/1 --gid=luk-s3 -p SupplementaryGroups=luk backup " +
-		"-p PrivateTmp=yes -p StateDirectory=lukd-run/s3-upload/offsite -p StateDirectoryMode=0700 " +
+		"-p PrivateTmp=yes -p InaccessiblePaths=-/etc/site/lukd -p InaccessiblePaths=-/run/luk " +
+		"-p TemporaryFileSystem=/var/lib/luk:ro -p BindPaths=/var/lib/luk/work/a/offsite/1 " +
+		"-p StateDirectory=lukd-run/s3-upload/offsite -p StateDirectoryMode=0700 " +
 		"-p LoadCredential=s3:/etc/site/lukd/s3.credentials -p RuntimeMaxSec=1800 --setenv=BUCKET=example-backup " +
 		"--setenv=LUK_WORK=/var/lib/luk/work/a/offsite/1 --setenv=LUK_PIPELINE=offsite --setenv=LUK_TAGS=a b,$HOME " +
 		"--setenv=LUK_JOB=s3-upload --setenv=LUK_TMP=/var/tmp --setenv=LUK_STATE=/var/lib/lukd-run/s3-upload/offsite " +
@@ -206,15 +213,88 @@ func TestArgv(t *testing.T) {
 		t.Fatalf("groups %s", g)
 	}
 	dyn := &Job{Command: "/opt/luk/notify", Groups: []string{"mail"}, Timeout: config.Duration(time.Minute)}
-	got = strings.Join(dyn.Argv("lukd-run-n-1", "notify", "p", "/w", "luk", []string{"LUK_WORK=/w", "LUK_PIPELINE=p"}), " ")
+	g = &Global{Root: "/srv/l", Config: "/etc/l/c.yaml"}
+	a, err = dyn.Argv(g, "lukd-run-n-1", "notify", "p", "/srv/l/work/i/p/1", "luk", []string{"LUK_WORK=/srv/l/work/i/p/1", "LUK_PIPELINE=p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = strings.Join(a, " ")
 	want = "systemd-run --wait --collect --pipe --quiet --expand-environment=no --unit=lukd-run-n-1 -p DynamicUser=yes -p User=" + DynamicUser("notify", "p") + " " +
-		"--working-directory=/w -p SupplementaryGroups=luk mail -p PrivateTmp=yes -p RuntimeMaxSec=60 " +
-		"--setenv=LUK_WORK=/w --setenv=LUK_PIPELINE=p --setenv=LUK_JOB=notify --setenv=LUK_TMP=/var/tmp /opt/luk/notify /w"
+		"--working-directory=/srv/l/work/i/p/1 -p SupplementaryGroups=luk mail -p PrivateTmp=yes " +
+		"-p InaccessiblePaths=-/etc/l -p InaccessiblePaths=-/run/luk -p TemporaryFileSystem=/srv/l:ro -p BindPaths=/srv/l/work/i/p/1 " +
+		"-p RuntimeMaxSec=60 " +
+		"--setenv=LUK_WORK=/srv/l/work/i/p/1 --setenv=LUK_PIPELINE=p --setenv=LUK_JOB=notify --setenv=LUK_TMP=/var/tmp /opt/luk/notify /srv/l/work/i/p/1"
 	if got != want {
 		t.Fatalf("\n got %s\nwant %s", got, want)
 	}
 	if u := UnitName("s3.Up_x"); !strings.HasPrefix(u, "lukd-run-s3--p-x-") || u == UnitName("s3.Up_x") {
 		t.Fatalf("unit %s", u)
+	}
+}
+
+// TestArgvSandboxFromRunYAML takes the hidden directories from run.yaml.
+func TestArgvSandboxFromRunYAML(t *testing.T) {
+	d := t.TempDir()
+	p := filepath.Join(d, "run.yaml")
+	write(t, p, "root: /data/luk\nconfig: /etc/x/lukd/main.yaml\n", 0o600)
+	g, err := LoadGlobal(p, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := &Job{User: "u", Command: "/opt/j", Timeout: config.Duration(time.Minute)}
+	a, err := j.Argv(g, "u1", "j", "p", "/data/luk/work/i/p/2", "luk", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(a, " ")
+	for _, w := range []string{
+		" -p InaccessiblePaths=-/etc/x/lukd ",
+		" -p InaccessiblePaths=-/run/luk ",
+		" -p TemporaryFileSystem=/data/luk:ro ",
+		" -p BindPaths=/data/luk/work/i/p/2 ",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("no %q in %s", w, got)
+		}
+	}
+}
+
+func TestArgvRefusesPaths(t *testing.T) {
+	j := &Job{User: "u", Command: "/opt/j", Timeout: config.Duration(time.Minute)}
+	ok := &Global{Root: "/var/lib/luk", Config: "/etc/site/lukd/config.yaml"}
+	for name, c := range map[string]struct {
+		g    *Global
+		work string
+		cmd  string
+	}{
+		"space in work":       {ok, "/var/lib/luk/work/i/p q/1", ""},
+		"tab in work":         {ok, "/var/lib/luk/work/i/p\tq/1", ""},
+		"newline in work":     {ok, "/var/lib/luk/work/i/p\nq/1", ""},
+		"control in work":     {ok, "/var/lib/luk/work/i/p\x01/1", ""},
+		"colon in work":       {ok, "/var/lib/luk/work/i/p:q/1", ""},
+		"quote in work":       {ok, "/var/lib/luk/work/i/p\"q/1", ""},
+		"backslash in work":   {ok, "/var/lib/luk/work/i/p\\q/1", ""},
+		"percent in work":     {ok, "/var/lib/luk/work/i/p%q/1", ""},
+		"work outside root":   {ok, "/var/lib/other/work/i/p/1", ""},
+		"work not clean":      {ok, "/var/lib/luk/work/i/../p/1", ""},
+		"space in root":       {&Global{Root: "/var/lib/l k", Config: ok.Config}, "/var/lib/l k/work/i/p/1", ""},
+		"root is /":           {&Global{Root: "/", Config: ok.Config}, "/work/i/p/1", ""},
+		"space in config dir": {&Global{Root: ok.Root, Config: "/etc/l k/config.yaml"}, "/var/lib/luk/work/i/p/1", ""},
+		"config dir is /":     {&Global{Root: ok.Root, Config: "/config.yaml"}, "/var/lib/luk/work/i/p/1", ""},
+		"command under root":  {ok, "/var/lib/luk/work/i/p/1", "/var/lib/luk/bin/j"},
+		"command in config":   {ok, "/var/lib/luk/work/i/p/1", "/etc/site/lukd/j"},
+		"command in /run/luk": {ok, "/var/lib/luk/work/i/p/1", "/run/luk/j"},
+	} {
+		jc := *j
+		if c.cmd != "" {
+			jc.Command = c.cmd
+		}
+		if a, err := jc.Argv(c.g, "u1", "j", "p", c.work, "luk", nil); err == nil {
+			t.Errorf("%s accepted: %q", name, a)
+		}
+	}
+	if _, err := j.Argv(ok, "u1", "j", "p", "/var/lib/luk/work/i/p/1", "luk", nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -493,6 +573,31 @@ func TestServeRuns(t *testing.T) {
 	if !slices.Contains(e.fr.argv, "--setenv=LUK_PIPELINE=p") || !slices.Contains(e.fr.argv, "--setenv=LUK_JOB=s3-upload") ||
 		slices.ContainsFunc(e.fr.argv, func(a string) bool { return strings.HasPrefix(a, "--setenv=LUK_STATE=") }) {
 		t.Fatalf("argv %q", e.fr.argv)
+	}
+}
+
+// The job sees of root only its work directory and nothing of the lukd
+// configuration of run.yaml.
+func TestServeSandbox(t *testing.T) {
+	e := newEnv(t)
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { return 0, nil }
+	if _, err := e.exchange(t, string(runproto.Request{Job: "state", Work: e.work}.Encode())); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(e.work))))
+	top := filepath.Dir(root)
+	got := strings.Join(e.fr.argv, " ")
+	want := "-p InaccessiblePaths=-" + filepath.Join(top, "lukd") + " -p InaccessiblePaths=-/run/luk " +
+		"-p TemporaryFileSystem=" + root + ":ro -p BindPaths=" + e.work + " "
+	if !strings.Contains(got, want) {
+		t.Fatalf("argv %s\nwant %s", got, want)
+	}
+	// A command the sandbox hides is refused before anything runs.
+	e.fr.argv = nil
+	write(t, filepath.Join(e.srv.Jobs, "quick.yaml"), "command: "+filepath.Join(top, "lukd", "quick")+"\n", 0o600)
+	fs, err := e.exchange(t, string(runproto.Request{Job: "quick", Work: e.work}.Encode()))
+	if err == nil || len(fs) != 2 || fs[0] != (frame{'e', "lukd run: job quick: unavailable\n"}) || e.fr.argv != nil {
+		t.Fatalf("%v %q %q", err, fs, e.fr.argv)
 	}
 }
 
