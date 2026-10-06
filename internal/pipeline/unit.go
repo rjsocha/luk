@@ -141,8 +141,9 @@ func (d *Dispatcher) askUnit(j Job, p *config.Pipeline, step int, kind unitKind,
 	}
 
 	var ended atomic.Bool
+	nj := d.nested(ctx, j, p, step, dir, m, ch)
 	res := make(chan unitResult, 1)
-	go func() { res <- d.readResults(ch, kind, outDir, &ended) }()
+	go func() { res <- d.readResults(ch, kind, outDir, &ended, nj) }()
 
 	req := runproto.StepRequest{Pipeline: p.Name, Step: step, ID: j.Entry.ID, Env: runstep.StepMeta(m, names)}
 	askErr := runproto.AskStep(ctx, d.RunSocket, req, remote, onStarted, w, w)
@@ -163,6 +164,7 @@ func (d *Dispatcher) askUnit(j Job, p *config.Pipeline, step int, kind unitKind,
 	}
 	u := <-res
 	ch.Close()
+	nj.wait()
 	sender.Wait()
 
 	switch {
@@ -221,16 +223,18 @@ type unitResult struct {
 	err    error
 }
 
-// readResults owns the reads of ch: nested job requests until the status
-// frame, then the results up to end, each cloned into out under a
-// temporary name. After a non-zero status or the first violation it
-// only drops the frames up to end, so the wrapper ends as it would
-// otherwise. It closes ch when it ends, so that a unit still sending
-// fails at once. Once the status came or the unit ended (ended), every
-// read waits at most resultGap: only the silence of the unit counts, not
-// the time lukd takes to place a result.
-func (d *Dispatcher) readResults(ch *jobchan.Conn, kind unitKind, out *os.File, ended *atomic.Bool) (u unitResult) {
+// readResults owns the reads of ch: the frames of nested jobs (handed to
+// nj) until the status frame, then the results up to end, each cloned
+// into out under a temporary name. After a non-zero status or the first
+// violation it only drops the frames up to end, so the wrapper ends as
+// it would otherwise; a violation stops the nested job. It closes ch
+// when it ends, so that a unit still sending fails at once. Once the
+// status came or the unit ended (ended), every read waits at most
+// resultGap: only the silence of the unit counts, not the time lukd
+// takes to place a result.
+func (d *Dispatcher) readResults(ch *jobchan.Conn, kind unitKind, out *os.File, ended *atomic.Bool, nj *nestedJobs) (u unitResult) {
 	defer ch.Close()
+	defer nj.end()
 	seen := map[string]bool{}
 	n := 0
 	drop := false
@@ -265,13 +269,13 @@ func (d *Dispatcher) readResults(ch *jobchan.Conn, kind unitKind, out *os.File, 
 		case u.status == nil:
 			switch f.T {
 			case jobchan.TStatus:
+				// The wrapper reads no more: a nested job still
+				// running is stopped without an answer.
+				nj.end()
 				u.status, u.fail = f.Status, f.Fail
 				drop = *u.status != 0
-			case jobchan.TJob:
-				err = d.nested(ch, f)
-			case jobchan.TIn, jobchan.TGo, jobchan.TStop:
-				// The rest of a refused nested job.
-				closeFile(fd)
+			case jobchan.TJob, jobchan.TIn, jobchan.TGo, jobchan.TStop:
+				err = nj.frame(f, fd)
 			default:
 				closeFile(fd)
 				err = fmt.Errorf("unexpected frame %q", f.T)
@@ -294,6 +298,7 @@ func (d *Dispatcher) readResults(ch *jobchan.Conn, kind unitKind, out *os.File, 
 		if err != nil {
 			u.err = err
 			drop = true
+			nj.stop()
 		}
 	}
 }
@@ -301,12 +306,26 @@ func (d *Dispatcher) readResults(ch *jobchan.Conn, kind unitKind, out *os.File, 
 // placeResult checks the n-th result name of a step of kind and clones
 // it from fd into out.
 func placeResult(out *os.File, name string, fd *os.File, kind unitKind, n int, seen map[string]bool) error {
+	if n <= jobchan.MaxFiles && kind != kindRun {
+		return fmt.Errorf("%s step wrote out/%s", kind, printableName(name))
+	}
+	if err := checkResult(name, fd, n, seen); err != nil {
+		return err
+	}
+	if err := place(out, name, fd, 0o440, true); err != nil {
+		return fmt.Errorf("out: %w", err)
+	}
+	return nil
+}
+
+// checkResult checks the n-th result name of a unit with its
+// descriptor fd: at most jobchan.MaxFiles, a regular file, a valid name
+// not seen before.
+func checkResult(name string, fd *os.File, n int, seen map[string]bool) error {
 	var st unix.Stat_t
 	switch {
 	case n > jobchan.MaxFiles:
 		return fmt.Errorf("out: more than %d entries", jobchan.MaxFiles)
-	case kind != kindRun:
-		return fmt.Errorf("%s step wrote out/%s", kind, printableName(name))
 	case unix.Fstat(int(fd.Fd()), &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG:
 		return fmt.Errorf("out: %q: not a regular file", name)
 	case !runstep.ValidName(name):
@@ -315,9 +334,6 @@ func placeResult(out *os.File, name string, fd *os.File, kind unitKind, n int, s
 		return fmt.Errorf("out: %q: sent twice", name)
 	}
 	seen[name] = true
-	if err := place(out, name, fd, 0o440, true); err != nil {
-		return fmt.Errorf("out: %w", err)
-	}
 	return nil
 }
 
@@ -336,13 +352,6 @@ func formatGap(d time.Duration) string {
 		return strconv.FormatInt(int64(d/time.Minute), 10) + "m"
 	}
 	return d.String()
-}
-
-// nested answers the request of a nested job, first its job frame.
-// Nested jobs come with Task 12; until then each is refused, and the
-// frames that follow it are dropped.
-func (d *Dispatcher) nested(ch *jobchan.Conn, first jobchan.Frame) error {
-	return ch.Send(jobchan.Frame{T: jobchan.TRefused, Reason: "nested jobs are not supported yet"}, nil)
 }
 
 func closeFile(f *os.File) {

@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"luk/internal/cliflags"
-	"luk/internal/runproto"
 )
 
 var buildVersion = "dev"
@@ -159,14 +158,23 @@ func newRoot(stdout, stderr io.Writer) *cobra.Command {
 	fail.Flags().StringVar(&message, "message", "", "the step error")
 	fail.MarkFlagRequired("message")
 
-	var job, socket string
+	var job, outDir string
+	var files []string
 	runC := &cobra.Command{
 		Use:   "run",
-		Short: "Run an allowlisted job as another user on the work directory",
-		Long: "Ask lukd run (lukd-run.socket) to run --job, a job the admin put in\n" +
-			"/etc/site/lukd/run.d/, on the work directory. The job's stdout and stderr\n" +
-			"are relayed and luk-job exits with its exit status. SIGTERM or SIGINT\n" +
-			"closes the connection, which stops the job, and exits 1.",
+		Short: "Run a nested job, an allowlisted job of lukd run, as its own user",
+		Long: "Run --job, a job the admin put in /etc/site/lukd/run.d/ and the run step\n" +
+			"lists in jobs, as its own user in its own workspace, through the socket of\n" +
+			"the step, <work>/.luk/run.sock. Its inputs are the files of --file\n" +
+			"(repeatable; regular files, not symlinks, with distinct base names; a\n" +
+			"<name>.meta.json among them is the meta of <name>), else the input set of\n" +
+			"the step. Its results are cloned into the existing directory --out, under\n" +
+			"a temporary name renamed once complete (an existing name is refused);\n" +
+			"without --out the job must write none. The job's stdout and stderr are\n" +
+			"relayed and luk-job exits with its exit status; a refused request, a\n" +
+			"connection or protocol error exits 1 with a message. One nested job runs\n" +
+			"at a time per step. SIGTERM or SIGINT closes the connection, which stops\n" +
+			"the job, and exits 1.",
 		Args: noArgs,
 		RunE: func(*cobra.Command, []string) error {
 			w, err := dir()
@@ -175,11 +183,18 @@ func newRoot(stdout, stderr io.Writer) *cobra.Command {
 			}
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
-			return askRun(ctx, socket, job, w, stdout, stderr)
+			err = askRun(ctx, w, job, files, outDir, stdout, stderr)
+			var code exitCode
+			if err != nil && !errors.As(err, &code) {
+				fmt.Fprintln(stderr, "luk-job run:", err)
+				return exitCode(1)
+			}
+			return err
 		},
 	}
 	runC.Flags().StringVar(&job, "job", "", "job name")
-	runC.Flags().StringVar(&socket, "socket", runproto.DefaultSocket, "socket of lukd run")
+	runC.Flags().StringArrayVar(&files, "file", nil, "input file of the job (repeatable; default the input set of the step)")
+	runC.Flags().StringVar(&outDir, "out", "", "existing directory for the results of the job")
 	runC.MarkFlagRequired("job")
 
 	version := &cobra.Command{

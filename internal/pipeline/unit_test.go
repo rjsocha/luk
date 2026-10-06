@@ -205,36 +205,6 @@ func TestUnitResultChecks(t *testing.T) {
 	}
 }
 
-// A nested job is refused until lukd process relays them; the step goes
-// on.
-func TestUnitNestedJobRefused(t *testing.T) {
-	e := newRunEnv(t, "    steps:\n      - run: /bin/true\n      - store: a\n")
-	reason := make(chan string, 1)
-	fakeRund(t, e, func(u *fakeUnit) int {
-		ch := u.ch
-		ch.Send(jobchan.Frame{T: jobchan.TJob, Job: "state"}, nil)
-		ch.Send(jobchan.Frame{T: jobchan.TIn, Name: "x"}, regularFile(t, "x"))
-		ch.Send(jobchan.Frame{T: jobchan.TGo}, nil)
-		f, _, err := ch.Recv()
-		if err != nil || f.T != jobchan.TRefused {
-			t.Errorf("%+v %v", f, err)
-		}
-		reason <- f.Reason
-		ch.Send(jobchan.Frame{T: jobchan.TStop}, nil)
-		ch.Send(jobchan.Frame{T: jobchan.TStatus, Status: jobchan.Status(0)}, nil)
-		ch.Send(jobchan.Frame{T: jobchan.TOut, Name: "r"}, regularFile(t, "result"))
-		ch.Send(jobchan.Frame{T: jobchan.TEnd}, nil)
-		return 0
-	})
-	e.runOne(t, "n1")
-	if r := <-reason; r != "nested jobs are not supported yet" {
-		t.Fatalf("reason %q", r)
-	}
-	if got := e.read(t, "a/file/robert.socha/r"); got != "result" {
-		t.Fatalf("r %q", got)
-	}
-}
-
 // The inputs reach the unit by descriptor: meta.json first, then the files
 // of the set with their meta files in name order, then go.
 func TestUnitGetsInputs(t *testing.T) {

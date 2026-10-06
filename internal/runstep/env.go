@@ -59,7 +59,7 @@ type WorkMeta struct {
 var MetaNames = []string{"LUK_SENDER", "LUK_ENDPOINT", "LUK_FILE", "LUK_NAME", "LUK_TAGS", "LUK_HOSTNAME", "LUK_ORIGIN"}
 
 // MaxMetaValue caps the value of a free-form metadata variable (not
-// LUK_FILE, whose form CleanMeta fixes).
+// LUK_FILE, whose form CleanStepMeta fixes).
 const MaxMetaValue = 1 << 10
 
 // safeValue reports whether v can be the value of a variable: valid UTF-8
@@ -70,28 +70,13 @@ func safeValue(v string) bool {
 	return utf8.ValidString(v) && !wire.HasControl(v)
 }
 
-// CleanMeta is what of env may reach a step or a job of the work
-// directory work as metadata: only the names of MetaNames with a safe
-// value (see safeValue), LUK_NAME a valid file name or empty, LUK_FILE
-// <work>/in/<a valid file name>, the free-form others at most
-// MaxMetaValue bytes. Everything else is dropped. lukd and the clients of
-// lukd run apply it to what they derive, lukd run to what it receives.
-func CleanMeta(work string, env map[string]string) map[string]string {
-	return cleanMeta(env, func(v string) bool {
-		n := filepath.Base(v)
-		return ValidName(n) && v == filepath.Join(work, "in", n)
-	})
-}
-
-// CleanStepMeta is CleanMeta of a step request: LUK_FILE is a valid bare
-// file name, which UnitVars places under the workspace.
+// CleanStepMeta is what of env may reach a step or a job as metadata in
+// a step request: only the names of MetaNames with a safe value (see
+// safeValue), LUK_NAME and LUK_FILE a valid file name (LUK_NAME also
+// empty; UnitVars places LUK_FILE under the workspace), the free-form
+// others at most MaxMetaValue bytes. Everything else is dropped. lukd
+// process applies it to what it derives, lukd run to what it receives.
 func CleanStepMeta(env map[string]string) map[string]string {
-	return cleanMeta(env, ValidName)
-}
-
-// cleanMeta is the filter of CleanMeta and CleanStepMeta; file decides
-// on LUK_FILE.
-func cleanMeta(env map[string]string, file func(string) bool) map[string]string {
 	m := map[string]string{}
 	for _, k := range MetaNames {
 		v, ok := env[k]
@@ -104,26 +89,13 @@ func cleanMeta(env map[string]string, file func(string) bool) map[string]string 
 				continue
 			}
 		case "LUK_FILE":
-			if !file(v) {
+			if !ValidName(v) {
 				continue
 			}
 		}
 		m[k] = v
 	}
 	return m
-}
-
-// Meta is the metadata a client of lukd run passes on for the work
-// directory work: the names of MetaNames that lookup finds, after
-// CleanMeta.
-func Meta(work string, lookup func(string) (string, bool)) map[string]string {
-	env := map[string]string{}
-	for _, k := range MetaNames {
-		if v, ok := lookup(k); ok {
-			env[k] = v
-		}
-	}
-	return CleanMeta(work, env)
 }
 
 // StepMeta is the free-form metadata lukd process passes on in a step

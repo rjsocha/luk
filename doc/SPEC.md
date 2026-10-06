@@ -4966,7 +4966,9 @@ sudo are involved.
     "status": N}`, or `{"t": "refused", "reason": <reason>}`. lukd
     process asks lukd run for the job over a connection of its own, with
     a channel of its own to the job's wrapper, and passes the
-    descriptors on in both directions without reading them.
+    descriptors on in both directions without reading them. When luk-job
+    closed its connection before the answer, the wrapper sends `{"t":
+    "stop"}`; lukd process then stops the job and answers `exit`.
   - Limits: names follow the `out/` rules; at most 1024 `in` and 1024
     `out` frames per run; lukd process checks every received descriptor
     with `fstat` (a regular file) and its name before it clones it.

@@ -178,18 +178,17 @@ func TestReadWorkSkipsNonRegular(t *testing.T) {
 	}
 }
 
-func TestCleanMeta(t *testing.T) {
-	const w = "/var/lib/luk/work/20261006T100000Z-0a1b2c3d/offsite/2"
+func TestCleanStepMetaValues(t *testing.T) {
 	kib := strings.Repeat("é", 512)
-	got := CleanMeta(w, map[string]string{
+	got := CleanStepMeta(map[string]string{
 		"LUK_SENDER": "robert.socha", "LUK_ENDPOINT": "", "LUK_TAGS": kib, "LUK_HOSTNAME": kib + "x",
-		"LUK_ORIGIN": "db1\n", "LUK_NAME": "db.sql", "LUK_FILE": w + "/in/db.sql",
+		"LUK_ORIGIN": "db1\n", "LUK_NAME": "db.sql", "LUK_FILE": "db.sql",
 		"LUK_WORK": "/etc", "LUK_IN": "/etc", "LUK_OUT": "/etc", "LUK_META": "/etc/shadow", "LUK_ROOT": "/",
 		"LUK_ID": "x", "LUK_PIPELINE": "x", "LUK_STEP": "9", "LUK_JOB": "x", "LUK_TMP": "/", "LUK_STATE": "/",
 		"LD_PRELOAD": "/tmp/x.so", "PATH": "/tmp", "luk_tags": "x",
 	})
 	want := map[string]string{
-		"LUK_SENDER": "robert.socha", "LUK_ENDPOINT": "", "LUK_TAGS": kib, "LUK_NAME": "db.sql", "LUK_FILE": w + "/in/db.sql",
+		"LUK_SENDER": "robert.socha", "LUK_ENDPOINT": "", "LUK_TAGS": kib, "LUK_NAME": "db.sql", "LUK_FILE": "db.sql",
 	}
 	if !maps.Equal(got, want) {
 		t.Fatalf("\n got %q\nwant %q", got, want)
@@ -198,32 +197,14 @@ func TestCleanMeta(t *testing.T) {
 		"nul": "a\x00b", "newline": "a\nb", "escape": "a\x1b[2J", "del": "a\x7f", "c1": "a\u0085", "invalid utf-8": "a\xffb",
 		"long": strings.Repeat("a", MaxMetaValue+1),
 	} {
-		if got := CleanMeta(w, map[string]string{"LUK_TAGS": v}); len(got) != 0 {
+		if got := CleanStepMeta(map[string]string{"LUK_TAGS": v}); len(got) != 0 {
 			t.Errorf("%s kept: %q", name, got)
 		}
 	}
 	for _, n := range []string{"", ".hidden", "a/b", "..", strings.Repeat("x", 256)} {
-		if got := CleanMeta(w, map[string]string{"LUK_NAME": n}); n != "" && len(got) != 0 || n == "" && got["LUK_NAME"] != "" {
+		if got := CleanStepMeta(map[string]string{"LUK_NAME": n}); n != "" && len(got) != 0 || n == "" && got["LUK_NAME"] != "" {
 			t.Errorf("LUK_NAME %q: %q", n, got)
 		}
-	}
-	for _, f := range []string{"", "db.sql", "/etc/passwd", w + "/in", w + "/in/", w + "/in/.x", w + "/in/a/b", w + "/in/../meta.json",
-		w + "/out/x", w + "/in//x", "/var/lib/luk/work/20261006T100000Z-0a1b2c3d/offsite/3/in/x"} {
-		if got := CleanMeta(w, map[string]string{"LUK_FILE": f}); len(got) != 0 {
-			t.Errorf("LUK_FILE %q kept", f)
-		}
-	}
-}
-
-func TestMetaOfEnv(t *testing.T) {
-	const w = "/var/lib/luk/work/20261006T100000Z-0a1b2c3d/offsite/2"
-	env := map[string]string{
-		"LUK_WORK": w, "LUK_ID": "x", "LUK_SENDER": "robert.socha", "LUK_ENDPOINT": "up", "LUK_FILE": w + "/in/db.sql",
-		"LUK_NAME": "db.sql", "LUK_TAGS": "daily", "LUK_HOSTNAME": "db1", "LUK_ORIGIN": "db1", "PATH": "/bin",
-	}
-	sent := Meta(w, func(k string) (string, bool) { v, ok := env[k]; return v, ok })
-	if len(sent) != len(MetaNames) || sent["LUK_FILE"] != w+"/in/db.sql" || sent["LUK_WORK"] != "" {
-		t.Fatalf("%q", sent)
 	}
 }
 
