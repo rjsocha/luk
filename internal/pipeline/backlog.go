@@ -1,8 +1,6 @@
 package pipeline
 
 import (
-	"errors"
-	"io/fs"
 	"path/filepath"
 	"time"
 
@@ -49,6 +47,9 @@ func QueueStatus(cfg *config.Config, now time.Time) status.Queue {
 	return q
 }
 
+// countPath is the count file of the leftover workspaces.
+var countPath = filepath.Join(workspace.CountDir, workspace.CountName)
+
 // RefreshRuntime writes the units, the queue and the count of leftover
 // workspaces at now to the status. A count that cannot be read is
 // reported in the workspaces record, not as 0.
@@ -57,9 +58,9 @@ func (d *Dispatcher) RefreshRuntime(now time.Time) {
 		return
 	}
 	var ws *status.Workspaces
-	c, err := workspace.ReadCount(filepath.Join(workspace.CountDir, workspace.CountName))
+	c, err := workspace.ReadCount(countPath)
 	switch {
-	case err != nil && !errors.Is(err, fs.ErrNotExist):
+	case err != nil:
 		d.log.Warn("workspace count not read", "error", err)
 		ws = &status.Workspaces{Error: err.Error()}
 	case c != nil:

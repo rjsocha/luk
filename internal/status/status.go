@@ -104,6 +104,11 @@ type Queue struct {
 	OldestAge      *int64 `json:"oldest_age,omitempty"`
 }
 
+func (q Queue) equal(o Queue) bool {
+	return q.Entries == o.Entries && q.OldestID == o.OldestID && q.OldestReceived == o.OldestReceived &&
+		(q.OldestAge == nil) == (o.OldestAge == nil) && (q.OldestAge == nil || *q.OldestAge == *o.OldestAge)
+}
+
 // Workspaces repeats the count of leftover workspaces of lukd run. Error
 // is set instead of a count when the count file cannot be read.
 type Workspaces struct {
@@ -322,16 +327,20 @@ func (s *Store) SetWatch(ws []Watch) error {
 }
 
 // SetRuntime replaces the units, the queue and the workspaces (nil: the
-// count file does not exist) and rewrites the file.
+// count file does not exist) and rewrites the file when they changed or an
+// earlier write failed.
 func (s *Store) SetRuntime(u Units, q Queue, w *Workspaces) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.units, s.queue = u, q
-	s.ws = nil
+	var c *Workspaces
 	if w != nil {
-		c := *w
-		s.ws = &c
+		v := *w
+		c = &v
 	}
+	if !s.dirty && s.units == u && s.queue.equal(q) && (s.ws == nil) == (c == nil) && (c == nil || *s.ws == *c) {
+		return nil
+	}
+	s.units, s.queue, s.ws = u, q, c
 	return s.persist()
 }
 

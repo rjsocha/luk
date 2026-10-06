@@ -564,3 +564,23 @@ func TestRuntimeInStatus(t *testing.T) {
 		t.Fatalf("%s", b)
 	}
 }
+
+func TestSetRuntimeSkipsUnchanged(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "status.json")
+	s := New(p)
+	age := int64(1)
+	q := Queue{Entries: 1, OldestID: "x", OldestAge: &age}
+	w := &Workspaces{Leftover: 1, Updated: "u"}
+	s.SetRuntime(Units{Running: 1}, q, w)
+	os.Remove(p)
+	age2 := int64(1)
+	q.OldestAge = &age2
+	s.SetRuntime(Units{Running: 1}, q, &Workspaces{Leftover: 1, Updated: "u"})
+	if _, err := os.Stat(p); err == nil {
+		t.Fatal("rewritten without a change")
+	}
+	s.SetRuntime(Units{Running: 2}, q, w)
+	if _, err := os.Stat(p); err != nil {
+		t.Fatal("not written after a change")
+	}
+}
