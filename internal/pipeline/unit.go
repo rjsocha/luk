@@ -306,7 +306,7 @@ func (d *Dispatcher) readResults(ch *jobchan.Conn, kind unitKind, out *os.File, 
 // placeResult checks the n-th result name of a step of kind and clones
 // it from fd into out.
 func placeResult(out *os.File, name string, fd *os.File, kind unitKind, n int, seen map[string]bool) error {
-	if n <= jobchan.MaxFiles && kind != kindRun {
+	if kind != kindRun {
 		return fmt.Errorf("%s step wrote out/%s", kind, printableName(name))
 	}
 	if err := checkResult(name, fd, n, seen); err != nil {

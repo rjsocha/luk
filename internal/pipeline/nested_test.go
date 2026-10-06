@@ -30,11 +30,11 @@ mv "$LUK_TMP/up" "$LUK_OUT/up"
 
 func TestNestedJobWithoutOutMustWriteNothing(t *testing.T) {
 	writes := script(t, "echo x > \"$LUK_OUT/x\"\n")
-	prog := script(t, "luk-job run --job w || exit 9\n")
+	prog := script(t, "luk-job run --job w 2> \"$LUK_TMP/err\" && exit 0\ncp \"$LUK_TMP/err\" fail\nexit 9\n")
 	e := newRunEnv(t, "    steps:\n      - run: "+prog+"\n        jobs: [w]\n")
 	e.jobs["w"] = rundtest.Unit{Argv: []string{writes}}
 	e.runOne(t, "20261006T100000Z-0a1b2c3d")
-	if st := e.lastFailure(t); !strings.Contains(st, "exit status 9") {
+	if st := e.lastFailure(t); st != "luk-job run: job w wrote out/x" {
 		t.Fatalf("%q", st)
 	}
 }
@@ -340,6 +340,42 @@ func TestNestedConnectionError(t *testing.T) {
 	})
 	e.runOne(t, "n1")
 	if a := <-got; a.stderr != "lukd: job w: connection closed before the exit status\n" || a.status == nil || *a.status != 1 {
+		t.Fatalf("%q %v", a.stderr, a.status)
+	}
+}
+
+// A nested job of a nested job is refused, and the frames that follow
+// its request are checked as any other.
+func TestNestedOfNestedChecked(t *testing.T) {
+	e := newRunEnv(t, "    steps:\n      - run: /bin/true\n        jobs: [w]\n        tee: true\n")
+	got := make(chan answer, 1)
+	refused := make(chan string, 1)
+	fakeRund(t, e, func(u *fakeUnit) int {
+		if u.req.Job == "w" {
+			u.ch.Send(jobchan.Frame{T: jobchan.TJob, Job: "x"}, nil)
+			f, _, _ := u.ch.Recv()
+			refused <- f.Reason
+			u.ch.Send(jobchan.Frame{T: jobchan.TIn, Name: ".a"}, regularFile(t, "a"))
+			finish(u.ch)
+			for {
+				if _, fd, err := u.ch.Recv(); err != nil {
+					return 0
+				} else {
+					closeFile(fd)
+				}
+			}
+		}
+		u.ch.Send(jobchan.Frame{T: jobchan.TJob, Job: "w"}, nil)
+		u.ch.Send(jobchan.Frame{T: jobchan.TGo}, nil)
+		got <- readAnswer(t, u.ch)
+		finish(u.ch)
+		return 0
+	})
+	e.runOne(t, "n1")
+	if r := <-refused; r != "a nested job runs no nested jobs" {
+		t.Fatalf("%q", r)
+	}
+	if a := <-got; a.stderr != "lukd: job w: job x: in: \".a\": invalid name\n" || a.status == nil || *a.status != 1 {
 		t.Fatalf("%q %v", a.stderr, a.status)
 	}
 }

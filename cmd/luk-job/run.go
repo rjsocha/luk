@@ -31,7 +31,7 @@ func askRun(ctx context.Context, work, job string, files []string, out string, s
 	if out != "" {
 		d, err := openDir(out)
 		if err != nil {
-			return fmt.Errorf("--out %s: %w", out, err)
+			return err
 		}
 		outDir = d
 		defer outDir.Close()
@@ -111,17 +111,21 @@ func askRun(ctx context.Context, work, job string, files []string, out string, s
 	}
 }
 
-// openDir opens the directory p.
+// openDir opens the directory p of --out.
 func openDir(p string) (*os.File, error) {
 	d, err := os.Open(p)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("--out: %w", err)
 	}
-	if fi, err := d.Stat(); err != nil || !fi.IsDir() {
+	fi, err := d.Stat()
+	switch {
+	case err != nil:
+		err = fmt.Errorf("--out: %w", err)
+	case !fi.IsDir():
+		err = fmt.Errorf("--out %s: not a directory", p)
+	}
+	if err != nil {
 		d.Close()
-		if err == nil {
-			err = errors.New("not a directory")
-		}
 		return nil, err
 	}
 	return d, nil
@@ -170,7 +174,7 @@ func openFiles(paths []string) ([]*os.File, error) {
 func placeResult(out *os.File, job, name string, fd *os.File) error {
 	switch {
 	case !runstep.ValidName(name):
-		return fmt.Errorf("job %s wrote out/%q: invalid name", job, name)
+		return fmt.Errorf("job %s: out: %q: invalid name", job, name)
 	case out == nil:
 		return fmt.Errorf("job %s wrote out/%s", job, name)
 	}

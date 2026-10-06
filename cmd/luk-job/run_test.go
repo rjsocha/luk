@@ -133,8 +133,8 @@ func TestRunRefusals(t *testing.T) {
 		{[]string{"--file", link}, "not a regular file"},
 		{[]string{"--file", filepath.Join(ws, "in")}, "not a regular file"},
 		{[]string{"--file", filepath.Join(ws, "in", "a"), "--file", filepath.Join(ws, "in", "a")}, "twice"},
-		{[]string{"--out", filepath.Join(ws, "missing")}, "--out"},
-		{[]string{"--out", filepath.Join(ws, "meta.json")}, "not a directory"},
+		{[]string{"--out", filepath.Join(ws, "missing")}, "luk-job run: --out: open " + filepath.Join(ws, "missing") + ": no such file or directory\n"},
+		{[]string{"--out", filepath.Join(ws, "meta.json")}, "luk-job run: --out " + filepath.Join(ws, "meta.json") + ": not a directory\n"},
 	} {
 		code, _, stderr := runJob(t, append([]string{"run", "--work", ws, "--job", "j"}, c.args...)...)
 		if code != 1 || !strings.Contains(stderr, c.want) {

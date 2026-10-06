@@ -73,14 +73,18 @@ type nestedIn struct {
 }
 
 // send sends f for r unless r is answered; exit and refused answer it.
+// The frames of a request come from one goroutine at a time (the reader
+// before go, run after it), so the lock covers only the flag, not the
+// Send, which may block.
 func (r *nestedReq) send(ch *jobchan.Conn, f jobchan.Frame, fd *os.File) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.answered {
-		return errors.New("nested job answered")
-	}
+	answered := r.answered
 	if f.T == jobchan.TExit || f.T == jobchan.TRefused {
 		r.answered = true
+	}
+	r.mu.Unlock()
+	if answered {
+		return errors.New("nested job answered")
 	}
 	return ch.Send(f, fd)
 }
@@ -128,9 +132,12 @@ func (n *nestedJobs) frame(f jobchan.Frame, fd *os.File) error {
 		}
 		return nil
 	}
-	if r == nil || (f.T == jobchan.TIn || f.T == jobchan.TGo) && (r.gone || r.stopped) || f.T == jobchan.TStop && r.stopped {
+	if err := r.next(f); err != nil {
 		closeFile(fd)
-		return fmt.Errorf("unexpected frame %q", f.T)
+		return err
+	}
+	if r.refused {
+		return r.dropped(f, fd)
 	}
 	switch f.T {
 	case jobchan.TIn:
@@ -138,16 +145,10 @@ func (n *nestedJobs) frame(f jobchan.Frame, fd *os.File) error {
 			fd.Close()
 			return err
 		}
-		if r.refused {
-			fd.Close()
-			return nil
-		}
 		r.ins = append(r.ins, nestedIn{f.Name, fd})
 	case jobchan.TGo:
 		r.gone = true
-		if !r.refused {
-			n.start(r)
-		}
+		n.start(r)
 	case jobchan.TStop:
 		r.stopped = true
 		switch {
@@ -158,9 +159,34 @@ func (n *nestedJobs) frame(f jobchan.Frame, fd *os.File) error {
 			r.closeIns()
 			r.send(n.ch, jobchan.Frame{T: jobchan.TExit, Status: jobchan.Status(1)}, nil)
 		}
-	default:
-		closeFile(fd)
+	}
+	return nil
+}
+
+// next checks that the in, go or stop frame f may follow the frames of
+// the request r so far (nil: no request).
+func (r *nestedReq) next(f jobchan.Frame) error {
+	switch {
+	case r == nil,
+		(f.T == jobchan.TIn || f.T == jobchan.TGo) && (r.gone || r.stopped),
+		f.T == jobchan.TStop && r.stopped,
+		f.T != jobchan.TIn && f.T != jobchan.TGo && f.T != jobchan.TStop:
 		return fmt.Errorf("unexpected frame %q", f.T)
+	}
+	return nil
+}
+
+// dropped takes the in, go or stop frame f of the refused request r,
+// after next: it is checked as for a request that runs, then dropped.
+func (r *nestedReq) dropped(f jobchan.Frame, fd *os.File) error {
+	defer closeFile(fd)
+	switch f.T {
+	case jobchan.TIn:
+		return r.checkIn(f.Name, fd)
+	case jobchan.TGo:
+		r.gone = true
+	case jobchan.TStop:
+		r.stopped = true
 	}
 	return nil
 }
@@ -333,13 +359,19 @@ func openSet(dir string) ([]nestedIn, error) {
 			continue
 		}
 		fd, err := os.OpenFile(filepath.Join(dir, "in", e.Name()), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			ins = append(ins, nestedIn{e.Name(), fd})
+			var st unix.Stat_t
+			if err = unix.Fstat(int(fd.Fd()), &st); err == nil && st.Mode&unix.S_IFMT != unix.S_IFREG {
+				err = fmt.Errorf("in: %q: not a regular file", e.Name())
+			}
+		}
 		if err != nil {
 			for _, in := range ins {
 				in.fd.Close()
 			}
 			return nil, err
 		}
-		ins = append(ins, nestedIn{e.Name(), fd})
 	}
 	return ins, nil
 }
@@ -377,6 +409,7 @@ func (n *nestedJobs) readNested(nch *jobchan.Conn, r *nestedReq, ended *atomic.B
 	seen := map[string]bool{}
 	count := 0
 	drop := false
+	var inner *nestedReq // a request of the job itself, refused
 	for {
 		if u.status != nil || ended.Load() {
 			nch.SetReadDeadline(time.Now().Add(resultGap))
@@ -411,10 +444,15 @@ func (n *nestedJobs) readNested(nch *jobchan.Conn, r *nestedReq, ended *atomic.B
 				u.status = f.Status
 				drop = *u.status != 0
 			case jobchan.TJob:
-				nch.Send(jobchan.Frame{T: jobchan.TRefused, Reason: "a nested job runs no nested jobs"}, nil)
+				inner = &nestedReq{job: f.Job, names: map[string]bool{}, refused: true}
+				inner.send(nch, jobchan.Frame{T: jobchan.TRefused, Reason: "a nested job runs no nested jobs"}, nil)
 			case jobchan.TIn, jobchan.TGo, jobchan.TStop:
 				// The rest of the refused request.
-				closeFile(fd)
+				if err = inner.next(f); err == nil {
+					err = inner.dropped(f, fd)
+				} else {
+					closeFile(fd)
+				}
 			default:
 				closeFile(fd)
 				err = fmt.Errorf("unexpected frame %q", f.T)
