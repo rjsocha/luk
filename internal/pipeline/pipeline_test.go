@@ -105,6 +105,7 @@ type env struct {
 	logs *syncBuf
 	// The in-process lukd run of the run and relay steps (see useRund):
 	// the jobs of run.d, the slot hold and the requests seen.
+	socket    string
 	jobs      map[string]rundtest.Unit
 	hold      chan struct{}
 	requests  chan runproto.StepRequest
@@ -143,7 +144,9 @@ func parseCfg(t *testing.T, text string) *config.Config {
 
 func (e *env) dispatcher() *Dispatcher {
 	e.rund()
-	return NewDispatcher(e.cfg, e.q, slog.New(slog.NewJSONHandler(e.logs, nil)))
+	d := NewDispatcher(e.cfg, e.q, slog.New(slog.NewJSONHandler(e.logs, nil)))
+	d.RunSocket = e.socket
+	return d
 }
 
 // rund starts the lukd run of e once.

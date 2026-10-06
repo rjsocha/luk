@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -19,13 +20,26 @@ import (
 	"luk/internal/wire"
 )
 
-// fakeRund serves runSocket instead of the lukd run of e: for each request
-// it answers s, reads the inputs up to go and hands the channel and the
-// connection to unit, whose result is the exit status.
-func fakeRund(t *testing.T, e *env, unit func(ch *jobchan.Conn, c *net.UnixConn, fw *runproto.FrameWriter) int) {
+// fakeUnit is one request to fakeRund: the request, the frames lukd
+// process sent up to go (with the content of their files), the channel
+// and the connection.
+type fakeUnit struct {
+	req    runproto.StepRequest
+	inputs []input
+	ch     *jobchan.Conn
+	c      *net.UnixConn
+	fw     *runproto.FrameWriter
+}
+
+type input struct{ t, name, data string }
+
+// fakeRund serves the socket of e instead of its lukd run: for each
+// request it answers s, reads the inputs up to go and hands them to unit,
+// whose result is the exit status.
+func fakeRund(t *testing.T, e *env, unit func(u *fakeUnit) int) {
 	t.Helper()
 	e.startRund = nil
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: runSocket, Net: "unix"})
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: e.socket, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +60,7 @@ func fakeRund(t *testing.T, e *env, unit func(ch *jobchan.Conn, c *net.UnixConn,
 			go func() {
 				defer wg.Done()
 				defer c.Close()
-				_, f, err := runproto.ReadStepRequest(c)
+				req, f, err := runproto.ReadStepRequest(c)
 				if err != nil {
 					t.Error(err)
 					return
@@ -58,24 +72,28 @@ func fakeRund(t *testing.T, e *env, unit func(ch *jobchan.Conn, c *net.UnixConn,
 					return
 				}
 				defer ch.Close()
-				fw := runproto.NewFrameWriter(c)
-				fw.Started()
+				u := &fakeUnit{req: req, ch: ch, c: c, fw: runproto.NewFrameWriter(c)}
+				u.fw.Started()
 				for {
 					fr, fd, err := ch.Recv()
-					if fd != nil {
-						fd.Close()
-					}
 					if err != nil {
 						t.Error(err)
 						return
 					}
+					in := input{t: fr.T, name: fr.Name}
+					if fd != nil {
+						b, _ := io.ReadAll(fd)
+						in.data = string(b)
+						fd.Close()
+					}
+					u.inputs = append(u.inputs, in)
 					if fr.T == jobchan.TGo {
 						break
 					}
 				}
-				code := unit(ch, c, fw)
+				code := unit(u)
 				ch.Close()
-				fw.Exit(code)
+				u.fw.Exit(code)
 			}()
 		}
 	}()
@@ -83,7 +101,9 @@ func fakeRund(t *testing.T, e *env, unit func(ch *jobchan.Conn, c *net.UnixConn,
 
 func (e *env) debugDispatcher() *Dispatcher {
 	e.rund()
-	return NewDispatcher(e.cfg, e.q, slog.New(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	d := NewDispatcher(e.cfg, e.q, slog.New(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	d.RunSocket = e.socket
+	return d
 }
 
 func findStep(recs []map[string]any, msg string, step int) map[string]any {
@@ -180,18 +200,18 @@ func TestRelayOutputNotLoggedAtInfo(t *testing.T) {
 func TestRelayFailures(t *testing.T) {
 	cases := map[string]struct {
 		job    string // the script of the job; empty: none in run.d
-		fake   func(ch *jobchan.Conn, c *net.UnixConn, fw *runproto.FrameWriter) int
+		fake   func(u *fakeUnit) int
 		err    string
 		output string
 	}{
 		"exit status": {job: "echo partial >&2\necho bucket gone >&2\nexit 3\n",
 			err: "relay s3-upload: exit status 3", output: "partial\nbucket gone\n"},
 		"refused": {err: "relay s3-upload: exit status 1", output: "lukd run: job \"s3-upload\": unknown\n"},
-		"closed": {fake: func(_ *jobchan.Conn, c *net.UnixConn, _ *runproto.FrameWriter) int { c.Close(); return 0 },
+		"closed": {fake: func(u *fakeUnit) int { u.c.Close(); return 0 },
 			err: "relay s3-upload: connection closed before the exit status"},
-		"protocol": {fake: func(_ *jobchan.Conn, c *net.UnixConn, _ *runproto.FrameWriter) int {
-			c.Write([]byte("garbage"))
-			c.Close()
+		"protocol": {fake: func(u *fakeUnit) int {
+			u.c.Write([]byte("garbage"))
+			u.c.Close()
 			return 0
 		}, err: "relay s3-upload: unknown frame type"},
 		"wrote out": {job: "echo x > \"$LUK_OUT/x\"\n", err: "relay s3-upload: relay step wrote out/x"},
@@ -232,7 +252,7 @@ func TestRelayFailures(t *testing.T) {
 
 func TestRelayNoSocket(t *testing.T) {
 	e := newRunEnv(t, "    steps:\n      - relay: s3-upload\n      - store: a\n")
-	runSocket = filepath.Join(t.TempDir(), "none")
+	e.socket = filepath.Join(t.TempDir(), "none")
 	e.runOne(t, "n1")
 	r := find(e.logs.records(t), "pipeline failed", "p")
 	if r == nil || !strings.HasPrefix(fmt.Sprint(r["error"]), "relay s3-upload: dial unix ") {

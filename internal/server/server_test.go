@@ -54,6 +54,8 @@ type fixture struct {
 	user   ssh.Signer
 	hostCA ssh.Signer
 	root   string
+	// runSocket, when set, is the lukd run of the run steps of settle.
+	runSocket string
 }
 
 func newFixture(t *testing.T) *fixture { return newFixtureWith(t, nil) }
@@ -134,6 +136,9 @@ func (f *fixture) handler() http.Handler { return f.srv.Handler(f.srv.config().A
 func (f *fixture) settle(t *testing.T) {
 	t.Helper()
 	d := pipeline.NewDispatcher(f.srv.config(), queue.New(0, nil), slog.New(slog.DiscardHandler))
+	if f.runSocket != "" {
+		d.RunSocket = f.runSocket
+	}
 	if err := d.Resume(context.Background()); err != nil {
 		t.Fatal(err)
 	}

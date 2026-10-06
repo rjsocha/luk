@@ -2,9 +2,9 @@ package pipeline
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -12,7 +12,6 @@ import (
 
 	"luk/internal/jobchan"
 	"luk/internal/rund/rundtest"
-	"luk/internal/runproto"
 )
 
 func TestRunJobStepProducesSet(t *testing.T) {
@@ -94,7 +93,7 @@ func TestResultsOwnedAndMode(t *testing.T) {
 	e := newRunEnv(t, "    steps:\n      - run: "+s+"\n      - store: a\n")
 	e.runOne(t, "20261006T100000Z-0a1b2c3d")
 	fi, err := os.Stat(filepath.Join(e.root, "data", "a", "file", "robert.socha", "r"))
-	if err != nil || fi.Mode().Perm()&0o440 != 0o440 {
+	if err != nil || fi.Mode().Perm() != 0o440 {
 		t.Fatalf("%v %v", fi, err)
 	}
 }
@@ -102,11 +101,11 @@ func TestResultsOwnedAndMode(t *testing.T) {
 // fakeResults makes the unit of e answer with status 0 and then send what
 // send does.
 func fakeResults(t *testing.T, e *env, send func(ch *jobchan.Conn)) {
-	fakeRund(t, e, func(ch *jobchan.Conn, _ *net.UnixConn, _ *runproto.FrameWriter) int {
-		if err := ch.Send(jobchan.Frame{T: jobchan.TStatus, Status: jobchan.Status(0)}, nil); err != nil {
+	fakeRund(t, e, func(u *fakeUnit) int {
+		if err := u.ch.Send(jobchan.Frame{T: jobchan.TStatus, Status: jobchan.Status(0)}, nil); err != nil {
 			t.Error(err)
 		}
-		send(ch)
+		send(u.ch)
 		return 0
 	})
 }
@@ -211,7 +210,8 @@ func TestUnitResultChecks(t *testing.T) {
 func TestUnitNestedJobRefused(t *testing.T) {
 	e := newRunEnv(t, "    steps:\n      - run: /bin/true\n      - store: a\n")
 	reason := make(chan string, 1)
-	fakeRund(t, e, func(ch *jobchan.Conn, _ *net.UnixConn, _ *runproto.FrameWriter) int {
+	fakeRund(t, e, func(u *fakeUnit) int {
+		ch := u.ch
 		ch.Send(jobchan.Frame{T: jobchan.TJob, Job: "state"}, nil)
 		ch.Send(jobchan.Frame{T: jobchan.TIn, Name: "x"}, regularFile(t, "x"))
 		ch.Send(jobchan.Frame{T: jobchan.TGo}, nil)
@@ -235,64 +235,74 @@ func TestUnitNestedJobRefused(t *testing.T) {
 	}
 }
 
-// The inputs reach the unit by descriptor: meta.json first, then the set
-// with its meta files, then go.
+// The inputs reach the unit by descriptor: meta.json first, then the files
+// of the set with their meta files in name order, then go.
 func TestUnitGetsInputs(t *testing.T) {
-	type frame struct{ t, name, data string }
-	got := make(chan []frame, 1)
-	e := newRunEnv(t, "    steps:\n      - run: /bin/true\n        tee: true\n")
-	e.startRund = nil
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: runSocket, Net: "unix"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.Close() })
-	go func() {
-		c, err := l.AcceptUnix()
-		if err != nil {
-			return
-		}
-		defer c.Close()
-		_, f, err := runproto.ReadStepRequest(c)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		ch, _ := jobchan.FromFile(f)
-		f.Close()
-		defer ch.Close()
-		fw := runproto.NewFrameWriter(c)
-		fw.Started()
-		var fs []frame
-		for {
-			fr, fd, err := ch.Recv()
-			if err != nil {
+	got := make(chan []input, 1)
+	e := newRunEnv(t, "    steps:\n      - run: /bin/true\n      - run: /bin/true\n        tee: true\n")
+	fakeRund(t, e, func(u *fakeUnit) int {
+		send := func(f jobchan.Frame, fd *os.File) {
+			if err := u.ch.Send(f, fd); err != nil {
 				t.Error(err)
-				return
-			}
-			x := frame{t: fr.T, name: fr.Name}
-			if fd != nil {
-				b, _ := os.ReadFile(fmt.Sprintf("/proc/self/fd/%d", fd.Fd()))
-				x.data = string(b)
-				fd.Close()
-			}
-			fs = append(fs, x)
-			if fr.T == jobchan.TGo {
-				break
 			}
 		}
-		got <- fs
-		ch.Send(jobchan.Frame{T: jobchan.TStatus, Status: jobchan.Status(0)}, nil)
-		ch.Send(jobchan.Frame{T: jobchan.TEnd}, nil)
-		fw.Exit(0)
-	}()
+		send(jobchan.Frame{T: jobchan.TStatus, Status: jobchan.Status(0)}, nil)
+		if u.req.Step == 1 {
+			send(jobchan.Frame{T: jobchan.TOut, Name: "b"}, regularFile(t, "bb"))
+			send(jobchan.Frame{T: jobchan.TOut, Name: "a"}, regularFile(t, "aa"))
+			send(jobchan.Frame{T: jobchan.TOut, Name: "a.meta.json"}, regularFile(t, `{"k": "v"}`))
+		} else {
+			got <- u.inputs
+		}
+		send(jobchan.Frame{T: jobchan.TEnd}, nil)
+		return 0
+	})
 	e.runOne(t, "g1")
-	fs := <-got
-	if len(fs) != 3 || fs[0].t != "meta" || !strings.Contains(fs[0].data, `"pipeline":"p"`) ||
-		fs[1] != (frame{"in", "f.txt", "data-g1"}) || fs[2] != (frame{t: "go"}) {
-		t.Fatalf("%+v", fs)
-	}
 	if find(e.logs.records(t), "pipeline done", "p") == nil {
 		t.Fatalf("logs %v", e.logs.records(t))
+	}
+	in := <-got
+	want := []input{{"in", "a", "aa"}, {"in", "a.meta.json", `{"k":"v"}`}, {"in", "b", "bb"}, {t: "go"}}
+	if len(in) != 5 || in[0].t != "meta" || !strings.Contains(in[0].data, `"step":2`) || !slices.Equal(in[1:], want) {
+		t.Fatalf("%+v", in)
+	}
+}
+
+// Placing a result is lukd's own work: a slow clone does not count as
+// silence of the unit, also when the unit has already ended.
+func TestSlowPlaceIsNotSilence(t *testing.T) {
+	old, oldGap := place, resultGap
+	resultGap = 100 * time.Millisecond
+	place = func(dir *os.File, name string, src *os.File, mode os.FileMode, noReplace bool) error {
+		time.Sleep(300 * time.Millisecond)
+		return old(dir, name, src, mode, noReplace)
+	}
+	t.Cleanup(func() { place, resultGap = old, oldGap })
+	e := newRunEnv(t, "    steps:\n      - run: /bin/true\n      - store: a\n")
+	fakeResults(t, e, func(ch *jobchan.Conn) {
+		ch.Send(jobchan.Frame{T: jobchan.TOut, Name: "f1"}, regularFile(t, "one"))
+		ch.Send(jobchan.Frame{T: jobchan.TOut, Name: "f2"}, regularFile(t, "two"))
+		ch.Send(jobchan.Frame{T: jobchan.TEnd}, nil)
+	})
+	e.runOne(t, "s1")
+	if find(e.logs.records(t), "pipeline done", "p") == nil {
+		t.Fatalf("logs %v", e.logs.records(t))
+	}
+	if e.read(t, "a/file/robert.socha/f1") != "one" || e.read(t, "a/file/robert.socha/f2") != "two" {
+		t.Fatal("results not stored")
+	}
+}
+
+func TestStepErrorTexts(t *testing.T) {
+	for d, want := range map[time.Duration]string{time.Minute: "1m", 2 * time.Minute: "2m", 90 * time.Second: "1m30s",
+		10 * time.Second: "10s", 200 * time.Millisecond: "200ms"} {
+		if got := formatGap(d); got != want {
+			t.Errorf("%v: %q, want %q", d, got, want)
+		}
+	}
+	for name, want := range map[string]string{".h": ".h", "f.txt": "f.txt", "a\nb": `"a\nb"`, "x\x1b[2J": `"x\x1b[2J"`} {
+		if got := printableName(name); got != want {
+			t.Errorf("%q: %q, want %q", name, got, want)
+		}
 	}
 }

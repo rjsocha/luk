@@ -35,7 +35,8 @@ type Server struct {
 	Resolve func(r runproto.StepRequest) (Unit, error)
 	// Hold, when set, delays the s frame until it is closed (a unit slot).
 	Hold chan struct{}
-	// Requests receives every request.
+	// Requests receives every request; it must have room for them all
+	// (a full channel fails the test rather than blocking).
 	Requests chan runproto.StepRequest
 
 	base string
@@ -86,7 +87,11 @@ func (s *Server) serve(t *testing.T, c *net.UnixConn) {
 	}
 	defer ch.Close()
 	if s.Requests != nil {
-		s.Requests <- req
+		select {
+		case s.Requests <- req:
+		default:
+			t.Errorf("request %+v: Requests is full", req)
+		}
 	}
 	u, err := s.Resolve(req)
 	if err != nil {

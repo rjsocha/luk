@@ -20,6 +20,7 @@ import (
 	"luk/internal/config"
 	"luk/internal/gpgkeys"
 	"luk/internal/queue"
+	"luk/internal/runproto"
 	"luk/internal/status"
 	"luk/internal/store"
 	"luk/internal/watch"
@@ -198,6 +199,9 @@ func LoadJob(e queue.Entry) (Job, error) {
 }
 
 type Dispatcher struct {
+	// RunSocket is the socket of lukd run that run and relay steps
+	// connect to, runproto.DefaultSocket unless set before the first job.
+	RunSocket string
 	// cfg is the current configuration; a job takes it when a pipeline
 	// starts and keeps it until the pipeline ends (see Reload).
 	cfg atomic.Pointer[config.Config]
@@ -231,7 +235,7 @@ type Dispatcher struct {
 }
 
 func NewDispatcher(cfg *config.Config, q *queue.Queue, log *slog.Logger) *Dispatcher {
-	d := &Dispatcher{q: q, log: log, inflight: map[string]struct{}{}, stop: make(chan struct{}),
+	d := &Dispatcher{RunSocket: runproto.DefaultSocket, q: q, log: log, inflight: map[string]struct{}{}, stop: make(chan struct{}),
 		parked: map[string]*parked{}, now: time.Now,
 		slots: map[string]*slots{}, dirs: map[string]bool{}, keys: &gpgkeys.Resolver{}}
 	d.Reload(cfg)

@@ -5268,6 +5268,8 @@ pipeline:
   status 1 with `lukd run: <reason>` in the output) and a connection or
   protocol error (`relay <job>: dial unix ...`, `relay <job>: connection
   closed before the exit status`) fail the step, with the output tail.
+  A job that writes `<workspace>/fail` and exits non-zero fails the step
+  with that text as the step error, as a `run` program does.
   The pipeline `timeout` (`relay <job>: timeout after <d>`) and a stop of
   lukd close the connection, so `lukd run` stops the job; the step fails
   or is interrupted as a `run` step is.

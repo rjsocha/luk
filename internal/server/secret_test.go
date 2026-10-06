@@ -15,7 +15,6 @@ import (
 	"strings"
 	"testing"
 
-	"luk/internal/pipeline"
 	"luk/internal/queue"
 	"luk/internal/rund/rundtest"
 	"luk/internal/runproto"
@@ -41,8 +40,6 @@ func newSecretFixture(t *testing.T, mod func(string) string) *secretFixture {
 		t.Fatal(err)
 	}
 	sock := filepath.Join(tmp, "run.sock")
-	old := pipeline.SetRunSocket(sock)
-	t.Cleanup(func() { pipeline.SetRunSocket(old) })
 	rundtest.Start(t, &rundtest.Server{Socket: sock, Resolve: func(r runproto.StepRequest) (rundtest.Unit, error) {
 		if r.Pipeline != "mark" || r.Step != 1 || r.Job != "" {
 			return rundtest.Unit{}, fmt.Errorf("pipeline %s step %d: not a run or relay step", r.Pipeline, r.Step)
@@ -65,6 +62,7 @@ func newSecretFixture(t *testing.T, mod func(string) string) *secretFixture {
 		}
 		return s
 	})
+	f.runSocket = sock
 	return &secretFixture{fixture: f, vol: vol, marker: marker}
 }
 

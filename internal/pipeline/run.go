@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"luk/internal/config"
-	"luk/internal/runproto"
 	"luk/internal/runstep"
 )
 
@@ -25,18 +24,6 @@ const (
 	logCap   = 1 << 20
 	tailSize = 4 << 10
 )
-
-// runSocket is the socket of lukd run that run and relay steps connect to.
-var runSocket = runproto.DefaultSocket
-
-// SetRunSocket points the run and relay steps at the lukd run socket p
-// and returns the previous one, for the tests of packages that run
-// pipelines.
-func SetRunSocket(p string) string {
-	old := runSocket
-	runSocket = p
-	return old
-}
 
 // file is one member of the set a pipeline works on. produced marks a file
 // written by a run step; it carries its own size, sha256 and meta.

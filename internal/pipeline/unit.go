@@ -8,7 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -21,6 +21,7 @@ import (
 	"luk/internal/jobchan"
 	"luk/internal/runproto"
 	"luk/internal/runstep"
+	"luk/internal/wire"
 )
 
 // kind of a step that runs as a unit of lukd run.
@@ -42,8 +43,12 @@ func (k unitKind) String() string {
 	return "run"
 }
 
-// resultGap is the most a unit may stay silent after its status frame.
+// resultGap is the most a unit may stay silent after its status frame,
+// or after its end while frames are still to be read.
 var resultGap = jobchan.ResultGap
+
+// place clones a result into out/ (btrfs.Place), replaced by tests.
+var place = btrfs.Place
 
 // unitStep runs step i+1 of p as a unit of lukd run on set in the work
 // directory dir: it sends meta.json and the files of in/ over a channel
@@ -135,11 +140,12 @@ func (d *Dispatcher) askUnit(j Job, p *config.Pipeline, step int, kind unitKind,
 		}()
 	}
 
+	var ended atomic.Bool
 	res := make(chan unitResult, 1)
-	go func() { res <- d.readResults(ch, kind, outDir) }()
+	go func() { res <- d.readResults(ch, kind, outDir, &ended) }()
 
 	req := runproto.StepRequest{Pipeline: p.Name, Step: step, ID: j.Entry.ID, Env: runstep.StepMeta(m, names)}
-	askErr := runproto.AskStep(ctx, runSocket, req, remote, onStarted, w, w)
+	askErr := runproto.AskStep(ctx, d.RunSocket, req, remote, onStarted, w, w)
 	if t := timer.Load(); t != nil {
 		t.Stop()
 	}
@@ -149,14 +155,13 @@ func (d *Dispatcher) askUnit(j Job, p *config.Pipeline, step int, kind unitKind,
 		// The exchange is over without the unit: what it may still send
 		// does not count.
 		ch.Close()
+	} else {
+		// The unit ended: what it sent is queued, and it sends nothing
+		// more. The reader keeps the deadline for each further frame.
+		ended.Store(true)
+		ch.SetReadDeadline(time.Now().Add(resultGap))
 	}
-	var u unitResult
-	select {
-	case u = <-res:
-	case <-time.After(resultGap):
-		ch.Close()
-		u = <-res
-	}
+	u := <-res
 	ch.Close()
 	sender.Wait()
 
@@ -221,14 +226,16 @@ type unitResult struct {
 // temporary name. After a non-zero status or the first violation it
 // only drops the frames up to end, so the wrapper ends as it would
 // otherwise. It closes ch when it ends, so that a unit still sending
-// fails at once.
-func (d *Dispatcher) readResults(ch *jobchan.Conn, kind unitKind, out *os.File) (u unitResult) {
+// fails at once. Once the status came or the unit ended (ended), every
+// read waits at most resultGap: only the silence of the unit counts, not
+// the time lukd takes to place a result.
+func (d *Dispatcher) readResults(ch *jobchan.Conn, kind unitKind, out *os.File, ended *atomic.Bool) (u unitResult) {
 	defer ch.Close()
 	seen := map[string]bool{}
 	n := 0
 	drop := false
 	for {
-		if u.status != nil {
+		if u.status != nil || ended.Load() {
 			ch.SetReadDeadline(time.Now().Add(resultGap))
 		}
 		f, fd, err := ch.Recv()
@@ -241,8 +248,8 @@ func (d *Dispatcher) readResults(ch *jobchan.Conn, kind unitKind, out *os.File) 
 		case errors.Is(err, io.EOF), errors.Is(err, net.ErrClosed):
 			u.err = errors.New("channel closed before the results")
 			return u
-		case u.status != nil && errors.As(err, &ne) && ne.Timeout():
-			u.err = fmt.Errorf("no result for %s", strings.TrimSuffix(resultGap.String(), "0s"))
+		case errors.As(err, &ne) && ne.Timeout():
+			u.err = fmt.Errorf("no result for %s", formatGap(resultGap))
 			return u
 		case err != nil:
 			u.err = err
@@ -299,7 +306,7 @@ func placeResult(out *os.File, name string, fd *os.File, kind unitKind, n int, s
 	case n > jobchan.MaxFiles:
 		return fmt.Errorf("out: more than %d entries", jobchan.MaxFiles)
 	case kind != kindRun:
-		return fmt.Errorf("%s step wrote out/%s", kind, name)
+		return fmt.Errorf("%s step wrote out/%s", kind, printableName(name))
 	case unix.Fstat(int(fd.Fd()), &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG:
 		return fmt.Errorf("out: %q: not a regular file", name)
 	case !runstep.ValidName(name):
@@ -308,10 +315,27 @@ func placeResult(out *os.File, name string, fd *os.File, kind unitKind, n int, s
 		return fmt.Errorf("out: %q: sent twice", name)
 	}
 	seen[name] = true
-	if err := btrfs.Place(out, name, fd, 0o440, true); err != nil {
+	if err := place(out, name, fd, 0o440, true); err != nil {
 		return fmt.Errorf("out: %w", err)
 	}
 	return nil
+}
+
+// printableName is name as it is when it holds no control character and
+// fits a file name, else quoted: it comes from the unit unchecked.
+func printableName(name string) string {
+	if wire.HasControl(name) || len(name) > wire.MaxNameLen {
+		return strconv.Quote(name)
+	}
+	return name
+}
+
+// formatGap is d as a step error names it: 1m, 90s as 1m30s, 200ms.
+func formatGap(d time.Duration) string {
+	if d >= time.Minute && d%time.Minute == 0 {
+		return strconv.FormatInt(int64(d/time.Minute), 10) + "m"
+	}
+	return d.String()
 }
 
 // nested answers the request of a nested job, first its job frame.

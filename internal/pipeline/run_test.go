@@ -5,10 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"slices"
-	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -17,7 +17,6 @@ import (
 	"luk/internal/config"
 	"luk/internal/queue"
 	"luk/internal/rund/rundtest"
-	"luk/internal/runstep"
 	"luk/internal/status"
 	"luk/internal/store"
 	"luk/internal/wire"
@@ -85,7 +84,7 @@ func newRunEnvHold(t *testing.T, pipeline string, hold chan struct{}) *env {
 	return e
 }
 
-// useRund points runSocket at an in-process lukd run (rundtest) resolving
+// useRund points the dispatchers of e at an in-process lukd run (rundtest) resolving
 // the requests by the configuration of e and e.jobs. It starts with the
 // first dispatcher, so a test fills e.jobs, e.hold and e.requests first.
 func (e *env) useRund(t *testing.T) {
@@ -95,10 +94,8 @@ func (e *env) useRund(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	old := runSocket
-	runSocket = filepath.Join(dir, "run.sock")
-	t.Cleanup(func() { runSocket = old })
-	sock := runSocket
+	e.socket = filepath.Join(dir, "run.sock")
+	sock := e.socket
 	e.jobs = map[string]rundtest.Unit{}
 	e.startRund = func() {
 		rundtest.Start(t, &rundtest.Server{Socket: sock, Resolve: rundtest.FromConfig(e.cfg, e.jobs), Hold: e.hold, Requests: e.requests})
@@ -415,29 +412,18 @@ wait
 	waitDead(t, childPid(t, pidfile))
 }
 
-func TestRunKillsStraysAfterExit(t *testing.T) {
+// The results lukd keeps are its own copies: a process the step left
+// behind that changes out/ after the exit changes nothing stored.
+func TestRunStrayCannotChangeResult(t *testing.T) {
 	pidfile := filepath.Join(t.TempDir(), "pid")
 	s := script(t, `echo ok > "$LUK_OUT/f"
 (sleep 0.3; chmod u+w "$LUK_OUT/f"; echo mutated > "$LUK_OUT/f") >/dev/null 2>&1 &
 echo $! > "$PIDFILE"
 exit 0
 `)
-	slow := script(t, `sleep 1; echo y > "$LUK_OUT/y"
-`)
-	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n        env: {PIDFILE: %s}\n      - store: a\n      - run: %s\n", s, pidfile, slow))
-	start := time.Now()
+	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n        env: {PIDFILE: %s}\n      - store: a\n", s, pidfile))
 	e.runOne(t, "k1")
-	if el := time.Since(start); el > 5*time.Second {
-		t.Fatalf("took %v", el)
-	}
-	b, err := os.ReadFile(pidfile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var pid int
-	fmt.Sscan(string(b), &pid)
-	waitDead(t, pid)
-	time.Sleep(500 * time.Millisecond)
+	waitDead(t, childPid(t, pidfile))
 	if got := e.read(t, "a/file/robert.socha/f"); got != "ok\n" {
 		t.Fatalf("stored %q", got)
 	}
@@ -634,9 +620,9 @@ func TestRunEnvOriginWithoutHostname(t *testing.T) {
 	}
 }
 
-// The LUK_* environment of a step is what lukd run derives from the
-// workspace, the step and the metadata lukd process sends: nothing else.
-func TestRunStepEnvIsUnitVars(t *testing.T) {
+// The LUK_* environment of each step: the workspace-bound variables, the
+// step-bound ones and the metadata of the set the step gets, nothing else.
+func TestRunStepEnv(t *testing.T) {
 	keep := t.TempDir()
 	s := script(t, `set -e
 env | grep '^LUK_\|^TMPDIR=' | sort > "$KEEP/env$LUK_STEP"
@@ -654,26 +640,25 @@ if [ "$LUK_STEP" = 2 ]; then cat "$LUK_IN"/* > "$LUK_OUT/all.bin"; fi
 		t.Fatal(err)
 	}
 	d.Wait()
+	file := map[int]string{1: "f.txt", 3: "all.bin"}
 	for step := 1; step <= 3; step++ {
 		b, err := os.ReadFile(filepath.Join(keep, fmt.Sprintf("env%d", step)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := strings.Split(strings.TrimSpace(string(b)), "\n")
-		m := envLines(string(b))
-		sent := map[string]string{}
-		for _, k := range runstep.MetaNames {
-			if v, ok := m[k]; ok {
-				sent[k] = filepath.Base(v)
-				if k != "LUK_FILE" {
-					sent[k] = v
-				}
-			}
+		got := envLines(string(b))
+		w := got["LUK_WORK"]
+		want := map[string]string{
+			"LUK_WORK": w, "LUK_IN": w + "/in", "LUK_OUT": w + "/out", "LUK_META": w + "/meta.json",
+			"LUK_TMP": w + "/tmp", "TMPDIR": w + "/tmp", "LUK_ID": "id11", "LUK_PIPELINE": "p",
+			"LUK_STEP": strconv.Itoa(step), "LUK_SENDER": "robert.socha", "LUK_ENDPOINT": "up",
+			"LUK_TAGS": "daily,prod", "LUK_HOSTNAME": "db1", "LUK_ORIGIN": "db1", "LUK_NAME": file[step],
 		}
-		got := runstep.UnitVars(m["LUK_WORK"], "id11", "p", step, sent)
-		sort.Strings(got)
-		if !slices.Equal(got, want) || m["LUK_TAGS"] != "daily,prod" || m["LUK_ORIGIN"] != "db1" {
-			t.Errorf("step %d:\n unit %q\n step %q", step, got, want)
+		if f := file[step]; f != "" {
+			want["LUK_FILE"] = w + "/in/" + f
+		}
+		if w == "" || !maps.Equal(got, want) {
+			t.Errorf("step %d:\n got  %q\n want %q", step, got, want)
 		}
 	}
 }
