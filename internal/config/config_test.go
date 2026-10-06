@@ -1171,6 +1171,14 @@ func TestRelayStep(t *testing.T) {
 	}
 }
 
+func TestRunStepEnvReservesLUK(t *testing.T) {
+	src := strings.Replace(good, "    steps:\n      - store: drop\n", "    steps:\n      - run: /opt/luk/x\n        env: {LUK_TAGS: x, LUKE: y}\n      - store: drop\n", 1)
+	_, err := Parse([]byte(src))
+	if err == nil || !strings.Contains(err.Error(), "pipeline drop: step 1: env.LUK_TAGS: LUK_* names are reserved") || strings.Contains(err.Error(), "LUKE") {
+		t.Fatalf("%v", err)
+	}
+}
+
 func TestTeeNeedsRun(t *testing.T) {
 	for _, step := range []string{"      - store: drop\n        tee: true\n", "      - encrypt: {key: [robert@example.com]}\n        tee: true\n      - store: drop\n"} {
 		src := strings.Replace(good, "    steps:\n      - store: drop\n", "    steps:\n"+step, 1)

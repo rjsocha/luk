@@ -1670,6 +1670,11 @@ func (c *Config) validate() []error {
 			} else if s.Tee && s.Run == "" {
 				bad("pipeline %s: step %d: tee needs run", name, i+1)
 			}
+			for _, k := range sortedKeys(s.Env) {
+				if strings.HasPrefix(k, "LUK_") {
+					bad("pipeline %s: step %d: env.%s: LUK_* names are reserved", name, i+1, k)
+				}
+			}
 			for _, st := range s.Store {
 				if sc, ok := c.Storage[st]; !ok {
 					bad("pipeline %s: step %d: unknown storage %q", name, i+1, st)

@@ -528,7 +528,7 @@ printf x > "$LUK_OUT/x"
 `)
 	s2 := script(t, `env > "$LUK_OUT/env2"
 `)
-	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n        env: {LUK_ROOT: /evil, LUK_STEP: 9}\n      - store: a\n      - run: %s\n      - store: b\n", s1, s2))
+	e := newRunEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - store: a\n      - run: %s\n      - store: b\n", s1, s2))
 	d := e.dispatcher()
 	j := e.enqueueWith(t, "id7", "up", func(j *Job) {
 		j.Vars.Tags = []string{"t1", "t2"}

@@ -2436,7 +2436,9 @@ and `ssh.d/ca/`):
   `limits.channel.*` and `limits.uploads.*` are positive;
 - `run` is an absolute path; `tee` only on a `run` step (`tee needs
   run`); `relay` is a job name (`[a-z0-9][a-z0-9._-]*`, at most 64
-  bytes) and takes no `tee` or `env` (`relay takes no tee or env`);
+  bytes) and takes no `tee` or `env` (`relay takes no tee or env`); an
+  `env` name of a `run` step does not start with `LUK_` (`env.<name>:
+  LUK_* names are reserved`);
 - `queue.concurrency` and `timeout` are not negative, `queue.order` is
   not negative and needs `queue.group`, `queue.group` does not start
   with a dot or contain a slash; the pipeline key `concurrency` is an
@@ -2881,7 +2883,10 @@ before every run:
   pipeline `timeout`.
 - Environment: `PATH` (system default, includes `/usr/local/bin`),
   `LANG=C.UTF-8`, the step's `env`, then the metadata variables of the
-  Step environment (last, so `env` cannot override them).
+  Step environment (last, so `env` cannot override them). Every `LUK_*`
+  name is reserved: an `env` key `LUK_*` is a config error, so a
+  metadata variable left unset (see Step environment) never takes a
+  value from `env`.
 - `meta.json`: `server` (`id`, `sender`, `endpoint`, `received`, `size`,
   `sha256`, `expires` when set), `client` (the client meta as sent:
   `file`, `source`, `tags`, `backup`, ...), `pipeline`, `step` and
