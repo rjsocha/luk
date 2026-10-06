@@ -398,6 +398,7 @@ type env struct {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	top := t.TempDir()
+	os.Chmod(top, 0o700)
 	root := filepath.Join(top, "root")
 	w := filepath.Join(root, "work", id1, "p", "1")
 	writeWork(t, w, workMeta(id1, "p", 1), "db.sql")
@@ -410,7 +411,7 @@ func newEnv(t *testing.T) *env {
 	write(t, conf, "root: "+root+"\n", 0o600)
 	e := &env{work: w, fr: &fakeRunner{}, peer: me}
 	e.srv = &Server{
-		Config: conf, Jobs: jobs, Locks: filepath.Join(top, "locks"), Owner: me,
+		Config: conf, Jobs: jobs, Locks: filepath.Join(top, "locks"), Owner: me, Top: top,
 		PeerUID: func() (uint32, error) { return e.peer, nil },
 		Runner:  e.fr,
 		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1129,5 +1130,62 @@ func TestGroupNameOdd(t *testing.T) {
 	lookupGroupID = func(id string) (*user.Group, error) { return &user.Group{Gid: id, Name: "a b"}, nil }
 	if n := GroupName(1234); n != "1234" {
 		t.Fatalf("%q", n)
+	}
+}
+
+func TestCheckParents(t *testing.T) {
+	if err := CheckParents("/etc", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckParents("/tmp", "", 0); err == nil || !strings.Contains(err.Error(), "/tmp: writable by group or others") {
+		t.Fatalf("/tmp: %v", err)
+	}
+	top := t.TempDir()
+	os.Chmod(top, 0o700)
+	d := filepath.Join(top, "site", "lukd")
+	os.MkdirAll(d, 0o750)
+	os.Chmod(filepath.Join(top, "site"), 0o750)
+	if err := CheckParents(d, top, me); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckParents(d, top, me+1); err == nil || !strings.Contains(err.Error(), "owned by") {
+		t.Fatalf("owner: %v", err)
+	}
+	os.Chmod(filepath.Join(top, "site"), 0o770)
+	if err := CheckParents(d, top, me); err == nil || !strings.Contains(err.Error(), "site: writable by group or others") {
+		t.Fatalf("group writable: %v", err)
+	}
+	os.Chmod(filepath.Join(top, "site"), 0o755)
+	os.Symlink(filepath.Join(top, "site"), filepath.Join(top, "link"))
+	if err := CheckParents(filepath.Join(top, "link", "lukd"), top, me); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := CheckParents(filepath.Dir(top), top, me); err == nil {
+		t.Fatal("above top accepted")
+	}
+}
+
+// run.yaml and run.d count only when no directory above them lets
+// anyone but root replace them.
+func TestServeParents(t *testing.T) {
+	e := newEnv(t)
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
+		t.Error("job ran")
+		return 0, nil
+	}
+	req := string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode())
+	top := e.srv.Top
+	os.Chmod(top, 0o777)
+	if fs, err := e.exchange(t, req); err == nil || len(fs) != 0 {
+		t.Fatalf("writable parent of run.yaml: %v %q", err, fs)
+	}
+	os.Chmod(top, 0o700)
+	sub := filepath.Join(top, "etc")
+	os.Mkdir(sub, 0o775)
+	os.Rename(e.srv.Jobs, filepath.Join(sub, "run.d"))
+	e.srv.Jobs = filepath.Join(sub, "run.d")
+	fs, err := e.exchange(t, req)
+	if err == nil || len(fs) != 2 || !strings.Contains(fs[0].p, "unavailable") {
+		t.Fatalf("writable parent of run.d: %v %q", err, fs)
 	}
 }

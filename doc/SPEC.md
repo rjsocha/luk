@@ -4484,7 +4484,14 @@ work directory. No polkit and no sudo are involved.
   leftovers (`*~`, `*.dpkg-*`, `*.swp`) are ignored. The directory and
   the files must be owned by root and not writable by group or others (a
   file must be regular, not a symlink); otherwise the directory, or that
-  file, is refused. The directory is read per connection: adding or
+  file, is refused. So must every directory above `run.yaml` and run.d,
+  from `/` down (`/etc`, `/etc/site`, `/etc/site/lukd`): a directory,
+  not a symlink, owned by root, not writable by group or others (read
+  access for the group `luk`, as the package sets up, is fine).
+  Otherwise nobody but root could be trusted not to swap the files
+  below: a bad directory above `run.yaml` makes lukd run close every
+  connection without an answer (logged), one above run.d refuses every
+  job as unavailable (logged). The directory is read per connection: adding or
   removing a file needs no reload. A malformed or refused file disables
   only its job: a request for it is refused and the reason is logged.
   Keys of a job:

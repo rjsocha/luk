@@ -86,6 +86,37 @@ func checkSafe(fi os.FileInfo, owner uint32) error {
 	return nil
 }
 
+// CheckParents requires every directory from top (/ when empty) down to
+// dir, both included, to be a directory (not a symlink) owned by owner and
+// not writable by group or others (checkSafe), so nobody else can replace
+// what lies below. dir must be top or below it.
+func CheckParents(dir, top string, owner uint32) error {
+	if top == "" {
+		top = "/"
+	}
+	rel, err := filepath.Rel(top, filepath.Clean(dir))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return fmt.Errorf("%s: not under %s", dir, top)
+	}
+	p := top
+	for _, name := range append([]string{""}, strings.Split(rel, string(filepath.Separator))...) {
+		if name != "." {
+			p = filepath.Join(p, name)
+		}
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("%s: not a directory", p)
+		}
+		if err := checkSafe(fi, owner); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+	}
+	return nil
+}
+
 // readSafe reads a regular file (no symlink) that passes checkSafe.
 func readSafe(p string, owner uint32) ([]byte, error) {
 	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)

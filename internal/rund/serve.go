@@ -47,8 +47,10 @@ type Server struct {
 	// Locks holds the lock files of the jobs with `state: locked`; empty
 	// means DefaultLocks.
 	Locks string
-	// Owner must own the config, run.d and its files (root).
+	// Owner must own the config, run.d and its files (root), and every
+	// directory above them from Top (/ when empty) down.
 	Owner uint32
+	Top   string
 	// PeerUID returns the uid of the connected process.
 	PeerUID func() (uint32, error)
 	Runner  Runner
@@ -81,6 +83,11 @@ var (
 // stopGrace, so a peer that stops sending or reading cannot hold the
 // connection.
 func (s *Server) Serve(conn net.Conn) error {
+	// A missing directory of run.yaml is a missing run.yaml: the
+	// defaults.
+	if err := CheckParents(filepath.Dir(s.Config), s.Top, s.Owner); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s: %w", s.Config, err)
+	}
 	g, err := LoadGlobal(s.Config, s.Owner)
 	if err != nil {
 		return err
@@ -118,7 +125,11 @@ func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, 
 	if !config.ValidJobName(req.Job) {
 		return refusal{fmt.Errorf("job %q: unknown", req.Job)}
 	}
-	jobs, err := LoadJobs(s.Jobs, s.Owner)
+	err = CheckParents(filepath.Dir(s.Jobs), s.Top, s.Owner)
+	var jobs *Jobs
+	if err == nil {
+		jobs, err = LoadJobs(s.Jobs, s.Owner)
+	}
 	if err != nil {
 		s.Log.Error("run.d refused", "err", err)
 		return refusal{fmt.Errorf("job %s: unavailable", req.Job)}
