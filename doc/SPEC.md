@@ -4925,7 +4925,11 @@ sudo are involved.
     `lukd-run-prune.timer`; it talks to nobody) removes, with the code of
     the remove helper, every workspace of `<root>/root/job` named like a
     unit (the pattern above) whose unit is not active; any other entry is
-    logged and left alone.
+    logged and left alone. lukd run holds an exclusive `flock` on
+    `/run/lukd-run/ws/<unit>.lock` (root, 0600, removed on release) from
+    before the create helper until after the remove helper, and prune
+    skips a workspace whose lock is held, so it never removes one that is
+    being set up or in use.
   - The count of leftover workspaces lives in
     `/run/luk/workspaces/count.json` (the directory `root:luk` 0750 from
     tmpfiles.d, the file 0640, `{"leftover": N, "updated": "<UTC

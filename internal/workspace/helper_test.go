@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -157,7 +158,7 @@ func TestPruneLeavesOtherEntries(t *testing.T) {
 		}
 		return notFound(u)
 	}
-	left, err := Prune(top, root, me, show, quiet)
+	left, err := Prune(top, root, t.TempDir(), me, show, quiet)
 	if err != nil || left != 1 {
 		t.Fatalf("left %d: %v", left, err)
 	}
@@ -166,7 +167,7 @@ func TestPruneLeavesOtherEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if left, err := Prune(top, filepath.Join(top, "none"), me, show, quiet); err != nil || left != 0 {
+	if left, err := Prune(top, filepath.Join(top, "none"), t.TempDir(), me, show, quiet); err != nil || left != 0 {
 		t.Fatalf("missing job/: %d %v", left, err)
 	}
 }
@@ -212,6 +213,70 @@ func TestOwnRefusals(t *testing.T) {
 	}
 }
 
+func TestCreateRefusesGroup(t *testing.T) {
+	isBtrfs = func(int) (bool, error) { return false, nil }
+	t.Cleanup(func() { isBtrfs = btrfsIsBtrfsFd })
+	var other int = -1
+	gs, _ := os.Getgroups()
+	for _, g := range gs {
+		if g != os.Getgid() {
+			other = g
+		}
+	}
+	if other < 0 {
+		t.Skip("no second group")
+	}
+	top, root := newRoot(t)
+	unit := "lukd-run-a-0123456789ab"
+	os.Chown(filepath.Join(root, "root", JobDir), -1, other)
+	if err := Create(top, root, unit, me); err == nil || !strings.Contains(err.Error(), "group") {
+		t.Fatalf("job/: %v", err)
+	}
+	os.Chown(filepath.Join(root, "root", JobDir), -1, os.Getgid())
+	os.Chown(filepath.Join(root, "root"), -1, other)
+	if err := Create(top, root, unit, me); err == nil || !strings.Contains(err.Error(), "group") {
+		t.Fatalf("root/: %v", err)
+	}
+	os.Chown(filepath.Join(root, "root"), -1, os.Getgid())
+	if err := Create(top, root, unit, me); err == nil || !strings.Contains(err.Error(), "not a btrfs filesystem") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestHoldAndPrune(t *testing.T) {
+	top, root := newRoot(t)
+	locks := t.TempDir()
+	a, b := "lukd-run-a-0123456789ab", "lukd-run-b-0123456789ab"
+	os.Mkdir(Path(root, a), 0o700)
+	os.Mkdir(Path(root, b), 0o700)
+	if _, err := Hold(locks, "../x"); err == nil || err.Error() != "workspace: invalid unit name" {
+		t.Fatalf("name: %v", err)
+	}
+	l, err := Hold(locks, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Hold(locks, a); err == nil {
+		t.Fatal("held twice")
+	}
+	if fi, err := os.Lstat(filepath.Join(locks, LockDir)); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("lock dir: %v %v", fi, err)
+	}
+	// a is locked: skipped and not counted; b is a plain directory: counted.
+	if left, err := Prune(top, root, locks, me, notFound, quiet); err != nil || left != 1 {
+		t.Fatalf("held: left %d: %v", left, err)
+	}
+	if err := l.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(locks, LockDir, a+".lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock file left: %v", err)
+	}
+	if left, err := Prune(top, root, locks, me, notFound, quiet); err != nil || left != 2 {
+		t.Fatalf("released: left %d: %v", left, err)
+	}
+}
+
 func TestHelperArgv(t *testing.T) {
 	got := HelperArgv("/usr/bin/lukd", "/var/lib/luk", "remove", "lukd-run-a-0123456789ab")
 	if got[0] != "systemd-run" || !slices.Contains(got, "--wait") || !slices.Contains(got, "--collect") || !slices.Contains(got, "--quiet") {
@@ -222,7 +287,7 @@ func TestHelperArgv(t *testing.T) {
 	}
 	for _, p := range []string{
 		"ProtectSystem=strict", "ReadWritePaths=-/var/lib/luk/root/job", "ReadWritePaths=-/run/luk/workspaces",
-		"CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH",
+		"CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER",
 		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
 		"NoNewPrivileges=yes", "ProtectHome=yes", "PrivateTmp=yes", "PrivateDevices=yes",
 		"ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectKernelLogs=yes",
@@ -311,13 +376,28 @@ func owner(t *testing.T, p string) (uid, gid uint32, perm os.FileMode) {
 func jobTree(t *testing.T, ws string) {
 	t.Helper()
 	d := filepath.Join(ws, "d")
-	os.Mkdir(d, 0o700)
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	subvolume(t, ws, "top")
 	subvolume(t, d, "nested")
 	subvolume(t, filepath.Join(d, "nested"), "deeper")
-	os.WriteFile(filepath.Join(d, "nested", "deeper", "f"), []byte("x"), 0o600)
-	for _, p := range []string{ws, d, filepath.Join(d, "nested"), filepath.Join(d, "nested", "deeper"), filepath.Join(d, "nested", "deeper", "f")} {
-		os.Chown(p, 4321, 4321)
-		os.Chmod(p, 0o700)
+	if err := os.WriteFile(filepath.Join(d, "nested", "deeper", "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Sticky directories of the job: deleting a subvolume of the job from
+	// them needs CAP_FOWNER besides the DAC capabilities.
+	for _, p := range []string{ws, d, filepath.Join(ws, "top"), filepath.Join(d, "nested"), filepath.Join(d, "nested", "deeper"), filepath.Join(d, "nested", "deeper", "f")} {
+		mode := os.FileMode(0o700) | os.ModeSticky
+		if filepath.Base(p) == "f" {
+			mode = 0o600
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(p, 4321, 4321); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -370,7 +450,7 @@ func TestRemoveOnlyBelowItsWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unix.Unmount(Path(root, c), unix.MNT_DETACH)
-	if err := Remove(top, root, c, 0, notFound); err == nil || err.Error() != "workspace "+c+": not a subvolume of "+filepath.Join(root, "root", JobDir) {
+	if err := Remove(top, root, c, 0, notFound); !errors.Is(err, unix.EXDEV) {
 		t.Fatalf("bind mount: %v", err)
 	}
 	unix.Unmount(Path(root, c), unix.MNT_DETACH)
@@ -428,6 +508,53 @@ func TestOwnOnBtrfs(t *testing.T) {
 	}
 }
 
+// TestRemoveCapabilitiesOnBtrfs removes a workspace with sticky job
+// directories in a child limited to the bounding set of the helper units,
+// and shows that it fails without CAP_FOWNER.
+func TestRemoveCapabilitiesOnBtrfs(t *testing.T) {
+	top, root := btrfsRoot(t)
+	setpriv, err := exec.LookPath("setpriv")
+	if err != nil {
+		t.Skip("no setpriv")
+	}
+	unit := JobUnit("caps")
+	if err := Create(top, root, unit, 0); err != nil {
+		t.Fatal(err)
+	}
+	jobTree(t, Path(root, unit))
+	t.Cleanup(func() { Remove(top, root, unit, 0, notFound) })
+	child := func(caps string) error {
+		cmd := exec.Command(setpriv, "--inh-caps=-all", "--bounding-set=-all,"+caps, os.Args[0], "-test.run=^TestRemoveChild$", "-test.v")
+		cmd.Env = append(os.Environ(), "LUK_TEST_REMOVE="+top+"\t"+root+"\t"+unit)
+		out, err := cmd.CombinedOutput()
+		t.Logf("bounding set %s:\n%s", caps, out)
+		return err
+	}
+	if err := child("+sys_admin,+dac_override,+dac_read_search"); err == nil {
+		t.Fatal("removed without CAP_FOWNER")
+	}
+	if _, err := os.Lstat(Path(root, unit)); err != nil {
+		t.Fatal(err)
+	}
+	if err := child("+sys_admin,+dac_override,+dac_read_search,+fowner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(Path(root, unit)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace left: %v", err)
+	}
+}
+
+// TestRemoveChild is the child of TestRemoveCapabilitiesOnBtrfs.
+func TestRemoveChild(t *testing.T) {
+	a := strings.Split(os.Getenv("LUK_TEST_REMOVE"), "\t")
+	if len(a) != 3 {
+		t.Skip("LUK_TEST_REMOVE not set")
+	}
+	if err := Remove(a[0], a[1], a[2], 0, notFound); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPruneOnBtrfs(t *testing.T) {
 	top, root := btrfsRoot(t)
 	units := []string{JobUnit("a"), StepUnit("p", 1)}
@@ -439,7 +566,16 @@ func TestPruneOnBtrfs(t *testing.T) {
 	jobTree(t, Path(root, units[0]))
 	job := filepath.Join(root, "root", JobDir)
 	os.WriteFile(filepath.Join(job, "other"), nil, 0o600)
-	left, err := Prune(top, root, 0, notFound, quiet)
+	locks := t.TempDir()
+	busy := StepUnit("p", 2)
+	if err := Create(top, root, busy, 0); err != nil {
+		t.Fatal(err)
+	}
+	l, err := Hold(locks, busy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	left, err := Prune(top, root, locks, 0, notFound, quiet)
 	if err != nil || left != 0 {
 		t.Fatalf("left %d: %v", left, err)
 	}
@@ -450,5 +586,15 @@ func TestPruneOnBtrfs(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(job, "other")); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Lstat(Path(root, busy)); err != nil {
+		t.Fatalf("locked workspace pruned: %v", err)
+	}
+	l.Release()
+	if left, err := Prune(top, root, locks, 0, notFound, quiet); err != nil || left != 0 {
+		t.Fatalf("left %d: %v", left, err)
+	}
+	if _, err := os.Lstat(Path(root, busy)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released workspace left: %v", err)
 	}
 }

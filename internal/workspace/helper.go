@@ -99,22 +99,35 @@ func Create(top, root, unit string, owner uint32) error {
 		return err
 	}
 	defer parent.Close()
+	group := groupOf(owner)
+	if err := checkGroup(int(parent.Fd()), parent.Name(), group); err != nil {
+		return err
+	}
+	jobPath := filepath.Join(root, "root", JobDir)
 	made := true
 	if err := unix.Mkdirat(int(parent.Fd()), JobDir, 0o711); errors.Is(err, unix.EEXIST) {
 		made = false
 	} else if err != nil {
-		return fmt.Errorf("%s: %w", filepath.Join(root, "root", JobDir), err)
+		return fmt.Errorf("%s: %w", jobPath, err)
 	}
-	job, err := OpenChain(top, filepath.Join(root, "root", JobDir), owner)
+	jfd, err := unix.Openat(int(parent.Fd()), JobDir, dirFlags, 0)
 	if err != nil {
+		return &os.PathError{Op: "open", Path: jobPath, Err: err}
+	}
+	job := os.NewFile(uintptr(jfd), jobPath)
+	defer job.Close()
+	// mkdirat honours the umask (0077 in the helper unit), and a setgid
+	// parent would pass on its bit: set the mode.
+	if made {
+		if err := unix.Fchmod(jfd, 0o711); err != nil {
+			return fmt.Errorf("%s: %w", jobPath, err)
+		}
+	}
+	if err := checkDir(jfd, jobPath, owner); err != nil {
 		return err
 	}
-	defer job.Close()
-	// mkdirat honours the umask (0077 in the helper unit): set the mode.
-	if made {
-		if err := unix.Fchmod(int(job.Fd()), 0o711); err != nil {
-			return fmt.Errorf("%s: %w", job.Name(), err)
-		}
+	if err := checkGroup(jfd, jobPath, group); err != nil {
+		return err
 	}
 	if ok, err := isBtrfs(int(job.Fd())); err != nil {
 		return fmt.Errorf("%s: %w", job.Name(), err)
@@ -130,8 +143,32 @@ func Create(top, root, unit string, owner uint32) error {
 	}
 	defer unix.Close(ws)
 	// The umask of the helper applies to the new subvolume too.
+	if err := unix.Fchown(ws, int(owner), int(group)); err != nil {
+		return fmt.Errorf("workspace %s: %w", unit, err)
+	}
 	if err := unix.Fchmod(ws, 0o700); err != nil {
 		return fmt.Errorf("workspace %s: %w", unit, err)
+	}
+	return nil
+}
+
+// groupOf is the group that goes with owner: root's group 0 in
+// production, the own group of the user running the tests otherwise.
+func groupOf(owner uint32) uint32 {
+	if owner == 0 {
+		return 0
+	}
+	return uint32(os.Getgid())
+}
+
+// checkGroup requires the directory fd at p to belong to group gid.
+func checkGroup(fd int, p string, gid uint32) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return &os.PathError{Op: "stat", Path: p, Err: err}
+	}
+	if st.Gid != gid {
+		return fmt.Errorf("%s: group %d, want %d", p, st.Gid, gid)
 	}
 	return nil
 }
@@ -140,7 +177,7 @@ func Create(top, root, unit string, owner uint32) error {
 // systemd allocated to the unit, mode 0700. The path is the
 // WorkingDirectory of the unit, accepted only as <...>/root/job/<unit>
 // and opened with the chain rule; the workspace must be a subvolume, still
-// root:root (owner in tests) 0700 and empty, so a wrong WorkingDirectory
+// root:root (owner and its group in tests) 0700 and empty, so a wrong WorkingDirectory
 // never hands another directory to the unit.
 func Own(top, unit string, owner uint32, show Show) error {
 	if !ValidUnit(unit) {
@@ -178,7 +215,7 @@ func Own(top, unit string, owner uint32, show Show) error {
 	if err := unix.Fstat(fd, &st); err != nil {
 		return fmt.Errorf("workspace %s: %w", unit, err)
 	}
-	if st.Uid != owner || st.Gid != owner || st.Mode&0o7777 != 0o700 {
+	if st.Uid != owner || st.Gid != groupOf(owner) || st.Mode&0o7777 != 0o700 {
 		return fmt.Errorf("workspace %s: not a fresh workspace (%d:%d %#o)", unit, st.Uid, st.Gid, st.Mode&0o7777)
 	}
 	if empty, err := emptyDir(fd); err != nil {
@@ -263,11 +300,14 @@ func checkInactive(unit string, show Show) error {
 // destroy deletes the workspace unit of the directory job. Destroy by id
 // reaches any subvolume of the filesystem, so only the ids found below
 // the workspace are destroyed, and the workspace only when it is a
-// subvolume directly inside the subvolume of job/ (not something mounted
-// over its name).
+// subvolume directly inside the subvolume of job/; the name is opened
+// without crossing a mount point, so nothing mounted over it counts.
 func destroy(job *os.File, unit string) error {
 	jfd := int(job.Fd())
-	ws, err := unix.Openat(jfd, unit, dirFlags, 0)
+	ws, err := unix.Openat2(jfd, unit, &unix.OpenHow{
+		Flags:   uint64(dirFlags),
+		Resolve: unix.RESOLVE_NO_XDEV | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_BENEATH,
+	})
 	if errors.Is(err, unix.ENOENT) {
 		return nil
 	}
@@ -322,10 +362,11 @@ func below(job, ws int, name string) ([]uint64, error) {
 }
 
 // Prune removes, as Remove does, every workspace of <root>/root/job whose
-// unit is inactive, and returns how many it could not remove; an entry not
-// named like a workspace is logged and left alone. A missing job/ leaves
-// nothing.
-func Prune(top, root string, owner uint32, show Show, log *slog.Logger) (left int, err error) {
+// unit is inactive and whose lock (see Hold, below the lock directory
+// locks of lukd run) is free, and returns how many it could not remove;
+// an entry not named like a workspace is logged and left alone. A
+// missing job/ leaves nothing.
+func Prune(top, root, locks string, owner uint32, show Show, log *slog.Logger) (left int, err error) {
 	job, err := OpenChain(top, filepath.Join(root, "root", JobDir), owner)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
@@ -349,12 +390,10 @@ func Prune(top, root string, owner uint32, show Show, log *slog.Logger) (left in
 			log.Info("workspace prune: not a workspace", "name", name)
 			continue
 		}
-		p, err := show(name, "LoadState", "ActiveState")
-		if err == nil && !Inactive(p) {
+		used, err := pruneOne(job, locks, name, show)
+		if used {
+			log.Info("workspace prune: in use", "unit", name)
 			continue
-		}
-		if err == nil {
-			err = destroy(job, name)
 		}
 		if err != nil {
 			left++
@@ -364,10 +403,33 @@ func Prune(top, root string, owner uint32, show Show, log *slog.Logger) (left in
 	return left, nil
 }
 
+// pruneOne removes the workspace name of job unless lukd run holds its
+// lock or its unit is not inactive (used).
+func pruneOne(job *os.File, locks, name string, show Show) (used bool, err error) {
+	lock, free, err := tryLock(locks, name)
+	if err != nil {
+		return false, err
+	}
+	if !free {
+		return true, nil
+	}
+	if lock != nil {
+		defer lock.Close()
+	}
+	p, err := show(name, "LoadState", "ActiveState")
+	if err != nil {
+		return false, err
+	}
+	if !Inactive(p) {
+		return true, nil
+	}
+	return false, destroy(job, name)
+}
+
 // helperProperties is the sandbox of every helper unit.
 var helperProperties = []string{
 	"ProtectSystem=strict",
-	"CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH",
+	"CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER",
 	"PrivateNetwork=yes",
 	"RestrictAddressFamilies=AF_UNIX",
 	"NoNewPrivileges=yes",

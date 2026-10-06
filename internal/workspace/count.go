@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -15,6 +16,10 @@ import (
 // maxCount caps the count file read.
 const maxCount = 4 << 10
 
+// ErrCorruptCount marks a count file that is not a regular file of at
+// most maxCount bytes of valid JSON.
+var ErrCorruptCount = errors.New("corrupt count")
+
 // Count is count.json: the workspaces lukd run could not remove and when
 // that number last changed.
 type Count struct {
@@ -22,18 +27,21 @@ type Count struct {
 	Updated  string `json:"updated"`
 }
 
-// AddLeftover raises the count in dir by one: a remove failed.
-func AddLeftover(dir string, now time.Time) error {
-	return updateCount(dir, now, func(old int) int { return old + 1 })
+// AddLeftover raises the count in dir by one: a remove failed. A corrupt
+// count is replaced by 1 (logged), so monitoring is not left blind.
+func AddLeftover(dir string, now time.Time, log *slog.Logger) error {
+	return updateCount(dir, now, log, func(old int) int { return old + 1 })
 }
 
 // SetLeftover sets the count in dir to n, the workspaces prune could not
-// remove; the file is written only when the count changed or is missing.
-func SetLeftover(dir string, n int, now time.Time) error {
-	return updateCount(dir, now, func(int) int { return n })
+// remove; the file is written only when the count changed, is missing or
+// is corrupt (logged).
+func SetLeftover(dir string, n int, now time.Time, log *slog.Logger) error {
+	return updateCount(dir, now, log, func(int) int { return n })
 }
 
-// ReadCount reads the count file at path; nil, nil when it is missing.
+// ReadCount reads the count file at path; nil, nil when it is missing, an
+// error wrapping ErrCorruptCount when it cannot be read as a count.
 func ReadCount(path string) (*Count, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
@@ -52,18 +60,18 @@ func decodeCount(f *os.File, path string) (*Count, error) {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s: not a regular file", path)
+		return nil, fmt.Errorf("%s: %w: not a regular file", path, ErrCorruptCount)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxCount+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(b) > maxCount {
-		return nil, fmt.Errorf("%s: larger than %d bytes", path, maxCount)
+		return nil, fmt.Errorf("%s: %w: larger than %d bytes", path, ErrCorruptCount, maxCount)
 	}
 	var c Count
 	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w: %w", path, ErrCorruptCount, err)
 	}
 	return &c, nil
 }
@@ -72,7 +80,7 @@ func decodeCount(f *os.File, path string) (*Count, error) {
 // flock on the lock file, through a temporary file renamed over it; the
 // file is 0640 and of the group of dir, so the group luk of CountDir can
 // read it.
-func updateCount(dir string, now time.Time, next func(int) int) error {
+func updateCount(dir string, now time.Time, log *slog.Logger, next func(int) int) error {
 	d, err := os.OpenFile(dir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
@@ -88,7 +96,9 @@ func updateCount(dir string, now time.Time, next func(int) int) error {
 		return fmt.Errorf("flock %s: %w", filepath.Join(dir, LockName), err)
 	}
 	old, err := readCountAt(dfd, filepath.Join(dir, CountName))
-	if err != nil {
+	if errors.Is(err, ErrCorruptCount) {
+		log.Warn("workspace count replaced", "error", err)
+	} else if err != nil {
 		return err
 	}
 	n := 0
