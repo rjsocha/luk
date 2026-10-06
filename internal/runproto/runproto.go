@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"sync"
 	"unicode/utf8"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -157,7 +158,10 @@ func (r StepRequest) Encode() []byte {
 var maxRights = unix.CmsgSpace(4 * 4)
 
 // ReadStepRequest reads the request line and its one descriptor, which
-// must be an AF_UNIX socket; extra bytes after the line are malformed.
+// must be an AF_UNIX socket; extra bytes after the line, in the read of
+// the line or already waiting behind it, are malformed. Bytes the peer
+// sends later belong to whoever reads the connection next. Every received
+// descriptor is closed on a refusal.
 func ReadStepRequest(c *net.UnixConn) (StepRequest, *os.File, error) {
 	buf := make([]byte, MaxRequest+1)
 	oob := make([]byte, maxRights)
@@ -197,6 +201,13 @@ func ReadStepRequest(c *net.UnixConn) (StepRequest, *os.File, error) {
 		return fail(fmt.Errorf("request larger than %d bytes", MaxRequest))
 	case end+1 < n:
 		return fail(errors.New("request: data after the request line"))
+	}
+	more, err := pending(c)
+	switch {
+	case err != nil:
+		return fail(fmt.Errorf("read request: %w", err))
+	case more:
+		return fail(errors.New("request: data after the request line"))
 	case len(fds) == 0:
 		return fail(errors.New("request: without its descriptor"))
 	case len(fds) > 1:
@@ -212,27 +223,58 @@ func ReadStepRequest(c *net.UnixConn) (StepRequest, *os.File, error) {
 	return r, os.NewFile(uintptr(fds[0]), "channel"), nil
 }
 
-// rights is the descriptors of the SCM_RIGHTS messages of oob.
+// rights is the descriptors of the SCM_RIGHTS messages of oob. It walks
+// the headers itself so that the descriptors before a malformed header
+// are returned, with the error, to be closed.
 func rights(oob []byte) ([]int, error) {
-	if len(oob) == 0 {
-		return nil, nil
-	}
-	msgs, err := unix.ParseSocketControlMessage(oob)
-	if err != nil {
-		return nil, err
-	}
 	var fds []int
-	for _, m := range msgs {
-		if m.Header.Level != unix.SOL_SOCKET || m.Header.Type != unix.SCM_RIGHTS {
-			continue
+	for len(oob) > 0 {
+		if len(oob) < unix.SizeofCmsghdr {
+			return fds, errors.New("truncated control message")
 		}
-		got, err := unix.ParseUnixRights(&m)
-		if err != nil {
-			return fds, err
+		var h unix.Cmsghdr
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&h)), unix.SizeofCmsghdr), oob)
+		hdr, l := unix.CmsgLen(0), int(h.Len)
+		if l < hdr {
+			return fds, errors.New("malformed control message")
 		}
-		fds = append(fds, got...)
+		data := oob[hdr:min(l, len(oob))]
+		if h.Level == unix.SOL_SOCKET && h.Type == unix.SCM_RIGHTS {
+			for ; len(data) >= 4; data = data[4:] {
+				fds = append(fds, int(int32(binary.NativeEndian.Uint32(data))))
+			}
+		}
+		if l > len(oob) {
+			return fds, errors.New("truncated control message")
+		}
+		oob = oob[min(unix.CmsgSpace(l-hdr), len(oob)):]
 	}
 	return fds, nil
+}
+
+// pending reports whether c has bytes waiting to be read, without
+// reading or waiting for them.
+func pending(c *net.UnixConn) (bool, error) {
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return false, err
+	}
+	var n int
+	var rerr error
+	err = rc.Read(func(fd uintptr) bool {
+		var b [1]byte
+		n, _, rerr = unix.Recvfrom(int(fd), b[:], unix.MSG_PEEK|unix.MSG_DONTWAIT)
+		return true
+	})
+	switch {
+	case err != nil:
+		return false, err
+	case rerr == unix.EAGAIN:
+		return false, nil
+	case rerr != nil:
+		return false, rerr
+	}
+	return n > 0, nil
 }
 
 // decodeStepRequest decodes b, valid UTF-8 holding exactly one flat JSON
@@ -481,7 +523,19 @@ func AskStep(ctx context.Context, socket string, req StepRequest, ch *os.File, s
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
 	line := req.Encode()
-	n, _, err := conn.WriteMsgUnix(line, unix.UnixRights(int(ch.Fd())), nil)
+	// Control, not Fd: Fd would put ch in blocking mode and end its
+	// deadlines.
+	rc, err := ch.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var n int
+	cerr := rc.Control(func(fd uintptr) {
+		n, _, err = conn.WriteMsgUnix(line, unix.UnixRights(int(fd)), nil)
+	})
+	if cerr != nil {
+		return cerr
+	}
 	if err == nil && n < len(line) {
 		_, err = conn.Write(line[n:])
 	}

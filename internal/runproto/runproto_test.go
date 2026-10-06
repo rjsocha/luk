@@ -243,10 +243,11 @@ func unixPair(t *testing.T) (*net.UnixConn, *net.UnixConn) {
 	return c[0], c[1]
 }
 
-// filePair is a connected SOCK_STREAM pair as *os.File.
+// filePair is a connected non-blocking SOCK_STREAM pair as *os.File,
+// with deadlines.
 func filePair(t *testing.T) (*os.File, *os.File) {
 	t.Helper()
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,17 +261,10 @@ func TestReadStepRequest(t *testing.T) {
 	ch, peer := filePair(t)
 	req := StepRequest{Pipeline: "p", Step: 1, ID: "i", Env: map[string]string{"LUK_NAME": "x"}}
 	line := req.Encode()
-	// The line in two writes, the descriptor with the second one.
-	cli.Write(line[:5])
-	rights := unix.UnixRights(int(ch.Fd()))
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		time.Sleep(10 * time.Millisecond)
-		cli.WriteMsgUnix(line[5:], rights, nil)
-	}()
+	// Two reads: a read stops after the bytes that carried descriptors.
+	cli.WriteMsgUnix(line[:5], unix.UnixRights(int(ch.Fd())), nil)
+	cli.Write(line[5:])
 	r, f, err := ReadStepRequest(srv)
-	<-done
 	if err != nil || r.Pipeline != "p" || r.Step != 1 || r.ID != "i" || r.Env["LUK_NAME"] != "x" {
 		t.Fatalf("%+v %v", r, err)
 	}
@@ -299,28 +293,85 @@ func TestReadStepRequestNeedsSocket(t *testing.T) {
 	}
 }
 
+// A refused request closes every descriptor it carried: each one is the
+// write end of a pipe whose read end sees EOF afterwards.
 func TestReadStepRequestRefuses(t *testing.T) {
-	ch, ch2 := filePair(t)
 	line := StepRequest{Pipeline: "p", Step: 1, ID: "i"}.Encode()
+	type write struct {
+		data []byte
+		fds  int
+	}
 	for name, c := range map[string]struct {
-		data   []byte
-		rights []byte
+		writes []write
 		want   string
 	}{
-		"two descriptors": {line, unix.UnixRights(int(ch.Fd()), int(ch2.Fd())), "request: more than one descriptor"},
-		"after the line":  {append(slices.Clone(line), 'x'), unix.UnixRights(int(ch.Fd())), "request: data after the request line"},
-		"malformed":       {[]byte("{}\n"), unix.UnixRights(int(ch.Fd())), "request: pipeline, step and id required"},
-		"too large":       {bytes.Repeat([]byte(" "), MaxRequest+1), unix.UnixRights(int(ch.Fd())), "request larger than 32768 bytes"},
-		"no newline":      {line[:len(line)-1], unix.UnixRights(int(ch.Fd())), "read request: unexpected EOF"},
+		"two descriptors":   {[]write{{line, 2}}, "request: more than one descriptor"},
+		"two reads":         {[]write{{line[:5], 1}, {line[5:], 1}}, "request: more than one descriptor"},
+		"after the line":    {[]write{{append(slices.Clone(line), 'x'), 1}}, "request: data after the request line"},
+		"later after":       {[]write{{line, 1}, {[]byte("x"), 0}}, "request: data after the request line"},
+		"malformed":         {[]write{{[]byte("{}\n"), 1}}, "request: pipeline, step and id required"},
+		"too large":         {[]write{{bytes.Repeat([]byte(" "), MaxRequest+1), 1}}, "request larger than 32768 bytes"},
+		"no newline":        {[]write{{line[:len(line)-1], 1}}, "read request: unexpected EOF"},
+		"not a unix socket": {[]write{{line, 1}}, "request: descriptor is not a unix socket"},
 	} {
 		srv, cli := unixPair(t)
-		go func() {
-			cli.WriteMsgUnix(c.data, c.rights, nil)
+		var ends []*os.File
+		for _, w := range c.writes {
+			var fds []int
+			for range w.fds {
+				r, pw, err := os.Pipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer r.Close()
+				ends = append(ends, r)
+				fd, err := unix.Dup(int(pw.Fd()))
+				pw.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				fds = append(fds, fd)
+			}
+			var oob []byte
+			if len(fds) > 0 {
+				oob = unix.UnixRights(fds...)
+			}
+			if _, _, err := cli.WriteMsgUnix(w.data, oob, nil); err != nil {
+				t.Fatal(err)
+			}
+			for _, fd := range fds {
+				unix.Close(fd)
+			}
+		}
+		if name == "no newline" {
 			cli.CloseWrite()
-		}()
+		}
 		if _, f, err := ReadStepRequest(srv); err == nil || err.Error() != c.want || f != nil {
 			t.Errorf("%s: got %v", name, err)
 		}
+		for i, r := range ends {
+			r.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, err := r.Read(make([]byte, 1)); err != io.EOF {
+				t.Errorf("%s: descriptor %d not closed: %v", name, i, err)
+			}
+		}
+	}
+}
+
+// The descriptors before a malformed control message header are still
+// returned, to be closed.
+func TestRightsMalformed(t *testing.T) {
+	b := append(unix.UnixRights(7, 8), make([]byte, unix.SizeofCmsghdr)...)
+	if fds, err := rights(b); !slices.Equal(fds, []int{7, 8}) || err == nil || err.Error() != "malformed control message" {
+		t.Errorf("%v %v", fds, err)
+	}
+	b = unix.UnixRights(9, 10)[:unix.CmsgLen(4)]
+	if fds, err := rights(b); !slices.Equal(fds, []int{9}) || err == nil || err.Error() != "truncated control message" {
+		t.Errorf("%v %v", fds, err)
+	}
+	b = append(unix.UnixRights(11), unix.UnixRights(12)...)
+	if fds, err := rights(b); !slices.Equal(fds, []int{11, 12}) || err != nil {
+		t.Errorf("%v %v", fds, err)
 	}
 }
 
@@ -362,6 +413,56 @@ func TestAskStep(t *testing.T) {
 	}
 	if r := <-got; r.Pipeline != "p" || r.Step != 2 || r.ID != "i" || r.Job != "j" {
 		t.Fatalf("%+v", r)
+	}
+
+}
+
+// The channel stays in non-blocking mode after AskStep: its deadlines still
+// work. A pipe end is a file os put in non-blocking mode itself, which Fd
+// would undo.
+func TestAskStepKeepsDeadlines(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "run.sock")
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		c, err := l.AcceptUnix()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		if _, f, err := ReadStepRequest(c); err == nil {
+			f.Close()
+		}
+		NewFrameWriter(c).Exit(0)
+	}()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	if err := AskStep(context.Background(), sock, StepRequest{Pipeline: "p", Step: 1, ID: "i"}, r, func() {}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	read := make(chan error, 1)
+	go func() {
+		_, err := r.Read(make([]byte, 1))
+		read <- err
+	}()
+	select {
+	case err := <-read:
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("read after AskStep: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		w.Close() // ends the blocked read
+		t.Fatal("deadline of ch ignored after AskStep")
 	}
 }
 
