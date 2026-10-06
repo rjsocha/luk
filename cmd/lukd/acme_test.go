@@ -517,3 +517,34 @@ func TestACMEPruneOnlyCertificates(t *testing.T) {
 		t.Fatalf("victim removed: %v", err)
 	}
 }
+
+// Without <root>/acme, root still runs the acme commands as the owner of
+// root: it never creates or writes anything in a directory the service
+// user could put back as a symlink.
+func TestACMEAsOwnerWithoutCache(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root")
+	}
+	cfgPath, cfg := acmeCacheConfig(t)
+	if err := os.RemoveAll(filepath.Join(cfg.Root, "acme")); err != nil {
+		t.Fatal(err)
+	}
+	var gotUID uint32
+	called := false
+	geteuid, reexecAs = func() int { return 0 }, func(uid, gid uint32, groups []uint32) error {
+		called, gotUID = true, uid
+		return exitCode(0)
+	}
+	t.Cleanup(func() { geteuid, reexecAs = os.Geteuid, reexec })
+	for _, args := range [][]string{{"ls"}, {"renew", "--host", "a.example.com"}} {
+		called = false
+		_, err := runLukd(t, append(append([]string{"tls", "acme"}, args...), "-c", cfgPath)...)
+		var code exitCode
+		if !errors.As(err, &code) || code != 0 || !called || gotUID != uint32(os.Getuid()) {
+			t.Fatalf("%v: %v called %v uid %d", args, err, called, gotUID)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(cfg.Root, "acme")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("acme created as root: %v", err)
+	}
+}

@@ -4234,6 +4234,9 @@ tls acme must run as root or as <owner> (owner of <root>/acme)`. Both
 `lukd tls acme ...` as root and `runuser -u luk -- lukd tls acme ...` work.
 `<root>/acme` lies in a directory of the service user, so a symlink there
 is refused (`lukd tls acme: <root>/acme is a symlink`), never followed.
+While `<root>/acme` does not exist they run again as the owner of
+`<root>` instead: root never creates or writes a cache file itself in a
+directory the service user could replace meanwhile.
 
 - `lukd tls acme ls [--json]`: every certificate of every cache
   directory: name, the listeners using it per the current configuration

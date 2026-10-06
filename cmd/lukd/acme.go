@@ -52,15 +52,19 @@ func acmeCmd(cfgPath *string) *cobra.Command {
 		Long: "Certificates of the tls mode acme listeners, in the caches under <root>/acme/.\n" +
 			"The running receive role renews and swaps them itself; these commands talk to\n" +
 			"it only through files in the cache directories (no SIGHUP needed). Run as\n" +
-			"root they run again as the owner of <root>/acme (the service user).",
+			"root they run again as the owner of <root>/acme (the service user), or of\n" +
+			"<root> while <root>/acme does not exist.",
 		PersistentPreRunE: func(*cobra.Command, []string) error {
 			cfg, err := config.Load(*cfgPath)
 			if err != nil {
 				return err
 			}
+			// Without the cache yet, root still runs them as the owner of
+			// root: it must not create or write the cache itself, under
+			// a root the service user owns.
 			dir := filepath.Join(cfg.Root, "acme")
 			if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
-				return nil
+				dir = cfg.Root
 			}
 			return asOwner("lukd tls acme", dir)
 		},
