@@ -1699,6 +1699,9 @@ func TestCapabilityLists(t *testing.T) {
 		"link bool":                   {"    link: {replace: true}\n", `link.replace: a list of identities, e.g. ["*"]`},
 		"link scalar":                 {"    link: {list: robert.socha}\n", `link.list: a list of identities, e.g. ["*"]`},
 		"private bool":                {"    private: {owner: true}\n", `private.owner: a list of identities, e.g. ["*"]`},
+		"private list scalar":         {"    private: {list: robert.socha}\n", `private.list: a list of identities, e.g. ["*"]`},
+		"private list unknown key":    {"    private: {list: [nobody]}\n", `endpoint drop: private.list: allow "nobody" is not a known key`},
+		"private list bad pattern":    {"    private: {list: ['hosts:[']}\n", `endpoint drop: private.list: allow "hosts:[" has a bad pattern`},
 		"secret allow bool":           {"    secret: {path: /run/luk/volatile/queue, storage: volatile, allow: true}\n", `secret.allow: a list of identities, e.g. ["*"]`},
 		"secret unknown key":          {"    secret: {path: /run/luk/volatile/queue, storage: volatile, allow: [], extra: 1}\n", "field extra not found in secret"},
 		"pretty allow bool":           {"    pretty: {allow: true}\n", `pretty.allow: a list of identities, e.g. ["*"]`},
@@ -1781,6 +1784,20 @@ func TestPrivateConfig(t *testing.T) {
 	if c.Endpoint["backup"].Private.Offered() {
 		t.Fatal("backup accepts private uploads")
 	}
+	// private.list alone offers no private upload; empty is no one.
+	src := strings.Replace(privateGood, "private: {owner: ['*'], any: ['*']}", "private: {list: [robert.socha]}", 1)
+	if c, err := Parse([]byte(src)); err != nil {
+		t.Fatal(err)
+	} else if e := c.Endpoint["drop"]; e.Private.Offered() || !slices.Equal(e.Private.List, []string{"robert.socha"}) {
+		t.Fatalf("private list %+v", e.Private)
+	}
+	noProtect := strings.Replace(src, ", protect: secure}", "}", 1)
+	if _, err := Parse([]byte(noProtect)); err == nil || !strings.Contains(err.Error(), "private.list needs storage drop to have protect") {
+		t.Fatalf("private.list without protect: %v", err)
+	}
+	if _, err := Parse([]byte(strings.Replace(noProtect, "private: {list: [robert.socha]}", "private: {list: []}", 1))); err != nil {
+		t.Fatalf("empty private.list: %v", err)
+	}
 	base, l, ok := c.ProtectURL("drop")
 	if !ok || base != "luk://lukd.vm:8443/s/" || l.Name != "main" {
 		t.Fatalf("protect url %q %v %v", base, l, ok)
@@ -1794,6 +1811,7 @@ func TestPrivateConfig(t *testing.T) {
 	cases := map[string][3]string{
 		"private without respond url": {"    allow: [robert.socha, \"hosts:*\"]\n", "    allow: [robert.socha, \"hosts:*\"]\n    private: {owner: ['*']}\n", "private needs respond url"},
 		"private without protect":     {", protect: secure}", "}", "private needs storage drop to have protect"},
+		"list without respond url":    {"    allow: [robert.socha, \"hosts:*\"]\n", "    allow: [robert.socha, \"hosts:*\"]\n    private: {list: ['*']}\n", "private.list needs respond url"},
 		"protect unknown":             {"protect: secure}", "protect: nope}", "unknown protect expose"},
 		"protect without auth.ssh":    {"    auth: {ssh: {allow: [\"*\", robert.socha, \"hosts:*.vm\"]}}\n", "", "protect expose secure needs auth.ssh"},
 		"protect is expose":           {"expose: drop, protect: secure}", "expose: secure, protect: secure}", "expose and protect must differ"},

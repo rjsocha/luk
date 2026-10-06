@@ -761,6 +761,9 @@ type LinkEntry struct {
 	// and PermanentURL its permanent URL; empty for any other file.
 	Permanent    string `json:"permanent,omitempty"`
 	PermanentURL string `json:"permanent_url,omitempty"`
+	// Shared marks a file of access any another identity sent, listed to
+	// an identity of private.list: it may download it, not manage it.
+	Shared bool `json:"shared,omitempty"`
 }
 
 type ErrorResponse struct {

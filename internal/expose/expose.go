@@ -449,11 +449,18 @@ func (rt *route) permits(id *wire.Identity, sc store.Sidecar) bool {
 	if rt.signed {
 		return sc.Client.Access == "" && auth.Allowed(id, rt.allow)
 	}
+	return ProtectPermits(id, rt.allow, sc)
+}
+
+// ProtectPermits reports whether a protect expose with the auth.ssh allow
+// list serves the private file of sc to id: one of wire.AccessPrivate to
+// its owner, one of wire.AccessAny to every identity of allow.
+func ProtectPermits(id *wire.Identity, allow []string, sc store.Sidecar) bool {
 	switch sc.Client.Access {
 	case wire.AccessPrivate:
 		return sc.OwnerKey != "" && sc.OwnerKey == auth.OwnerKey(id)
 	case wire.AccessAny:
-		return auth.Allowed(id, rt.allow)
+		return auth.Allowed(id, allow)
 	}
 	return false
 }

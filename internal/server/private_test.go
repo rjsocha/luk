@@ -349,6 +349,88 @@ func TestPrivateLinks(t *testing.T) {
 	wantStatus(t, "removed", f.get(t, getReq{signer: f.user, link: link}), http.StatusNotFound)
 }
 
+// privateListFixture is the private fixture where /drop also offers link
+// ttl and replace, and private.list admits robert.socha only; mod rewrites
+// the config text further.
+func privateListFixture(t *testing.T, mod func(string) string) *privateFixture {
+	t.Helper()
+	return newPrivateFixture(t, func(s string) string {
+		s = strings.Replace(s, `private: {owner: ['*'], any: ['*']}, link: {remove: ['*'], list: ['*']}`,
+			`private: {owner: ['*'], any: ['*'], list: [robert.socha]}, link: {remove: ['*'], ttl: ['*'], replace: ['*'], list: ['*']}`, 1)
+		if mod != nil {
+			s = mod(s)
+		}
+		return s
+	})
+}
+
+// TestPrivateList: an identity of private.list gets the any files others
+// sent through the endpoint it may download, marked shared, besides its
+// own links; never the owner-only files of others, nor expired ones.
+func TestPrivateList(t *testing.T) {
+	f := privateListFixture(t, nil)
+	own := f.drop(t, f.user, wire.Meta{File: "own.txt", Access: wire.AccessAny}, "mine")
+	ownPublic := f.drop(t, f.user, wire.Meta{File: "pub.txt"}, "open")
+	theirs := f.drop(t, f.other, wire.Meta{File: "any.txt", Access: wire.AccessAny, Mutable: true}, "theirs")
+	f.drop(t, f.other, wire.Meta{File: "owner.txt", Access: wire.AccessPrivate}, "hidden")
+	f.drop(t, f.other, wire.Meta{File: "public.txt"}, "public")
+	expired := f.drop(t, f.other, wire.Meta{File: "old.txt", Access: wire.AccessAny, TTL: "1h"}, "old")
+	f.setSidecar(t, mustURL(t, expired).Path, func(sc *store.Sidecar) { sc.Expires = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339) })
+	f.settle(t)
+
+	a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList}))
+	got := map[string]wire.LinkEntry{}
+	for _, l := range a.Links {
+		got[l.URL] = l
+	}
+	if len(a.Links) != 3 || got[theirs].File != "any.txt" || !got[theirs].Shared || got[theirs].Access != wire.AccessAny {
+		t.Fatalf("list: %+v", a.Links)
+	}
+	if l, ok := got[own]; !ok || l.Shared {
+		t.Errorf("own any file: %+v", l)
+	}
+	if l, ok := got[ownPublic]; !ok || l.Shared {
+		t.Errorf("own public file: %+v", l)
+	}
+	if rec := f.link(t, linkReq{signer: f.user, action: wire.LinkList}); !strings.Contains(rec.Body.String(), `"shared": true`) {
+		t.Errorf("answer: %s", rec.Body)
+	}
+
+	// The shared entry stays read-only: no remove, ttl or replace.
+	m := wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}
+	wantNoLink(t, "remove shared", f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: theirs}))
+	wantNoLink(t, "ttl shared", f.link(t, linkReq{signer: f.user, action: wire.LinkTTL, link: theirs, ttl: "1d"}))
+	wantNoLink(t, "replace shared", f.link(t, linkReq{signer: f.user, action: wire.LinkReplace, link: theirs, meta: &m, body: []byte("new")}))
+	if rec := f.get(t, getReq{signer: f.other, link: theirs}); rec.Code != http.StatusOK || rec.Body.String() != "theirs" {
+		t.Fatalf("after: %d %q", rec.Code, rec.Body)
+	}
+
+	// Not on private.list: its own links only.
+	a = listAnswer(t, f.link(t, linkReq{signer: f.other, action: wire.LinkList}))
+	for _, l := range a.Links {
+		if l.Shared || l.URL == own || l.URL == ownPublic {
+			t.Errorf("other: %+v", l)
+		}
+	}
+	if len(a.Links) != 3 {
+		t.Errorf("other: %d links: %+v", len(a.Links), a.Links)
+	}
+}
+
+// TestPrivateListProtectAllow: an any file is listed to an identity of
+// private.list only when the protect expose admits it.
+func TestPrivateListProtectAllow(t *testing.T) {
+	f := privateListFixture(t, func(s string) string {
+		return strings.Replace(s, `auth: {ssh: {allow: ["*"]}}`, `auth: {ssh: {allow: [other]}}`, 1)
+	})
+	own := f.drop(t, f.user, wire.Meta{Access: wire.AccessAny}, "mine")
+	f.drop(t, f.other, wire.Meta{Access: wire.AccessAny}, "theirs")
+	f.settle(t)
+	if a := listAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkList})); len(a.Links) != 1 || a.Links[0].URL != own || a.Links[0].Shared {
+		t.Fatalf("list: %+v", a.Links)
+	}
+}
+
 func TestPrivateReplaceKeepsAccess(t *testing.T) {
 	f := newPrivateFixture(t, func(s string) string {
 		s = strings.Replace(s, `link: {remove: ['*'], list: ['*']}`, `link: {replace: ['*']}`, 1)

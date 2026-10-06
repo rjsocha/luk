@@ -610,6 +610,7 @@ list of entries in the `allow` syntax (key names, `<ca>:<glob>`,
 | `link.remove`, `link.ttl`, `link.list` | the link action (see Links) |
 | `link.replace` | the link action `replace` and `--mutable` uploads |
 | `private.owner`, `private.any` | `--private` and `--private --any` uploads (see Private files) |
+| `private.list` | the files of access `any` of others in the link `list`, read-only (see Private files) |
 | `secret.allow` | `--secret` uploads into the volatile storage (see Volatile secrets) |
 | `pretty.allow` | `--pretty-url` (see `endpoint.<n>.pretty`) |
 | `backup.hostname.any`, `backup.hostname.principal` | which `backup.hostname` (`--backup`) the signer may send (below) |
@@ -1387,7 +1388,7 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   the request and `owner_key` equal to the signer's, not expired; claimed
   (`once`) files and aliases are not listed. 200 `{"links": [{"url",
   "file", "size", "received", "expires", "once", "mutable", "portal",
-  "access", "updated", "permanent", "permanent_url"}, ...]}`, newest first (by acceptance order, see Acceptance order; `file`,
+  "access", "updated", "permanent", "permanent_url", "shared"}, ...]}`, newest first (by acceptance order, see Acceptance order; `file`,
   `expires`, `access` and `updated` omitted when empty, `links` is `[]`
   for none). The current version of a permanent name the endpoint
   allocates (the one `current/meta.json` names) has `permanent` (the
@@ -1396,6 +1397,15 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   upload answered it (see Private files). At most 10000
   entries: the newest, with `"truncated": true`. Sidecars that cannot be
   read are left out and logged. Logged as `link list`.
+  A signer `private.list` admits (see Private files) also gets, in the
+  same walk and order, the files of access `any` other identities sent
+  through the endpoint that the protect expose of the storage serves it
+  (its `auth.ssh.allow` admits the signer), not expired; these have
+  `"shared": true` (omitted for the signer's own links) and no
+  `permanent`. `link.list` is still needed. A shared entry stays
+  read-only: `remove`, `ttl` and `replace` of it are 404 `link not
+  found`, as for any link of another owner. Files of access `private`
+  of others are never listed.
 
 Other statuses: an unknown `Luk-Link-Action`, or a remove, ttl or replace
 without `Luk-Link` (or `Luk-Link` without an action), is 400; a `list`
@@ -1605,6 +1615,7 @@ endpoint:
     respond: url
     storage: drop
     private: {owner: ["*"], any: ["*"]}  # who may send which mode
+    # private: {owner: ["*"], any: ["*"], list: [robert.socha]}  # + who lists the any files of others
 
 storage:
   drop:
@@ -1628,6 +1639,16 @@ expose:
   granted to the signer is refused with 422 before the body (`endpoint
   <n> does not accept private uploads of access <mode>
   (private.owner|any)`), also when the list names others.
+- `endpoint.<n>.private.list` (a list of identities, see Capabilities;
+  absent or `[]` is no one): who gets, in `luk link ls` (link `list`, see
+  Links), besides its own links the files of access `any` other
+  identities sent through the endpoint that it may download (the
+  protect expose admits it, the same check as for `luk get`), not
+  expired, marked `shared` and read-only: their link actions stay
+  refused (404). Files of access `private` of others are never listed.
+  It grants no upload; a non-empty list needs `respond: url` and a
+  respond storage with `protect` (`endpoint <n>: private.list needs
+  respond url`, `... private.list needs storage <s> to have protect`).
 - `storage.<n>.protect` (local storages only): the expose that serves the
   private files of the storage. That expose must have `auth.ssh` and no
   `auth.basic` (`expose <n>: auth.basic on a protect expose`: a password
@@ -2368,7 +2389,7 @@ and `ssh.d/ca/`):
 - `respond: url` requires `storage`, and that storage must be exposed;
 - a storage with `shard` is not the `expose` of an expose with `index`;
 - the capability lists (`link.remove`, `link.ttl`, `link.replace`,
-  `link.list`, `private.owner`, `private.any`, `secret.allow`,
+  `link.list`, `private.owner`, `private.any`, `private.list`, `secret.allow`,
   `pretty.allow`, `backup.hostname.any`, `backup.hostname.principal`) are lists whose entries are those of an endpoint
   `allow` (known key names and CAs, valid globs); a boolean or other
   scalar is an error naming the key; `secret.allow` and `pretty.allow`
@@ -5073,8 +5094,9 @@ the config`, exit 1), signed with the key chosen as for `send`. Output:
 aligned columns `NAME` (the file name sent, `-` without one), `SIZE`
 (binary units: `512 B`, `1.5 KiB`), `SENT` and `EXPIRES` (local time
 `2006-01-02 15:04`; `never` without an expiry), `FLAGS` (`once`, `mutable`,
-then `reveal` or `download`, then `private` or `any`, then `permanent`,
-comma separated; `-` for none) and `URL` (the `luk://` URL of a private
+then `reveal` or `download`, then `private` or `any`, then `shared` (a
+file of another identity listed through `private.list`, read-only), then
+`permanent`, comma separated; `-` for none) and `URL` (the `luk://` URL of a private
 file), newest first, under a header line; nothing at all for no links
 (exit 0). The current version of a permanent name is a row of its own
 with the flag `permanent` and its version URL, which is unique. After
@@ -5117,8 +5139,10 @@ permanent example.txt
 `links` (newest first): `name` (omitted without one), `size`, `sent`
 and `expires` (RFC 3339 as the server sends them; `expires` omitted
 without an expiry), `updated` (the last replace, omitted when none),
-`flags` (as the `FLAGS` column, `[]` for none), `url`, and `permanent`
-(the name the link is the current version of; omitted otherwise).
+`flags` (as the `FLAGS` column, `[]` for none), `url`, `permanent`
+(the name the link is the current version of; omitted otherwise), and
+`shared` (`true` for a read-only file of another identity listed through
+`private.list`; omitted for an own link).
 `permanent` (by name): `name`, `url` (the permanent URL) and
 `version_url` (the `url` of its link). Both arrays are always present,
 `[]` when empty; `"truncated": true` marks a list cut at 10000 links. A

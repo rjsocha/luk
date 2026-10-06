@@ -538,6 +538,29 @@ func TestPrintLinks(t *testing.T) {
 	}
 }
 
+// A shared link (private.list) is marked by the flag shared and, in the
+// JSON, "shared": true; an own link has no shared key.
+func TestPrintLinksShared(t *testing.T) {
+	ls := newLinkList(&wire.LinkListAnswer{Links: []wire.LinkEntry{
+		{URL: "luk://s.example/a", File: "a", Size: 1, Received: "2026-10-01T10:00:00Z", Access: wire.AccessAny, Shared: true},
+		{URL: "luk://s.example/b", File: "b", Size: 1, Received: "2026-10-01T09:00:00Z", Access: wire.AccessAny},
+	}})
+	var b strings.Builder
+	err := printLinks(&b, ls, time.UTC)
+	want := "NAME  SIZE  SENT              EXPIRES  FLAGS       URL\n" +
+		"a     1 B   2026-10-01 10:00  never    any,shared  luk://s.example/a\n" +
+		"b     1 B   2026-10-01 09:00  never    any         luk://s.example/b\n"
+	if err != nil || b.String() != want {
+		t.Fatalf("%v\n%s", err, b.String())
+	}
+	j, err := json.Marshal(ls)
+	want = `{"links":[{"name":"a","size":1,"sent":"2026-10-01T10:00:00Z","flags":["any","shared"],"url":"luk://s.example/a","shared":true},` +
+		`{"name":"b","size":1,"sent":"2026-10-01T09:00:00Z","flags":["any"],"url":"luk://s.example/b"}],"permanent":[]}`
+	if err != nil || string(j) != want {
+		t.Fatalf("%v\n%s", err, j)
+	}
+}
+
 // The columns of luk link ls escape the control characters a server sends.
 func TestPrintLinksEscapes(t *testing.T) {
 	var b strings.Builder

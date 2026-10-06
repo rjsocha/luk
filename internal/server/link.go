@@ -14,6 +14,7 @@ import (
 
 	"luk/internal/auth"
 	"luk/internal/config"
+	"luk/internal/expose"
 	"luk/internal/pipeline"
 	"luk/internal/queue"
 	"luk/internal/store"
@@ -278,7 +279,9 @@ var maxLinkList = wire.MaxLinkList
 
 // linkList answers the links of id on ep: the files of the respond
 // storage of ep, and of its secret storage, uploaded through ep by id, not
-// expired; claimed once files are out of the data tree. Newest first, at
+// expired; claimed once files are out of the data tree. An identity of
+// private.list also gets the files of access any others uploaded through
+// ep that the protect expose serves it, marked shared. Newest first, at
 // most maxLinkList.
 func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Identity, now time.Time) (int, any, error) {
 	storages := []string{ep.Storage}
@@ -312,8 +315,17 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 				}
 			}
 		}
+		// The protect allow of the storage, when id may see the any files
+		// of others (private.list).
+		var allow []string
+		share := false
+		if x := cfg.Expose[st.Protect]; st.Protect != "" && x != nil && x.Auth.SSH != nil && auth.Allowed(id, ep.Private.List) {
+			allow, share = x.Auth.SSH.Allow, true
+		}
 		err := l.Walk(func(rel string, sc store.Sidecar) error {
-			if sc.AliasOf != "" || sc.Endpoint != ep.Name || sc.OwnerKey == "" || sc.OwnerKey != key || expiredAt(sc.Expires, now) {
+			own := sc.OwnerKey != "" && sc.OwnerKey == key
+			shared := !own && share && sc.Client.Access == wire.AccessAny && expose.ProtectPermits(id, allow, sc)
+			if sc.AliasOf != "" || sc.Endpoint != ep.Name || !own && !shared || expiredAt(sc.Expires, now) {
 				return nil
 			}
 			u, ok := s.fileURL(cfg, sn, rel, sc.Client.Access)
@@ -323,8 +335,9 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 			e := wire.LinkEntry{
 				URL: u, File: sc.Client.File, Size: sc.Size, Received: sc.Received, Expires: sc.Expires,
 				Once: sc.Client.Once, Mutable: sc.Client.Mutable, Portal: sc.Client.Portal, Access: sc.Client.Access, Updated: sc.Updated,
+				Shared: shared,
 			}
-			if p := ep.Permanent; p != nil && sn == ep.Storage && sc.Client.Permanent != "" && sc.PermanentPath == p.Path {
+			if p := ep.Permanent; p != nil && own && sn == ep.Storage && sc.Client.Permanent != "" && sc.PermanentPath == p.Path {
 				cur := current[p.Path+"/"+sc.Client.Permanent]
 				if _, _, ok := p.Entry(sc.Client.Permanent); ok && cur.Current == rel && cur.ID == sc.ID {
 					e.Permanent = sc.Client.Permanent

@@ -676,15 +676,19 @@ func decodeCapabilities(n *yaml.Node, block string, known, lists []string, out a
 
 // Private is who may send which private uploads to an endpoint: Owner
 // those only the owner downloads (wire.AccessPrivate), Any those every
-// identity the protect expose allows downloads (wire.AccessAny).
+// identity the protect expose allows downloads (wire.AccessAny). List is
+// who also gets, in a link list, the files of access any others sent
+// through the endpoint that it may download, read-only.
 type Private struct {
 	Owner Identities `yaml:"owner"`
 	Any   Identities `yaml:"any"`
+	List  Identities `yaml:"list"`
 }
 
 func (p *Private) UnmarshalYAML(n *yaml.Node) error {
 	type raw Private
-	return decodeCapabilities(n, "private", []string{"owner", "any"}, []string{"owner", "any"}, (*raw)(p))
+	keys := []string{"owner", "any", "list"}
+	return decodeCapabilities(n, "private", keys, keys, (*raw)(p))
 }
 
 // Offered reports whether any identity may send private uploads.
@@ -1494,7 +1498,7 @@ func (c *Config) validate() []error {
 			who Identities
 		}{
 			{"link.remove", e.Link.Remove}, {"link.ttl", e.Link.TTL}, {"link.replace", e.Link.Replace}, {"link.list", e.Link.List},
-			{"private.owner", e.Private.Owner}, {"private.any", e.Private.Any},
+			{"private.owner", e.Private.Owner}, {"private.any", e.Private.Any}, {"private.list", e.Private.List},
 			{"backup.hostname.any", bh.Any}, {"backup.hostname.principal", bh.Principal},
 		} {
 			checkAllow(bad, "endpoint "+name+": "+c.key, c.who, names, cas)
@@ -1502,11 +1506,15 @@ func (c *Config) validate() []error {
 		if e.Link.Offered() && e.Respond != "url" {
 			bad("endpoint %s: link needs respond url", name)
 		}
-		if e.Private.Offered() {
+		if e.Private.Offered() || len(e.Private.List) > 0 {
+			key := "private"
+			if !e.Private.Offered() {
+				key = "private.list"
+			}
 			if e.Respond != "url" {
-				bad("endpoint %s: private needs respond url", name)
+				bad("endpoint %s: %s needs respond url", name, key)
 			} else if st, ok := c.Storage[e.Storage]; ok && st.Protect == "" {
-				bad("endpoint %s: private needs storage %s to have protect", name, e.Storage)
+				bad("endpoint %s: %s needs storage %s to have protect", name, key, e.Storage)
 			}
 		}
 		if sc := e.Secret; sc != nil {

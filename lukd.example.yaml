@@ -138,6 +138,7 @@ endpoint:
     # private:                  # private uploads; the storage needs protect
     #   owner: ["*"]            # luk send --private: only the uploader downloads it
     #   any: [robert.socha]     # luk send --private --any: every identity the protect expose allows
+    #   list: [robert.socha]    # luk link ls also shows the any files of others it may download (read-only)
     # secret:                   # luk send --secret kept in RAM: its own queue and storage,
     #                           # no pipeline of the endpoint runs for it
     #   allow: ["*"]            # required: whose --secret goes here; anyone else's is an

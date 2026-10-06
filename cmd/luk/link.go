@@ -173,15 +173,18 @@ in lukd). The request goes to --endpoint, else to the default endpoint.
 
 Columns: NAME (the file name sent, - without one), SIZE, SENT and EXPIRES in
 local time (never: no expiry), FLAGS (once, mutable, reveal or download,
-private or any, permanent) and URL (luk:// for a private file); newest
-first. Nothing is printed when there is no link. The current version of a
+private or any, shared, permanent) and URL (luk:// for a private file);
+newest first. An identity of private.list in lukd also gets the files of
+access any others sent that it may download, with the flag shared:
+read-only, link --rm, --ttl and --file refuse them. Nothing is printed when there is no link. The current version of a
 permanent name (luk send --permanent) is a link of its own with the flag
 permanent; after the table a block per permanent name, by name:
 "permanent NAME", its permanent URL ("url") and the URL of its current
 version ("version", as in the table).
 
 --json prints one object: "links" (name, size, sent, expires, updated,
-flags, url, and permanent: the name a link is the current version of) and
+flags, url, permanent: the name a link is the current version of, and
+shared: true for a file of another identity) and
 "permanent" (name, url, version_url: the url of its link), both always
 present; a list cut at 10000 links has "truncated": true, noted on stderr
 otherwise.`,
@@ -247,6 +250,9 @@ type linkItem struct {
 	URL     string   `json:"url"`
 	// Permanent is the permanent name the link is the current version of.
 	Permanent string `json:"permanent,omitempty"`
+	// Shared: a file of access any of another identity (private.list),
+	// read-only.
+	Shared bool `json:"shared,omitempty"`
 }
 
 type permanentItem struct {
@@ -274,6 +280,10 @@ func newLinkList(a *wire.LinkListAnswer) linkList {
 		}
 		if l.Access != "" {
 			it.Flags = append(it.Flags, l.Access)
+		}
+		if l.Shared {
+			it.Flags = append(it.Flags, "shared")
+			it.Shared = true
 		}
 		if k := [2]string{l.Permanent, l.PermanentURL}; l.Permanent != "" && !seen[k] {
 			// The links come newest first.
