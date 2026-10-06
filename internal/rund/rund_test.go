@@ -2,27 +2,27 @@ package rund
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"os"
-	"os/user"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"luk/internal/config"
+	"luk/internal/jobchan"
 	"luk/internal/runproto"
-	"luk/internal/runstep"
-	"luk/internal/wire"
+	"luk/internal/workspace"
 )
 
 var me = uint32(os.Getuid())
@@ -51,7 +51,7 @@ env:
 func TestLoadGlobal(t *testing.T) {
 	d := t.TempDir()
 	g, err := LoadGlobal(filepath.Join(d, "missing.conf"), me)
-	if err != nil || g.Root != "/var/lib/luk" || g.Peer != "" {
+	if err != nil || g.Root != "/var/lib/luk" {
 		t.Fatalf("%+v %v", g, err)
 	}
 	p := filepath.Join(d, "run.yaml")
@@ -62,9 +62,6 @@ func TestLoadGlobal(t *testing.T) {
 	write(t, p, "root: "+d+"\nconfig: "+d+"/lukd/../lukd/config.yaml\n", 0o600)
 	if g, err = LoadGlobal(p, me); err != nil || g.Root != d || g.Config != d+"/lukd/config.yaml" {
 		t.Fatalf("%+v %v", g, err)
-	}
-	if uid, err := g.PeerUID(); err != nil || uid != me {
-		t.Fatalf("peer %d %v", uid, err)
 	}
 	for name, c := range map[string]struct {
 		data string
@@ -209,6 +206,7 @@ func TestLoadGlobalLimits(t *testing.T) {
 		"limits:\n  units:\n    max: 0\n":  "limits.units.max: at least 1",
 		"limits:\n  units:\n    max: -2\n": "limits.units.max: at least 1",
 		"limits:\n  units:\n    min: 1\n":  "field min not found",
+		"peer: luk\n":                      "field peer not found",
 	} {
 		write(t, p, body, 0o600)
 		if _, err := LoadGlobal(p, me); err == nil || !strings.Contains(err.Error(), want) {
@@ -414,62 +412,6 @@ func TestArgvRefusesPaths(t *testing.T) {
 	}
 }
 
-func TestVerifyWork(t *testing.T) {
-	top := t.TempDir()
-	root := filepath.Join(top, "root")
-	w := filepath.Join(root, "work", id1, "p", "1")
-	os.MkdirAll(w, 0o750)
-	_, ino, err := CheckWork(root, w, me)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := VerifyWork(root, w, ino); err != nil {
-		t.Fatal(err)
-	}
-	if err := VerifyWork(root, w, Inode{ino.Dev, ino.Ino + 1}); err == nil || !strings.Contains(err.Error(), "not the checked") {
-		t.Fatalf("other inode: %v", err)
-	}
-	// A copy at the same path is another directory.
-	other := filepath.Join(top, "other")
-	os.MkdirAll(filepath.Join(other, "p", "1"), 0o750)
-	id := filepath.Join(root, "work", id1)
-	os.Rename(id, filepath.Join(top, "real"))
-	os.Rename(other, id)
-	if err := VerifyWork(root, w, ino); err == nil || !strings.Contains(err.Error(), "not the checked") {
-		t.Fatalf("swapped: %v", err)
-	}
-	// A symlink to the very directory is refused as well.
-	os.RemoveAll(id)
-	os.Symlink(filepath.Join(top, "real"), id)
-	if err := VerifyWork(root, w, ino); err == nil || !strings.Contains(err.Error(), "not a directory") {
-		t.Fatalf("symlinked id: %v", err)
-	}
-	os.Remove(id)
-	os.Rename(filepath.Join(top, "real"), id)
-	os.Rename(filepath.Join(root, "work"), filepath.Join(top, "realwork"))
-	os.Symlink(filepath.Join(top, "realwork"), filepath.Join(root, "work"))
-	if err := VerifyWork(root, w, ino); err == nil || !strings.Contains(err.Error(), "not a directory") {
-		t.Fatalf("symlinked work: %v", err)
-	}
-	// root itself may be a symlink, as in CheckWork.
-	os.Remove(filepath.Join(root, "work"))
-	os.Rename(filepath.Join(top, "realwork"), filepath.Join(root, "work"))
-	alias := filepath.Join(top, "alias")
-	os.Symlink(root, alias)
-	if err := VerifyWork(alias, filepath.Join(alias, "work", id1, "p", "1"), ino); err != nil {
-		t.Fatal(err)
-	}
-	if err := VerifyWork(root, "/etc", ino); err == nil {
-		t.Fatal("outside accepted")
-	}
-	// Without any permission but search on the directories.
-	os.Chmod(w, 0)
-	defer os.Chmod(w, 0o750)
-	if err := VerifyWork(root, w, ino); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestDynamicUser(t *testing.T) {
 	valid := regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 	seen := map[string]string{}
@@ -501,104 +443,6 @@ func TestDynamicUser(t *testing.T) {
 // id1 is a queue entry id.
 const id1 = "20261004T101500Z-0123abcd"
 
-func TestCheckWork(t *testing.T) {
-	top := t.TempDir()
-	root := filepath.Join(top, "root")
-	w := filepath.Join(root, "work", id1, "p", "1")
-	os.MkdirAll(w, 0o750)
-	outside := filepath.Join(top, "outside")
-	os.MkdirAll(filepath.Join(outside, id1, "p", "1"), 0o750)
-	os.Symlink(outside, filepath.Join(root, "work", id1, "esc"))
-	os.MkdirAll(filepath.Join(outside, "q", "1"), 0o750)
-	os.Symlink(filepath.Join(outside, "q"), filepath.Join(root, "work", id1, "q"))
-	os.MkdirAll(filepath.Join(root, "work", id1, "r"), 0o750)
-	os.Symlink(w, filepath.Join(root, "work", id1, "r", "1"))
-	write(t, filepath.Join(w, "file"), "x", 0o600)
-	write(t, filepath.Join(root, "work", id1, "p", "2"), "x", 0o600)
-	syscall.Mkfifo(filepath.Join(root, "work", id1, "p", "3"), 0o600)
-	alias := filepath.Join(top, "alias")
-	os.Symlink(root, alias)
-
-	// root (run.yaml) may be a symlink; nothing below it may.
-	aw := filepath.Join(alias, "work", id1, "p", "1")
-	if p, _, err := CheckWork(alias, aw, me); err != nil || p != "p" {
-		t.Fatalf("%q %v", p, err)
-	}
-	if p, _, err := CheckWork(root, w, me); err != nil || p != "p" {
-		t.Fatalf("%q %v", p, err)
-	}
-	for _, d := range []string{"p/1/x", "p/01", "p/0", "p/a", ".p/1", "-p/1", "p\x01/1"} {
-		os.MkdirAll(filepath.Join(root, "work", id1, d), 0o750)
-	}
-	for name, c := range map[string]struct {
-		work string
-		uid  uint32
-		want string
-	}{
-		"relative":       {"work/id1", me, "not absolute"},
-		"outside":        {outside, me, "not under"},
-		"other root":     {aw, me, "not under"},
-		"work itself":    {filepath.Join(root, "work"), me, "not under"},
-		"dotdot":         {w + "/../../../../../outside", me, "not clean"},
-		"dotdot inside":  {filepath.Join(root, "work", id1) + "/../" + id1 + "/p/1", me, "not clean"},
-		"trailing slash": {w + "/", me, "not clean"},
-		"double slash":   {filepath.Join(root, "work") + "//" + id1 + "/p/1", me, "not clean"},
-		"symlinked step": {filepath.Join(root, "work", id1, "r", "1"), me, "not a directory"},
-		"symlinked pipe": {filepath.Join(root, "work", id1, "q", "1"), me, "not a directory"},
-		"missing":        {filepath.Join(root, "work", id1, "p", "9"), me, "no such file"},
-		"file":           {filepath.Join(root, "work", id1, "p", "2"), me, "not a directory"},
-		"fifo":           {filepath.Join(root, "work", id1, "p", "3"), me, "not a directory"},
-		"owner":          {w, me + 1, "owned by"},
-		"no step":        {filepath.Join(root, "work", id1, "p"), me, "not a step work directory"},
-		"deeper":         {filepath.Join(root, "work", id1, "p", "1", "x"), me, "not a step work directory"},
-		"zero pad":       {filepath.Join(root, "work", id1, "p", "01"), me, "not a step work directory"},
-		"step 0":         {filepath.Join(root, "work", id1, "p", "0"), me, "not a step work directory"},
-		"named step":     {filepath.Join(root, "work", id1, "p", "a"), me, "not a step work directory"},
-		"dot":            {filepath.Join(root, "work", id1, ".p", "1"), me, "not a step work directory"},
-		"dash":           {filepath.Join(root, "work", id1, "-p", "1"), me, "not a step work directory"},
-		"control":        {filepath.Join(root, "work", id1, "p\x01", "1"), me, "control character"},
-	} {
-		if _, _, err := CheckWork(root, c.work, c.uid); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%s: %v, want %q", name, err, c.want)
-		}
-	}
-	// A symlinked <root>/work (luk owns it) is refused as well.
-	os.Rename(filepath.Join(root, "work"), filepath.Join(top, "realwork"))
-	os.Symlink(filepath.Join(top, "realwork"), filepath.Join(root, "work"))
-	if _, _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a directory") {
-		t.Errorf("symlinked work: %v", err)
-	}
-}
-
-// A refused work directory gets one answer whatever the reason, so the
-// peer learns nothing about paths root can see; the reason goes to the
-// journal.
-func TestServeWorkRefusalIsGeneric(t *testing.T) {
-	e := newEnv(t)
-	var logs strings.Builder
-	var mu sync.Mutex
-	e.srv.Log = slog.New(slog.NewTextHandler(lockedWriter{&mu, &logs}, nil))
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
-		t.Error("job ran")
-		return 0, nil
-	}
-	cwd, _ := os.Getwd()
-	for _, w := range []string{
-		"/etc/passwd/x", "/etc/nonexistent-xyz/x", "/proc/self/cwd/nonexistent-xyz", cwd,
-		filepath.Join(filepath.Dir(e.work), "9"), e.work + "/", "relative",
-	} {
-		fs, err := e.exchange(t, string(runproto.Request{Job: "s3-upload", Work: w}.Encode()))
-		if err == nil || len(fs) != 2 || fs[0] != (frame{'e', "lukd run: work directory refused\n"}) || fs[1] != (frame{'x', "1"}) {
-			t.Errorf("%q: %v %q", w, err, fs)
-		}
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if !strings.Contains(logs.String(), "not under") || !strings.Contains(logs.String(), "no such file") {
-		t.Fatalf("journal: %s", logs.String())
-	}
-}
-
 type lockedWriter struct {
 	mu *sync.Mutex
 	w  io.Writer
@@ -610,22 +454,48 @@ func (l lockedWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
+// fakeRunner records every argv it runs. The create and remove helpers
+// (workspace.HelperArgv) exit with createExit and removeExit (remove,
+// when set, decides instead), a unit runs run.
 type fakeRunner struct {
-	mu      sync.Mutex
-	argv    []string
-	stopped []string
-	run     func(ctx context.Context, stdout, stderr io.Writer) (int, error)
+	mu         sync.Mutex
+	runs       [][]string
+	stdin      []*os.File
+	stopped    []string
+	createExit int
+	removeExit int
+	remove     func(unit string) int
+	run        func(ctx context.Context, stdout, stderr io.Writer) (int, error)
 	// stop and active, when set, answer Stop and Active; a unit is
 	// inactive without active.
 	stop   func(unit string) error
 	active func(unit string) (bool, error)
 }
 
-func (f *fakeRunner) Run(ctx context.Context, argv []string, stdout, stderr io.Writer) (int, error) {
+// helperAction is the action of the helper argv a, empty for a unit.
+func helperAction(a []string) string {
+	if n := len(a); n >= 3 && a[n-3] == "workspace" {
+		return a[n-2]
+	}
+	return ""
+}
+
+func (f *fakeRunner) Run(ctx context.Context, argv []string, stdin *os.File, stdout, stderr io.Writer) (int, error) {
 	f.mu.Lock()
-	f.argv = argv
+	f.runs = append(f.runs, argv)
+	f.stdin = append(f.stdin, stdin)
+	run, remove := f.run, f.remove
 	f.mu.Unlock()
-	return f.run(ctx, stdout, stderr)
+	switch helperAction(argv) {
+	case "create":
+		return f.createExit, nil
+	case "remove":
+		if remove != nil {
+			return remove(argv[len(argv)-1]), nil
+		}
+		return f.removeExit, nil
+	}
+	return run(ctx, stdout, stderr)
 }
 
 func (f *fakeRunner) Stop(unit string) error {
@@ -645,22 +515,65 @@ func (f *fakeRunner) Active(unit string) (bool, error) {
 	return false, nil
 }
 
-type env struct {
-	srv  *Server
-	work string
-	fr   *fakeRunner
-	peer uint32
+// argvs is every argv run so far.
+func (f *fakeRunner) argvs() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.runs)
 }
 
-// envConfig is the lukd configuration of newEnv: pipeline p may start
-// s3-upload, state and quick, offsite relays to s3-upload.
+// units is the argv of every unit run so far.
+func (f *fakeRunner) units() [][]string {
+	var us [][]string
+	for _, a := range f.argvs() {
+		if helperAction(a) == "" {
+			us = append(us, a)
+		}
+	}
+	return us
+}
+
+func (f *fakeRunner) unitRuns() int { return len(f.units()) }
+
+// unitArgv is the argv of the last unit run.
+func (f *fakeRunner) unitArgv() []string {
+	us := f.units()
+	if len(us) == 0 {
+		return nil
+	}
+	return us[len(us)-1]
+}
+
+// unitName is the --unit= of argv.
+func unitName(argv []string) string {
+	for _, a := range argv {
+		if u, ok := strings.CutPrefix(a, "--unit="); ok {
+			return u
+		}
+	}
+	return ""
+}
+
+type env struct {
+	srv  *Server
+	fr   *fakeRunner
+	peer uint32
+	// root is the root of run.yaml, conf the lukd configuration.
+	root, conf string
+}
+
+// envConfig is the lukd configuration of newEnv: step 1 of p runs a
+// program that may ask for s3-upload and state, step 2 runs s3-upload,
+// step 3 relays to state, step 4 stores.
 const envConfig = `pipeline:
   p:
+    timeout: 30m
     steps:
       - run: /opt/luk/p
-        jobs: [s3-upload, state, quick]
-  offsite:
-    steps: [{relay: s3-upload}]
+        jobs: [s3-upload, state]
+      - run: {job: s3-upload}
+      - relay: state
+      - store: a
 `
 
 func newEnv(t *testing.T) *env {
@@ -668,8 +581,11 @@ func newEnv(t *testing.T) *env {
 	top := t.TempDir()
 	os.Chmod(top, 0o700)
 	root := filepath.Join(top, "root")
-	w := filepath.Join(root, "work", id1, "p", "1")
-	writeWork(t, w, workMeta(id1, "p", 1), "db.sql")
+	for _, d := range []string{root, filepath.Join(root, "data"), filepath.Join(root, "root"), filepath.Join(top, "locks")} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	jobs := filepath.Join(top, "run.d")
 	os.Mkdir(jobs, 0o755)
 	write(t, filepath.Join(jobs, "s3-upload.yaml"), s3Job, 0o600)
@@ -677,13 +593,16 @@ func newEnv(t *testing.T) *env {
 	write(t, filepath.Join(jobs, "state.yaml"), "command: /opt/luk/state\nstate: locked\n", 0o600)
 	lukd := filepath.Join(top, "lukd")
 	os.Mkdir(lukd, 0o750)
-	write(t, filepath.Join(lukd, "config.yaml"), envConfig, 0o640)
-	conf := filepath.Join(top, "run.yaml")
-	write(t, conf, "root: "+root+"\nconfig: "+filepath.Join(lukd, "config.yaml")+"\n", 0o600)
-	e := &env{work: w, fr: &fakeRunner{}, peer: me}
+	conf := filepath.Join(lukd, "config.yaml")
+	write(t, conf, envConfig, 0o640)
+	run := filepath.Join(top, "run.yaml")
+	write(t, run, "root: "+root+"\nconfig: "+conf+"\n", 0o600)
+	e := &env{peer: me, root: root, conf: conf, fr: &fakeRunner{
+		run: func(context.Context, io.Writer, io.Writer) (int, error) { return 0, nil },
+	}}
 	e.srv = &Server{
-		Config: conf, Jobs: jobs, Locks: filepath.Join(top, "locks"), Owner: me, Top: top,
-		Checker: "/usr/bin/lukd",
+		Config: run, Jobs: jobs, Locks: filepath.Join(top, "locks"), Owner: me, Top: top,
+		Lukd:    "/usr/bin/lukd",
 		PeerUID: func() (uint32, error) { return e.peer, nil },
 		Runner:  e.fr,
 		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -691,74 +610,452 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
+// unixPair is a connected SOCK_STREAM pair.
+func unixPair(t *testing.T) (*net.UnixConn, *net.UnixConn) {
+	t.Helper()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c [2]*net.UnixConn
+	for i, fd := range fds {
+		f := os.NewFile(uintptr(fd), "pair")
+		fc, err := net.FileConn(f)
+		f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c[i] = fc.(*net.UnixConn)
+		t.Cleanup(func() { c[i].Close() })
+	}
+	return c[0], c[1]
+}
+
+// sendRaw serves one connection and sends line on it, with the remote end
+// of a channel attached when withChannel; the client end is returned
+// open.
+func (e *env) sendRaw(t *testing.T, line []byte, withChannel bool) (*net.UnixConn, chan error) {
+	t.Helper()
+	srv, cli := unixPair(t)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- e.srv.Serve(srv)
+		srv.Close()
+	}()
+	var oob []byte
+	if withChannel {
+		local, remote, err := jobchan.Pair()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { local.Close() })
+		defer remote.Close()
+		oob = unix.UnixRights(int(remote.Fd()))
+	}
+	if len(line) > 0 {
+		if _, _, err := cli.WriteMsgUnix(line, oob, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return cli, errc
+}
+
+// start serves req, with a channel, on a new connection; the client end
+// is returned open.
+func (e *env) start(t *testing.T, req runproto.StepRequest) (*net.UnixConn, chan error) {
+	return e.sendRaw(t, req.Encode(), true)
+}
+
 type frame struct {
 	typ byte
 	p   string
 }
 
-// exchange serves one connection and returns the frames the client read.
-func (e *env) exchange(t *testing.T, req string) ([]frame, error) {
-	t.Helper()
-	c, s := net.Pipe()
-	errc := make(chan error, 1)
-	go func() {
-		errc <- e.srv.Serve(s)
-		s.Close()
-	}()
-	go io.WriteString(c, req)
+// frames reads the frames of c up to the exit frame or the end.
+func frames(c net.Conn) []frame {
 	var fs []frame
 	for {
 		typ, p, err := runproto.ReadFrame(c)
 		if err != nil {
-			break
+			return fs
 		}
 		fs = append(fs, frame{typ, string(p)})
 		if typ == runproto.Exit {
-			break
+			return fs
 		}
 	}
-	c.Close()
-	return fs, <-errc
 }
 
-func TestServeRuns(t *testing.T) {
-	e := newEnv(t)
-	e.fr.run = func(_ context.Context, stdout, stderr io.Writer) (int, error) {
-		io.WriteString(stdout, "uploaded\n")
-		io.WriteString(stderr, "warning\n")
-		return 3, nil
+// exchange serves one request and returns the frames the client read
+// and the error of Serve.
+func (e *env) exchange(t *testing.T, req runproto.StepRequest, withChannel bool) ([]frame, error) {
+	t.Helper()
+	return e.exchangeRaw(t, req.Encode(), withChannel)
+}
+
+func (e *env) exchangeRaw(t *testing.T, line []byte, withChannel bool) ([]frame, error) {
+	t.Helper()
+	c, errc := e.sendRaw(t, line, withChannel)
+	fs := frames(c)
+	c.Close()
+	return fs, ends(t, "exchange", errc, 10*time.Second)
+}
+
+// waitFrame reads c up to a frame of typ.
+func waitFrame(t *testing.T, c net.Conn, typ byte) {
+	t.Helper()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+	for {
+		got, _, err := runproto.ReadFrame(c)
+		if err != nil {
+			t.Fatalf("waiting for %q: %v", typ, err)
+		}
+		if got == typ {
+			return
+		}
 	}
-	fs, err := e.exchange(t, string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode()))
+}
+
+// frameWithin is the type of the next frame of c if it comes within d,
+// else 0.
+func frameWithin(c net.Conn, d time.Duration) byte {
+	c.SetReadDeadline(time.Now().Add(d))
+	defer c.SetReadDeadline(time.Time{})
+	typ, _, err := runproto.ReadFrame(c)
+	if err != nil {
+		return 0
+	}
+	return typ
+}
+
+// ends fails the test unless errc delivers within d.
+func ends(t *testing.T, what string, errc <-chan error, d time.Duration) error {
+	t.Helper()
+	select {
+	case err := <-errc:
+		return err
+	case <-time.After(d):
+		t.Fatalf("%s: serve did not end", what)
+	}
+	return nil
+}
+
+// setenv is every --setenv value of argv.
+func setenv(argv []string) []string {
+	var all []string
+	for _, a := range argv {
+		if kv, ok := strings.CutPrefix(a, "--setenv="); ok {
+			all = append(all, kv)
+		}
+	}
+	return all
+}
+
+func TestServeProgramStep(t *testing.T) {
+	e := newEnv(t)
+	e.fr.run = func(_ context.Context, stdout, _ io.Writer) (int, error) {
+		io.WriteString(stdout, "hi\n")
+		return 0, nil
+	}
+	fs, err := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Env: map[string]string{"LUK_NAME": "db.sql"}}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []frame{{'o', "uploaded\n"}, {'e', "warning\n"}, {'x', "3"}}
-	if !slices.Equal(fs, want) {
-		t.Fatalf("%q", fs)
+	if len(fs) != 3 || fs[0].typ != runproto.Started || fs[1].p != "hi\n" || fs[2].typ != runproto.Exit || fs[2].p != "0" {
+		t.Fatalf("%+v", fs)
 	}
-	if a := e.fr.argv; a[len(a)-1] != e.work || a[len(a)-2] != "/opt/luk/s3-upload" {
-		t.Fatalf("argv %q", a)
+	runs := e.fr.argvs()
+	if len(runs) != 3 || !slices.Contains(runs[0], "create") || !slices.Contains(runs[2], "remove") {
+		t.Fatalf("%q", runs)
 	}
-	groups := "SupplementaryGroups=" + GroupName(uint32(os.Getgid())) + " luk backup"
-	if !slices.Contains(e.fr.argv, groups) {
-		t.Fatalf("argv %q, want %s", e.fr.argv, groups)
+	unit := strings.TrimPrefix(runs[1][6], "--unit=")
+	if !strings.HasPrefix(unit, "lukd-step-p-1-") || runs[0][len(runs[0])-1] != unit || runs[2][len(runs[2])-1] != unit {
+		t.Fatalf("unit %q in %q", unit, runs)
 	}
-	if !slices.Contains(e.fr.argv, "--setenv=LUK_PIPELINE=p") || !slices.Contains(e.fr.argv, "--setenv=LUK_JOB=s3-upload") ||
-		slices.ContainsFunc(e.fr.argv, func(a string) bool { return strings.HasPrefix(a, "--setenv=LUK_STATE=") }) {
-		t.Fatalf("argv %q", e.fr.argv)
+	// The helpers get the fixed command line, with a unit name of their own.
+	for i, action := range map[int]string{0: "create", 2: "remove"} {
+		want := workspace.HelperArgv("/usr/bin/lukd", e.root, action, unit)
+		if !slices.Equal(runs[i][:4], want[:4]) || !slices.Equal(runs[i][5:], want[5:]) || !strings.HasPrefix(runs[i][4], "--unit=lukd-workspace-") {
+			t.Fatalf("%s %q", action, runs[i])
+		}
+	}
+	s := strings.Join(runs[1], " ")
+	for _, want := range []string{"User=" + StepUser("p", 1), "RuntimeMaxSec=1800", "--setenv=LUK_NAME=db.sql", "-- /opt/luk/p "} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if e.fr.stdin[1] == nil || e.fr.stdin[0] != nil || e.fr.stdin[2] != nil {
+		t.Fatalf("stdin %v: the channel goes to the unit only", e.fr.stdin)
+	}
+	if strings.Contains(s, "LUK_JOB") {
+		t.Fatalf("program with LUK_JOB: %s", s)
+	}
+	// The workspace lock is gone with the workspace.
+	if ents, err := os.ReadDir(filepath.Join(e.srv.Locks, workspace.LockDir)); err != nil || len(ents) != 0 {
+		t.Fatalf("workspace locks %v %v", ents, err)
 	}
 }
 
-// The job sees of root only its work directory and nothing of the lukd
+// The job of a run: {job} step, of a relay step and a nested job run as
+// lukd-run-<job>-<random> with LUK_JOB.
+func TestServeJobs(t *testing.T) {
+	e := newEnv(t)
+	for _, c := range []struct {
+		req       runproto.StepRequest
+		job, user string
+	}{
+		{runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1}, "s3-upload", "--uid=luk-s3"},
+		{runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1}, "state", "User=" + DynamicUser("state", "p")},
+		{runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Job: "s3-upload"}, "s3-upload", "--uid=luk-s3"},
+	} {
+		fs, err := e.exchange(t, c.req, true)
+		if err != nil || len(fs) != 2 || fs[0].typ != runproto.Started || fs[1] != (frame{runproto.Exit, "0"}) {
+			t.Fatalf("%+v: %+v %v", c.req, fs, err)
+		}
+		a := e.fr.unitArgv()
+		s := strings.Join(a, " ")
+		if !strings.HasPrefix(unitName(a), "lukd-run-"+c.job+"-") || !strings.Contains(s, c.user) ||
+			!strings.Contains(s, "--setenv=LUK_JOB="+c.job) || !strings.Contains(s, "--setenv=LUK_STEP="+strconv.Itoa(c.req.Step)) {
+			t.Fatalf("%+v: %s", c.req, s)
+		}
+	}
+}
+
+func TestServeRefusals(t *testing.T) {
+	e := newEnv(t)
+	for _, c := range []struct {
+		req  runproto.StepRequest
+		want string
+	}{
+		{runproto.StepRequest{Pipeline: "p", Step: 4, ID: id1}, "pipeline p step 4: not a run or relay step"},
+		{runproto.StepRequest{Pipeline: "p", Step: 5, ID: id1}, "pipeline p step 5: not a run or relay step"},
+		{runproto.StepRequest{Pipeline: "nope", Step: 1, ID: id1}, "pipeline nope step 1: not a run or relay step"},
+		{runproto.StepRequest{Pipeline: "p", Step: 1, ID: "x"}, `id "x": not a queue entry id`},
+		{runproto.StepRequest{Pipeline: ".p", Step: 1, ID: id1}, `pipeline ".p": invalid name`},
+		{runproto.StepRequest{Pipeline: "Offsite DB", Step: 1, ID: id1}, `pipeline "Offsite DB": invalid name`},
+		{runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Job: "../x"}, `job "../x": unknown`},
+		{runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Job: "broken"}, "job broken: not allowed for pipeline p step 1"},
+		{runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1, Job: "s3-upload"}, "job s3-upload: not allowed for pipeline p step 2"},
+		{runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1, Job: "state"}, "job state: not allowed for pipeline p step 3"},
+		{runproto.StepRequest{Pipeline: "p", Step: 9, ID: id1, Job: "state"}, "job state: not allowed for pipeline p step 9"},
+	} {
+		fs, _ := e.exchange(t, c.req, true)
+		if len(fs) != 2 || fs[0] != (frame{runproto.Stderr, "lukd run: " + c.want + "\n"}) || fs[1] != (frame{runproto.Exit, "1"}) {
+			t.Errorf("%+v: %+v", c.req, fs)
+		}
+	}
+	if n := len(e.fr.argvs()); n != 0 {
+		t.Fatalf("%d runs for refused requests", n)
+	}
+	fs, _ := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1}, false)
+	if len(fs) != 2 || fs[0].p != "lukd run: request: without its descriptor\n" {
+		t.Fatalf("no channel: %+v", fs)
+	}
+	fs, _ = e.exchangeRaw(t, []byte("{\n"), true)
+	if len(fs) != 2 || !strings.HasPrefix(fs[0].p, "lukd run: request: ") || fs[1].p != "1" {
+		t.Fatalf("bad json: %+v", fs)
+	}
+	// Nothing is created for a refused request: no slot, no lock.
+	if ents, err := os.ReadDir(e.srv.Locks); err != nil || len(ents) != 0 {
+		t.Fatalf("locks %v %v", ents, err)
+	}
+}
+
+// A job named by the configuration must be a valid file of run.d.
+func TestServeJobFiles(t *testing.T) {
+	e := newEnv(t)
+	write(t, e.conf, `pipeline:
+  p:
+    steps:
+      - run: /opt/luk/p
+        jobs: [broken, gone]
+      - relay: Bad.Name
+`, 0o640)
+	for _, c := range []struct {
+		req  runproto.StepRequest
+		want string
+	}{
+		{runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Job: "broken"}, "job broken: invalid, see the journal of lukd-run@.service"},
+		{runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Job: "gone"}, `job "gone": unknown`},
+		{runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1}, `job "Bad.Name": unknown`},
+	} {
+		fs, _ := e.exchange(t, c.req, true)
+		if len(fs) != 2 || fs[0] != (frame{runproto.Stderr, "lukd run: " + c.want + "\n"}) {
+			t.Errorf("%+v: %+v", c.req, fs)
+		}
+	}
+	// A refused configuration allows no step.
+	os.Chmod(e.conf, 0o660)
+	fs, _ := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1}, true)
+	if len(fs) != 2 || fs[0].p != "lukd run: pipeline p step 1: not a run or relay step\n" {
+		t.Fatalf("writable config: %+v", fs)
+	}
+	fs, _ = e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Job: "gone"}, true)
+	if len(fs) != 2 || fs[0].p != "lukd run: job gone: not allowed for pipeline p step 1\n" {
+		t.Fatalf("writable config, nested: %+v", fs)
+	}
+	os.Remove(e.conf)
+	fs, _ = e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1}, true)
+	if len(fs) != 2 || fs[0].p != "lukd run: pipeline p step 1: not a run or relay step\n" {
+		t.Fatalf("missing config: %+v", fs)
+	}
+	if n := len(e.fr.argvs()); n != 0 {
+		t.Fatalf("%d runs for refused requests", n)
+	}
+}
+
+func TestServeWorkspaceNotCreated(t *testing.T) {
+	e := newEnv(t)
+	e.fr.createExit = 1
+	fs, _ := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1}, true)
+	if len(fs) != 3 || fs[0].typ != runproto.Started || fs[1].p != "lukd run: workspace not created\n" || fs[2].p != "1" {
+		t.Fatalf("%+v", fs)
+	}
+	if n := len(e.fr.argvs()); n != 1 {
+		t.Fatalf("%d runs", n)
+	}
+	if ents, err := os.ReadDir(filepath.Join(e.srv.Locks, workspace.LockDir)); err != nil || len(ents) != 0 {
+		t.Fatalf("workspace locks %v %v", ents, err)
+	}
+}
+
+// A failed remove is logged and changes neither the result nor the
+// frames.
+func TestServeWorkspaceNotRemoved(t *testing.T) {
+	e := newEnv(t)
+	var logs strings.Builder
+	var mu sync.Mutex
+	e.srv.Log = slog.New(slog.NewTextHandler(lockedWriter{&mu, &logs}, nil))
+	e.fr.removeExit = 1
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { return 3, nil }
+	fs, err := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1}, true)
+	if err != nil || len(fs) != 2 || fs[1] != (frame{runproto.Exit, "3"}) {
+		t.Fatalf("%+v %v", fs, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(logs.String(), `level=WARN msg="workspace not removed" unit=lukd-run-s3-upload-`) || !strings.Contains(logs.String(), "exit=1") {
+		t.Fatalf("journal: %s", logs.String())
+	}
+}
+
+func TestServeSlotWait(t *testing.T) {
+	defer func(d time.Duration) { lockPoll = d }(lockPoll)
+	lockPoll = 5 * time.Millisecond
+	e := newEnv(t)
+	write(t, e.srv.Config, "root: "+e.root+"\nconfig: "+e.conf+"\nlimits:\n  units:\n    max: 1\n", 0o600)
+	release := make(chan struct{})
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { <-release; return 0, nil }
+	first, errFirst := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1})
+	waitFrame(t, first, runproto.Started)
+	second, errc := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1})
+	if typ := frameWithin(second, 300*time.Millisecond); typ == runproto.Started {
+		t.Fatal("second step started over limits.units.max")
+	}
+	second.Close() // lukd process stops while the step waits
+	if err := ends(t, "waiting step", errc, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := ends(t, "first step", errFirst, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.fr.unitRuns(); n != 1 {
+		t.Fatalf("%d units started", n)
+	}
+	// The slot is free again.
+	if fs, err := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1}, true); err != nil || len(fs) != 2 {
+		t.Fatalf("after the first: %+v %v", fs, err)
+	}
+}
+
+// A nested job runs inside a step that holds a slot: it takes none.
+func TestServeNestedTakesNoSlot(t *testing.T) {
+	e := newEnv(t)
+	write(t, e.srv.Config, "root: "+e.root+"\nconfig: "+e.conf+"\nlimits:\n  units:\n    max: 1\n", 0o600)
+	release := make(chan struct{})
+	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { <-release; return 0, nil }
+	step, errStep := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1})
+	waitFrame(t, step, runproto.Started)
+	nested, errNested := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Job: "s3-upload"})
+	waitFrame(t, nested, runproto.Started)
+	close(release)
+	for what, errc := range map[string]chan error{"step": errStep, "nested job": errNested} {
+		if err := ends(t, what, errc, 5*time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := e.fr.unitRuns(); n != 2 {
+		t.Fatalf("%d units", n)
+	}
+}
+
+// Only the service user, the owner of <root>/data, gets an answer.
+func TestServeServiceUser(t *testing.T) {
+	e := newEnv(t)
+	e.peer = me + 1
+	fs, err := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1}, true)
+	if len(fs) != 0 || err == nil || err.Error() != "peer uid "+strconv.Itoa(int(me+1))+" refused, want "+strconv.Itoa(int(me)) {
+		t.Fatalf("other peer answered: %+v %v", fs, err)
+	}
+	os.Remove(filepath.Join(e.root, "data"))
+	os.Symlink(t.TempDir(), filepath.Join(e.root, "data"))
+	e.peer = me
+	fs, err = e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1}, true)
+	if len(fs) != 0 || err == nil || err.Error() != "service user: "+filepath.Join(e.root, "data")+": a symlink" {
+		t.Fatalf("symlinked data answered: %+v %v", fs, err)
+	}
+	os.Remove(filepath.Join(e.root, "data"))
+	os.Mkdir(filepath.Join(e.root, "data"), 0o700)
+	e.srv.PeerUID = func() (uint32, error) { return 0, errors.New("no creds") }
+	if fs, err := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1}, true); len(fs) != 0 || err == nil || err.Error() != "peer: no creds" {
+		t.Fatalf("no peer: %+v %v", fs, err)
+	}
+	if n := len(e.fr.argvs()); n != 0 {
+		t.Fatalf("%d runs", n)
+	}
+}
+
+// The request carries only free-form metadata: every workspace-bound or
+// step-bound name is root's, an unsafe value is dropped and no value adds
+// an argument.
+func TestServeHostileEnv(t *testing.T) {
+	e := newEnv(t)
+	req := runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1, Env: map[string]string{
+		"LUK_WORK": "/etc", "LUK_META": "/etc/shadow", "LUK_ID": "x", "LUK_PIPELINE": "evil",
+		"LUK_STEP": "9", "LUK_JOB": "evil", "LUK_TMP": "/", "LUK_STATE": "/", "LD_PRELOAD": "/tmp/x.so", "TMPDIR": "/",
+		"LUK_TAGS": "daily\n--uid=0", "LUK_HOSTNAME": "db1\nLUK_ROOT=/evil", "LUK_ORIGIN": "x\x00y",
+		"LUK_FILE": "/etc/shadow", "LUK_NAME": "../x", "LUK_SENDER": "--uid=0",
+	}}
+	if _, err := e.exchange(t, req, true); err != nil {
+		t.Fatal(err)
+	}
+	a := e.fr.unitArgv()
+	ws := workspace.Path(e.root, unitName(a))
+	want := []string{
+		"PATH=" + DefaultPath, "LANG=C.UTF-8",
+		"LUK_WORK=" + ws, "LUK_IN=" + ws + "/in", "LUK_OUT=" + ws + "/out", "LUK_META=" + ws + "/meta.json",
+		"LUK_TMP=" + ws + "/tmp", "LUK_ID=" + id1, "LUK_SENDER=--uid=0", "LUK_PIPELINE=p", "LUK_STEP=3",
+		"TMPDIR=" + ws + "/tmp", "LUK_JOB=state", "LUK_STATE=" + StatePath("state", "p"),
+	}
+	if got := setenv(a); !slices.Equal(got, want) {
+		t.Fatalf("\n got %q\nwant %q", got, want)
+	}
+	for _, x := range a {
+		if strings.ContainsAny(x, "\n\x00") || x == "--uid=0" || strings.Contains(x, "LD_PRELOAD") {
+			t.Fatalf("argv %q", a)
+		}
+	}
+}
+
+// The unit sees of root only its workspace and nothing of the lukd
 // configuration of run.yaml.
 func TestServeSandbox(t *testing.T) {
 	e := newEnv(t)
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { return 0, nil }
-	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(e.work))))
-	top := filepath.Dir(root)
-	conf := filepath.Join(top, "lukd", "config.yaml")
-	// Data and secrets of lukd outside root; relative paths lie under root.
-	write(t, conf, envConfig+`root: `+root+`
+	top := e.srv.Top
+	write(t, e.conf, envConfig+`root: `+e.root+`
 auth:
   nonces: /srv/nonces
 gpg:
@@ -766,209 +1063,42 @@ gpg:
 listen:
   tls:
     tls: {mode: files, cert: /etc/ssl/luk.crt, key: /etc/ssl/private/luk.key}
-  rel:
-    tls: {mode: files, cert: tls/c.pem, key: tls/k.pem}
 endpoint:
   up:
     path: /srv/queue/up
     secret: {path: /run/luk/volatile/queue}
 storage:
   backup: {type: local, base: /storage/backup, path: x}
-  near: {type: local, base: store, path: x}
 `, 0o640)
-	write(t, e.srv.Config, "root: "+root+"\nconfig: "+conf+"\nhide: [/srv/extra, /srv/queue]\n", 0o600)
-	if _, err := e.exchange(t, string(runproto.Request{Job: "state", Work: e.work}.Encode())); err != nil {
+	write(t, e.srv.Config, "root: "+e.root+"\nconfig: "+e.conf+"\nhide: [/srv/extra, /srv/queue]\n", 0o600)
+	if _, err := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1}, true); err != nil {
 		t.Fatal(err)
 	}
-	_, ino, err := CheckWork(root, e.work, me)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(e.fr.argv, " ")
+	a := e.fr.unitArgv()
+	ws := workspace.Path(e.root, unitName(a))
+	got := strings.Join(a, " ")
 	hidden := []string{filepath.Join(top, "lukd"), "/run/luk", "/etc/ssl/luk.crt", "/etc/ssl/private/luk.key", "/srv/extra", "/srv/gpg", "/srv/nonces", "/srv/queue", "/storage/backup"}
 	want := "-p ProtectProc=invisible -p InaccessiblePaths=-" + strings.Join(hidden, " -p InaccessiblePaths=-") + " " +
-		"-p TemporaryFileSystem=" + root + ":ro -p BindPaths=" + e.work + ":" + e.work + ":norbind "
+		"-p TemporaryFileSystem=" + e.root + ":ro -p BindPaths=" + ws + ":" + ws + ":norbind " +
+		"-p ExecStartPre=+/usr/bin/lukd run workspace own " + unitName(a) + " "
 	if !strings.Contains(got, want) {
 		t.Fatalf("argv %s\nwant %s", got, want)
 	}
-	want = " /usr/bin/lukd run check-work " + root + " " + e.work + " " +
-		strconv.FormatUint(ino.Dev, 10) + " " + strconv.FormatUint(ino.Ino, 10) + " -- /opt/luk/state " + e.work
-	if !strings.HasSuffix(got, want) {
-		t.Fatalf("argv %s\nwant suffix %s", got, want)
+	if !strings.HasSuffix(got, " /usr/bin/lukd run workspace run "+ws+" -- /opt/luk/state "+ws) {
+		t.Fatalf("argv %s", got)
 	}
 	// A command the sandbox hides is refused before anything runs.
-	e.fr.argv = nil
-	write(t, filepath.Join(e.srv.Jobs, "quick.yaml"), "command: /storage/backup/quick\n", 0o600)
-	fs, err := e.exchange(t, string(runproto.Request{Job: "quick", Work: e.work}.Encode()))
-	if err == nil || len(fs) != 2 || fs[0] != (frame{'e', "lukd run: job quick: unavailable\n"}) || e.fr.argv != nil {
-		t.Fatalf("%v %q %q", err, fs, e.fr.argv)
+	before := len(e.fr.argvs())
+	write(t, filepath.Join(e.srv.Jobs, "state.yaml"), "command: /storage/backup/quick\n", 0o600)
+	fs, err := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1}, true)
+	if err == nil || len(fs) != 2 || fs[0] != (frame{runproto.Stderr, "lukd run: job state: unavailable\n"}) || len(e.fr.argvs()) != before {
+		t.Fatalf("%v %q", err, fs)
 	}
-}
-
-// workMeta is the meta.json of an upload db.sql from db1, tagged daily.
-func workMeta(id, pipeline string, step int) runstep.WorkMeta {
-	return runstep.WorkMeta{
-		Server: runstep.WorkServer{ID: id, Sender: "robert.socha", Endpoint: "up", Size: 1, SHA256: "ab"},
-		Client: wire.Meta{File: "db.sql", Source: wire.SourceFile, Tags: []string{"daily"}, Portal: wire.PortalDirect,
-			Backup: &wire.Backup{Hostname: "db1", Path: "/b/db.sql"}},
-		Pipeline: pipeline, Step: step,
+	write(t, e.conf, "pipeline:\n  p:\n    steps: [{run: /storage/backup/p}]\n"+"storage:\n  backup: {type: local, base: /storage/backup, path: x}\n", 0o640)
+	fs, err = e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1}, true)
+	if err == nil || len(fs) != 2 || fs[0] != (frame{runproto.Stderr, "lukd run: pipeline p step 1: unavailable\n"}) || len(e.fr.argvs()) != before {
+		t.Fatalf("%v %q", err, fs)
 	}
-}
-
-// writeWork creates the work directory w with meta.json m (a
-// runstep.WorkMeta or raw bytes) and the files of in/.
-func writeWork(t *testing.T, w string, m any, in ...string) {
-	t.Helper()
-	for _, d := range []string{"in", "out"} {
-		if err := os.MkdirAll(filepath.Join(w, d), 0o750); err != nil {
-			t.Fatal(err)
-		}
-	}
-	b, ok := m.([]byte)
-	if !ok {
-		var err error
-		if b, err = json.Marshal(m); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write(t, filepath.Join(w, "meta.json"), string(b), 0o440)
-	for _, n := range in {
-		write(t, filepath.Join(w, "in", n), "x", 0o440)
-	}
-}
-
-// setenv is the LUK_* metadata of argv, the --setenv values without
-// LUK_JOB, LUK_TMP and LUK_STATE, and every --setenv value.
-func setenv(argv []string) (meta, all []string) {
-	for _, a := range argv {
-		kv, ok := strings.CutPrefix(a, "--setenv=")
-		if !ok {
-			continue
-		}
-		all = append(all, kv)
-		k, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(k, "LUK_") && k != "LUK_JOB" && k != "LUK_TMP" && k != "LUK_STATE" {
-			meta = append(meta, kv)
-		}
-	}
-	return meta, all
-}
-
-// clientEnv is what a client of lukd run (relay step, luk-job run) sends
-// for the work directory w: the metadata of its run step environment.
-func clientEnv(t *testing.T, w, root string) map[string]string {
-	t.Helper()
-	vars, err := runstep.WorkEnv(w, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return runstep.Meta(w, func(k string) (string, bool) {
-		for _, kv := range vars {
-			if n, v, _ := strings.Cut(kv, "="); n == k {
-				return v, true
-			}
-		}
-		return "", false
-	})
-}
-
-func TestServeJobEnv(t *testing.T) {
-	e := newEnv(t)
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { return 0, nil }
-	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(e.work))))
-	req := runproto.Request{Job: "s3-upload", Work: e.work, Env: clientEnv(t, e.work, "/elsewhere")}
-	if _, err := e.exchange(t, string(req.Encode())); err != nil {
-		t.Fatal(err)
-	}
-	meta, all := setenv(e.fr.argv)
-	w := e.work
-	want := []string{
-		"LUK_WORK=" + w, "LUK_IN=" + w + "/in", "LUK_OUT=" + w + "/out", "LUK_META=" + w + "/meta.json",
-		"LUK_ID=" + id1, "LUK_SENDER=robert.socha", "LUK_ENDPOINT=up", "LUK_PIPELINE=p",
-		"LUK_FILE=" + w + "/in/db.sql", "LUK_NAME=db.sql", "LUK_ROOT=" + root, "LUK_STEP=1",
-		"LUK_TAGS=daily", "LUK_HOSTNAME=db1", "LUK_ORIGIN=db1",
-	}
-	if !slices.Equal(meta, want) {
-		t.Fatalf("\n got %q\nwant %q", meta, want)
-	}
-	// The job's own env comes first, the LUK_* variables last.
-	if all[0] != "BUCKET=example-backup" || all[len(all)-2] != "LUK_JOB=s3-upload" || all[len(all)-1] != "LUK_TMP=/var/tmp" {
-		t.Fatalf("%q", all)
-	}
-}
-
-// The request carries only free-form metadata: every path-bound or
-// reserved name is root's, an unsafe value is dropped and no value adds
-// an argument.
-func TestServeHostileEnv(t *testing.T) {
-	e := newEnv(t)
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { return 0, nil }
-	root := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(e.work))))
-	req := runproto.Request{Job: "state", Work: e.work, Env: map[string]string{
-		"LUK_WORK": "/etc", "LUK_META": "/etc/shadow", "LUK_ROOT": "/", "LUK_ID": "x", "LUK_PIPELINE": "evil",
-		"LUK_STEP": "9", "LUK_JOB": "evil", "LUK_TMP": "/", "LUK_STATE": "/", "LD_PRELOAD": "/tmp/x.so",
-		"LUK_TAGS": "daily\n--uid=0", "LUK_HOSTNAME": "db1\nLUK_ROOT=/evil", "LUK_ORIGIN": "x\x00y",
-		"LUK_FILE": "/etc/shadow", "LUK_NAME": "../x", "LUK_SENDER": "--uid=0",
-	}}
-	if _, err := e.exchange(t, string(req.Encode())); err != nil {
-		t.Fatal(err)
-	}
-	meta, all := setenv(e.fr.argv)
-	w := e.work
-	want := []string{
-		"LUK_WORK=" + w, "LUK_IN=" + w + "/in", "LUK_OUT=" + w + "/out", "LUK_META=" + w + "/meta.json",
-		"LUK_ID=" + id1, "LUK_SENDER=--uid=0", "LUK_PIPELINE=p", "LUK_ROOT=" + root, "LUK_STEP=1",
-	}
-	if !slices.Equal(meta, want) {
-		t.Fatalf("\n got %q\nwant %q", meta, want)
-	}
-	tail := []string{"LUK_JOB=state", "LUK_TMP=/var/tmp", "LUK_STATE=" + StatePath("state", "p")}
-	if !slices.Equal(all[len(all)-3:], tail) || len(all) != len(meta)+3 {
-		t.Fatalf("%q", all)
-	}
-	for _, a := range e.fr.argv {
-		if strings.ContainsAny(a, "\n\x00") || a == "--uid=0" || strings.Contains(a, "LD_PRELOAD") {
-			t.Fatalf("argv %q", e.fr.argv)
-		}
-	}
-}
-
-// lukd run never opens anything inside the work directory: a missing
-// meta.json and in/, or a FIFO as meta.json, neither refuse nor block the
-// job.
-func TestServeNeverOpensWork(t *testing.T) {
-	e := newEnv(t)
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { return 0, nil }
-	os.RemoveAll(e.work)
-	os.MkdirAll(e.work, 0o750)
-	if err := syscall.Mkfifo(filepath.Join(e.work, "meta.json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		fs, err := e.exchange(t, string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode()))
-		if err != nil || len(fs) != 1 || fs[0] != (frame{'x', "0"}) {
-			t.Errorf("%v %q", err, fs)
-		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("lukd run blocked on the work directory")
-	}
-}
-
-// start serves req on a new connection; the client end is returned open.
-func (e *env) start(req string) (net.Conn, chan error) {
-	c, s := net.Pipe()
-	errc := make(chan error, 1)
-	go func() {
-		errc <- e.srv.Serve(s)
-		s.Close()
-	}()
-	go io.WriteString(c, req)
-	return c, errc
 }
 
 func TestServeStateLock(t *testing.T) {
@@ -994,49 +1124,42 @@ func TestServeStateLock(t *testing.T) {
 		mu.Unlock()
 		return 0, nil
 	}
-	req := string(runproto.Request{Job: "state", Work: e.work}.Encode())
-	c1, err1 := e.start(req)
+	relay := runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1}
+	nested := runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Job: "state"}
+	c1, err1 := e.start(t, relay)
 	<-started
-	if !slices.Contains(e.fr.argv, "--setenv=LUK_STATE=/var/lib/lukd-run/state/p") {
-		t.Fatalf("argv %q", e.fr.argv)
+	if !slices.Contains(e.fr.unitArgv(), "--setenv=LUK_STATE=/var/lib/lukd-run/state/p") {
+		t.Fatalf("argv %q", e.fr.unitArgv())
 	}
 
-	// A peer that gives up while waiting for the lock starts nothing.
-	c2, err2 := e.start(req)
+	// A peer that gives up while waiting for the lock starts nothing,
+	// not even its workspace.
+	c2, err2 := e.start(t, nested)
+	waitFrame(t, c2, runproto.Started)
 	time.Sleep(30 * time.Millisecond)
 	c2.Close()
-	if err := <-err2; err != nil {
+	if err := ends(t, "waiting for the lock", err2, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
+	if n := len(e.fr.argvs()); n != 2 {
+		t.Fatalf("%d runs", n)
+	}
 
-	c3, err3 := e.start(req)
-	go func() {
-		for {
-			if _, _, err := runproto.ReadFrame(c3); err != nil {
-				return
-			}
-		}
-	}()
+	c3, err3 := e.start(t, nested)
+	waitFrame(t, c3, runproto.Started)
 	time.Sleep(30 * time.Millisecond)
 	mu.Lock()
 	if runs != 1 {
 		t.Fatalf("%d runs while locked", runs)
 	}
 	mu.Unlock()
-	go func() {
-		for {
-			if _, _, err := runproto.ReadFrame(c1); err != nil {
-				return
-			}
-		}
-	}()
 	release <- struct{}{}
-	if err := <-err1; err != nil {
+	if err := ends(t, "relay", err1, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	<-started
 	release <- struct{}{}
-	if err := <-err3; err != nil {
+	if err := ends(t, "nested", err3, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	c1.Close()
@@ -1049,116 +1172,11 @@ func TestServeStateLock(t *testing.T) {
 	}
 }
 
-// A work path that would carry anything but a queue id and a pipeline name
-// into the systemd-run command line and the unit file is refused before
-// any argv is built, for every job.
-func TestCheckWorkRefusesUnsafeNames(t *testing.T) {
-	top := t.TempDir()
-	root := filepath.Join(top, "root")
-	ok := filepath.Join(root, "work", id1, "p", "1")
-	os.MkdirAll(ok, 0o750)
-	if _, _, err := CheckWork(root, ok, me); err != nil {
-		t.Fatal(err)
-	}
-	for _, bad := range []string{"\n", "\t", " ", "$", "${HOME}", "%", "%h", "\x1b", "\u00a0"} {
-		for _, d := range []string{
-			filepath.Join(id1+bad, "p", "1"),
-			filepath.Join(bad+id1, "p", "1"),
-			filepath.Join(id1, "p"+bad, "1"),
-			filepath.Join(id1, bad+"p", "1"),
-		} {
-			w := filepath.Join(root, "work", d)
-			if err := os.MkdirAll(w, 0o750); err != nil {
-				t.Fatal(err)
-			}
-			if _, _, err := CheckWork(root, w, me); err == nil {
-				t.Errorf("%q accepted", d)
-			}
-		}
-	}
-	for _, id := range []string{"x", "id1", "20261004T101500Z-0123ABCD", "20261004T101500Z-0123abc", "20261004T101500Z0123abcd", "..x"} {
-		w := filepath.Join(root, "work", id, "p", "1")
-		os.MkdirAll(w, 0o750)
-		if _, _, err := CheckWork(root, w, me); err == nil || !strings.Contains(err.Error(), "not a step work directory") {
-			t.Errorf("id %q: %v", id, err)
-		}
-	}
-	// A root holding such a character is refused as well.
-	odd := filepath.Join(top, "a$b")
-	w := filepath.Join(odd, "work", id1, "p", "1")
-	os.MkdirAll(w, 0o750)
-	if _, _, err := CheckWork(odd, w, me); err == nil {
-		t.Error("root with $ accepted")
-	}
-}
-
-func TestServeRefusesPipelineName(t *testing.T) {
-	e := newEnv(t)
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
-		t.Error("job ran")
-		return 0, nil
-	}
-	for _, p := range []string{"Offsite DB", "a%b", "x${HOME}"} {
-		w := filepath.Join(filepath.Dir(filepath.Dir(e.work)), p, "1")
-		os.MkdirAll(w, 0o750)
-		for _, job := range []string{"state", "s3-upload"} {
-			fs, err := e.exchange(t, string(runproto.Request{Job: job, Work: w}.Encode()))
-			if err == nil || len(fs) != 2 || !strings.HasPrefix(fs[0].p, "lukd run: work ") || fs[1] != (frame{'x', "1"}) {
-				t.Fatalf("%s %q: %v %q", job, p, err, fs)
-			}
-		}
-	}
-}
-
-func TestGroupName(t *testing.T) {
-	g, err := user.LookupGroupId(strconv.Itoa(os.Getgid()))
-	if err != nil {
-		t.Skip(err)
-	}
-	if n := GroupName(uint32(os.Getgid())); n != g.Name {
-		t.Fatalf("%s, want %s", n, g.Name)
-	}
-	if n := GroupName(4294967200); n != "4294967200" {
-		t.Fatalf("unknown gid: %s", n)
-	}
-}
-
-func TestServeRefuses(t *testing.T) {
-	e := newEnv(t)
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
-		t.Error("job ran")
-		return 0, nil
-	}
-	for name, c := range map[string]struct{ req, want string }{
-		"unknown job":  {string(runproto.Request{Job: "nope", Work: e.work}.Encode()), "unknown"},
-		"invalid name": {string(runproto.Request{Job: "../x", Work: e.work}.Encode()), "unknown"},
-		"broken job":   {string(runproto.Request{Job: "broken", Work: e.work}.Encode()), "invalid"},
-		"outside":      {string(runproto.Request{Job: "s3-upload", Work: "/etc"}.Encode()), "work directory refused"},
-		"bad json":     {"{\n", "request"},
-		"oversized":    {strings.Repeat(" ", runproto.MaxRequest+10) + "\n", "larger than"},
-	} {
-		fs, err := e.exchange(t, c.req)
-		if err == nil || len(fs) != 2 || fs[0].typ != 'e' || !strings.Contains(fs[0].p, c.want) || fs[1] != (frame{'x', "1"}) {
-			t.Errorf("%s: %v %q", name, err, fs)
-		}
-	}
-}
-
-func TestServePeerCheck(t *testing.T) {
-	e := newEnv(t)
-	e.peer = me + 1
-	fs, err := e.exchange(t, string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode()))
-	if err == nil || !strings.Contains(err.Error(), "peer uid") || len(fs) != 0 {
-		t.Fatalf("%v %q", err, fs)
-	}
-	e.peer = me
-	e.srv.PeerUID = func() (uint32, error) { return 0, errors.New("no creds") }
-	if _, err := e.exchange(t, "x\n"); err == nil || !strings.Contains(err.Error(), "no creds") {
-		t.Fatalf("%v", err)
-	}
-}
-
+// A peer that closes during the run stops the unit; the workspace is
+// removed only once the unit is inactive.
 func TestServeEarlyCloseStopsUnit(t *testing.T) {
+	defer func(a time.Duration) { activePoll = a }(activePoll)
+	activePoll = time.Millisecond
 	e := newEnv(t)
 	started := make(chan struct{})
 	e.fr.run = func(ctx context.Context, _, _ io.Writer) (int, error) {
@@ -1166,28 +1184,71 @@ func TestServeEarlyCloseStopsUnit(t *testing.T) {
 		<-ctx.Done()
 		return 143, nil
 	}
-	c, s := net.Pipe()
-	errc := make(chan error, 1)
-	go func() { errc <- e.srv.Serve(s) }()
-	io.WriteString(c, string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode()))
+	var polls, removedAt atomic.Int32
+	e.fr.active = func(string) (bool, error) { return polls.Add(1) < 3, nil }
+	e.fr.remove = func(string) int {
+		removedAt.Store(polls.Load())
+		return 0
+	}
+	c, errc := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1})
 	<-started
 	c.Close()
-	select {
-	case err := <-errc:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("serve did not end")
+	if err := ends(t, "early close", errc, 5*time.Second); err != nil {
+		t.Fatal(err)
 	}
-	unit := ""
-	for _, a := range e.fr.argv {
-		if u, ok := strings.CutPrefix(a, "--unit="); ok {
-			unit = u
-		}
-	}
+	unit := unitName(e.fr.unitArgv())
 	if len(e.fr.stopped) != 1 || e.fr.stopped[0] != unit || unit == "" {
 		t.Fatalf("stopped %q, unit %q", e.fr.stopped, unit)
+	}
+	runs := e.fr.argvs()
+	if len(runs) != 3 || helperAction(runs[2]) != "remove" || removedAt.Load() != 3 {
+		t.Fatalf("remove after %d polls: %q", removedAt.Load(), runs)
+	}
+}
+
+// A byte from the peer during the run is a protocol error: the unit is
+// stopped as for a closed peer.
+func TestServePeerSpeaks(t *testing.T) {
+	e := newEnv(t)
+	started := make(chan struct{})
+	e.fr.run = func(ctx context.Context, _, _ io.Writer) (int, error) {
+		close(started)
+		<-ctx.Done()
+		return 143, nil
+	}
+	c, errc := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1})
+	<-started
+	c.Write([]byte("x"))
+	if err := ends(t, "peer speaks", errc, 5*time.Second); err == nil || err.Error() != "peer sent data during the run" {
+		t.Fatalf("%v", err)
+	}
+	if len(e.fr.stopped) != 1 || helperAction(e.fr.argvs()[2]) != "remove" {
+		t.Fatalf("stopped %q, runs %q", e.fr.stopped, e.fr.argvs())
+	}
+}
+
+// A unit still active once the stop deadline passed keeps its workspace
+// for prune.
+func TestServeActiveKeepsWorkspace(t *testing.T) {
+	defer func(a, g time.Duration) { activePoll, stopGrace = a, g }(activePoll, stopGrace)
+	activePoll, stopGrace = time.Millisecond, 10*time.Millisecond
+	e := newEnv(t)
+	write(t, filepath.Join(e.srv.Jobs, "s3-upload.yaml"), "command: /opt/luk/s3-upload\ntimeout: 1s\n", 0o600)
+	started := make(chan struct{})
+	e.fr.run = func(ctx context.Context, _, _ io.Writer) (int, error) {
+		close(started)
+		<-ctx.Done()
+		return 143, nil
+	}
+	e.fr.active = func(string) (bool, error) { return true, nil }
+	c, errc := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1})
+	<-started
+	c.Close()
+	if err := ends(t, "active unit", errc, 5*time.Second); err == nil || !strings.Contains(err.Error(), "still active") {
+		t.Fatalf("%v", err)
+	}
+	if runs := e.fr.argvs(); len(runs) != 2 {
+		t.Fatalf("removed an active unit: %q", runs)
 	}
 }
 
@@ -1229,14 +1290,7 @@ func TestServeLockKeptWhenStopFails(t *testing.T) {
 	units := map[string]int{} // polls left before inactive; -1 running
 	started := make(chan string, 2)
 	e.fr.run = func(ctx context.Context, _, _ io.Writer) (int, error) {
-		e.fr.mu.Lock()
-		unit := ""
-		for _, a := range e.fr.argv {
-			if u, ok := strings.CutPrefix(a, "--unit="); ok {
-				unit = u
-			}
-		}
-		e.fr.mu.Unlock()
+		unit := unitName(e.fr.unitArgv())
 		mu.Lock()
 		for u, n := range units {
 			if n != 0 {
@@ -1274,12 +1328,12 @@ func TestServeLockKeptWhenStopFails(t *testing.T) {
 		}
 		return units[unit] != 0, nil
 	}
-	req := string(runproto.Request{Job: "state", Work: e.work}.Encode())
-	c1, err1 := e.start(req)
+	req := runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1}
+	c1, err1 := e.start(t, req)
 	first := <-started
-	c2, err2 := e.start(req)
+	c2, err2 := e.start(t, req)
 	c1.Close()
-	if err := <-err1; err != nil {
+	if err := ends(t, "first", err1, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -1293,7 +1347,7 @@ func TestServeLockKeptWhenStopFails(t *testing.T) {
 		t.Fatal("second run did not start")
 	}
 	c2.Close()
-	if err := <-err2; err != nil {
+	if err := ends(t, "second", err2, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if len(e.fr.stopped) != 3 || e.fr.stopped[0] != first || e.fr.stopped[1] != first {
@@ -1335,52 +1389,34 @@ func TestUnitActive(t *testing.T) {
 	}
 }
 
-// ends fails the test unless errc delivers within d.
-func ends(t *testing.T, what string, errc <-chan error, d time.Duration) error {
-	t.Helper()
-	select {
-	case err := <-errc:
-		return err
-	case <-time.After(d):
-		t.Fatalf("%s: serve did not end", what)
-	}
-	return nil
-}
-
 // A peer that sends no request, half a request, or does not read the
 // refusal cannot hold the connection beyond requestTimeout.
 func TestServeRequestDeadline(t *testing.T) {
 	defer func(d time.Duration) { requestTimeout = d }(requestTimeout)
 	requestTimeout = 100 * time.Millisecond
 	e := newEnv(t)
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
-		t.Error("job ran")
-		return 0, nil
-	}
 	for name, req := range map[string]string{
 		"nothing":        "",
-		"half":           `{"job":"s3-upload","work":`,
-		"refusal unread": `{"job":"nope","work":"/x"}` + "\n",
+		"half":           `{"pipeline":"p","step":1,`,
+		"refusal unread": string(runproto.StepRequest{Pipeline: "nope", Step: 1, ID: id1}.Encode()),
 	} {
-		c, s := net.Pipe()
-		errc := make(chan error, 1)
-		go func() { errc <- e.srv.Serve(s) }()
-		if req != "" {
-			go io.WriteString(c, req)
-		}
+		c, errc := e.sendRaw(t, []byte(req), true)
 		ends(t, name, errc, 5*time.Second)
 		c.Close()
 	}
+	if n := len(e.fr.argvs()); n != 0 {
+		t.Fatalf("%d runs", n)
+	}
 }
 
-// A peer that stops reading while the job writes cannot pin the
-// connection: the deadline of the job (timeout plus stopGrace) ends the
-// writes, the job is stopped and Serve returns.
+// A peer that stops reading while the unit writes cannot pin the
+// connection: the deadline of the unit (timeout plus stopGrace) ends the
+// writes, the unit is stopped and Serve returns.
 func TestServeJobDeadline(t *testing.T) {
 	defer func(d time.Duration) { stopGrace = d }(stopGrace)
 	stopGrace = 100 * time.Millisecond
 	e := newEnv(t)
-	write(t, filepath.Join(e.srv.Jobs, "quick.yaml"), "command: /opt/luk/q\ntimeout: 1s\n", 0o600)
+	write(t, filepath.Join(e.srv.Jobs, "s3-upload.yaml"), "command: /opt/luk/q\ntimeout: 1s\n", 0o600)
 	e.fr.run = func(ctx context.Context, stdout, _ io.Writer) (int, error) {
 		for ctx.Err() == nil {
 			if _, err := stdout.Write([]byte("output\n")); err != nil {
@@ -1389,76 +1425,9 @@ func TestServeJobDeadline(t *testing.T) {
 		}
 		return 143, nil
 	}
-	c, s := net.Pipe()
-	errc := make(chan error, 1)
-	go func() { errc <- e.srv.Serve(s) }()
-	io.WriteString(c, string(runproto.Request{Job: "quick", Work: e.work}.Encode()))
+	c, errc := e.start(t, runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1})
 	ends(t, "unread output", errc, 10*time.Second)
 	c.Close()
-}
-
-// A job runs only for the pipelines that relay to it or list it in jobs:
-// another pipeline is refused before the work directory is looked at or a lock is created.
-func TestServePipelineAllowlist(t *testing.T) {
-	e := newEnv(t)
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
-		t.Error("job ran")
-		return 0, nil
-	}
-	for _, p := range []string{"q", "offsite2", strings.Repeat("p", 129)} {
-		w := filepath.Join(filepath.Dir(filepath.Dir(e.work)), p, "1")
-		os.MkdirAll(w, 0o750)
-		for _, job := range []string{"state", "s3-upload"} {
-			fs, err := e.exchange(t, string(runproto.Request{Job: job, Work: w}.Encode()))
-			if err == nil || len(fs) != 2 || fs[1] != (frame{'x', "1"}) {
-				t.Fatalf("%s %q: %v %q", job, p, err, fs)
-			}
-		}
-	}
-	if _, err := os.Stat(e.srv.Locks); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("locks: %v", err)
-	}
-}
-
-// The job's group is the primary group of the peer, not the group of the
-// work directory, which luk may change to any group it is in.
-func TestServeGroupOfPeer(t *testing.T) {
-	var other uint32
-	gs, _ := os.Getgroups()
-	for _, g := range gs {
-		if uint32(g) != uint32(os.Getgid()) {
-			other = uint32(g)
-		}
-	}
-	if other == 0 {
-		t.Skip("no supplementary group to chgrp the work directory to")
-	}
-	e := newEnv(t)
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) { return 0, nil }
-	if err := os.Chown(e.work, -1, int(other)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.exchange(t, string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode())); err != nil {
-		t.Fatal(err)
-	}
-	u, err := user.LookupId(strconv.Itoa(int(me)))
-	if err != nil {
-		t.Skip(err)
-	}
-	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
-	want := "SupplementaryGroups=" + GroupName(uint32(gid)) + " luk backup"
-	if !slices.Contains(e.fr.argv, want) || slices.Contains(e.fr.argv, "SupplementaryGroups="+GroupName(other)+" luk backup") {
-		t.Fatalf("argv %q, want %s", e.fr.argv, want)
-	}
-}
-
-// A group name that would split SupplementaryGroups= is passed by gid.
-func TestGroupNameOdd(t *testing.T) {
-	defer func(f func(string) (*user.Group, error)) { lookupGroupID = f }(lookupGroupID)
-	lookupGroupID = func(id string) (*user.Group, error) { return &user.Group{Gid: id, Name: "a b"}, nil }
-	if n := GroupName(1234); n != "1234" {
-		t.Fatalf("%q", n)
-	}
 }
 
 func TestCheckParents(t *testing.T) {
@@ -1497,14 +1466,10 @@ func TestCheckParents(t *testing.T) {
 // anyone but root replace them.
 func TestServeParents(t *testing.T) {
 	e := newEnv(t)
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
-		t.Error("job ran")
-		return 0, nil
-	}
-	req := string(runproto.Request{Job: "s3-upload", Work: e.work}.Encode())
+	req := runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1}
 	top := e.srv.Top
 	os.Chmod(top, 0o777)
-	if fs, err := e.exchange(t, req); err == nil || len(fs) != 0 {
+	if fs, err := e.exchange(t, req, true); err == nil || len(fs) != 0 {
 		t.Fatalf("writable parent of run.yaml: %v %q", err, fs)
 	}
 	os.Chmod(top, 0o700)
@@ -1513,8 +1478,11 @@ func TestServeParents(t *testing.T) {
 	os.Chmod(sub, 0o775)
 	os.Rename(e.srv.Jobs, filepath.Join(sub, "run.d"))
 	e.srv.Jobs = filepath.Join(sub, "run.d")
-	fs, err := e.exchange(t, req)
-	if err == nil || len(fs) != 2 || !strings.Contains(fs[0].p, "unavailable") {
+	fs, err := e.exchange(t, req, true)
+	if err == nil || len(fs) != 2 || fs[0].p != "lukd run: job s3-upload: unavailable\n" {
 		t.Fatalf("writable parent of run.d: %v %q", err, fs)
+	}
+	if n := len(e.fr.argvs()); n != 0 {
+		t.Fatalf("%d runs", n)
 	}
 }

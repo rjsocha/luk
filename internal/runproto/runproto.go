@@ -25,10 +25,11 @@ import (
 const (
 	// DefaultSocket is the socket of lukd-run.socket.
 	DefaultSocket = "/run/luk/run.sock"
-	// MaxRequest caps the request line, newline included. A client's
-	// request (a job name, a work path, the metadata environment with
-	// free-form values of at most 1 KiB and LUK_FILE under the work path)
-	// fits it even when every byte is escaped.
+	// MaxRequest caps the request line, newline included. A step request
+	// of lukd process (a pipeline name, a step, a queue id, a job name and
+	// the metadata environment after runstep.CleanStepMeta: no control
+	// character, free-form values of at most 1 KiB, LUK_FILE a bare file
+	// name) fits it even when every quote and backslash is escaped.
 	MaxRequest = 32 << 10
 	// MaxEnv caps the entries of the environment of a request.
 	MaxEnv = 16

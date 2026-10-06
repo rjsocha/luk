@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -39,12 +38,13 @@ func runCmd() *cobra.Command {
 	var jobs string
 	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Run one allowlisted job as its user (lukd-run@.service)",
+		Short: "Run the unit of one step as its user (lukd-run@.service)",
 		Long: "Serve one connection of lukd-run.socket on stdin: check that the peer is\n" +
-			"the luk user, read the request, run the job of " + rund.DefaultJobs + "/<job>.yaml\n" +
-			"on the peer's work directory with systemd-run and stream its output back.\n" +
-			"The pipeline of the work directory must relay to the job or list it in jobs\n" +
-			"of a run step in the lukd configuration (config of run.yaml).\n" +
+			"the service user, read the request, which names a step of a pipeline (or a\n" +
+			"nested job of that step) and carries the channel of the unit, and run what\n" +
+			"the lukd configuration (config of run.yaml) says the step runs: its run\n" +
+			"program, or a job of " + rund.DefaultJobs + "/<job>.yaml. The unit runs with\n" +
+			"systemd-run in a workspace of its own; its output streams back.\n" +
 			"Runs as root. --config defaults to " + rund.DefaultConfig + " here.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -56,47 +56,7 @@ func runCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&jobs, "jobs", rund.DefaultJobs, "directory of the job files")
-	cmd.AddCommand(checkWorkCmd())
 	return cmd
-}
-
-// execJob replaces lukd by the command of a job; tests record it.
-var execJob = syscall.Exec
-
-// checkWorkCmd starts every job (rund.VerifyWork): as the job user inside
-// the namespace of the job it checks the work directory, then executes
-// the command of the job in its own place, the same process, with the
-// environment of the unit.
-func checkWorkCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:    rund.CheckWorkCmd + " ROOT WORK DEV INO -- COMMAND [ARG...]",
-		Short:  "Check the work directory of a job inside its unit, then run the job",
-		Hidden: true,
-		Args: func(cmd *cobra.Command, args []string) error {
-			if cmd.ArgsLenAtDash() != 4 || len(args) < 5 {
-				return errors.New("want ROOT WORK DEV INO -- COMMAND [ARG...]")
-			}
-			return nil
-		},
-		RunE: func(_ *cobra.Command, args []string) error {
-			var want rund.Inode
-			var err error
-			if want.Dev, err = strconv.ParseUint(args[2], 10, 64); err != nil {
-				return fmt.Errorf("device %q: %w", args[2], err)
-			}
-			if want.Ino, err = strconv.ParseUint(args[3], 10, 64); err != nil {
-				return fmt.Errorf("inode %q: %w", args[3], err)
-			}
-			if err := rund.VerifyWork(args[0], args[1], want); err != nil {
-				return fmt.Errorf("job not started: %w", err)
-			}
-			job := args[4:]
-			if err := execJob(job[0], job, os.Environ()); err != nil {
-				return fmt.Errorf("job not started: %s: %w", job[0], err)
-			}
-			return nil
-		},
-	}
 }
 
 func serveRun(cfg, jobs string) error {
@@ -122,7 +82,7 @@ func serveRun(cfg, jobs string) error {
 		Jobs:    jobs,
 		Locks:   rund.DefaultLocks,
 		Owner:   0,
-		Checker: self,
+		Lukd:    self,
 		PeerUID: func() (uint32, error) { return peerUID(uc) },
 		Runner:  rund.Systemd{},
 		Log:     log,
@@ -212,10 +172,10 @@ func relayWarnings(cfg *config.Config, dir string) []string {
 // runRootWarning reports a root of run.yaml p that differs from the root
 // of cfg: lukd run compares the work path with it as written, so it
 // refuses every work directory of this lukd. It also reports a config of
-// p that is not the file of cfg: lukd run takes the jobs of the pipelines
+// p that is not the file of cfg: lukd run takes the steps of the pipelines
 // from that file. When it is that file, a configuration lukd run refuses
-// (LoadJobPipelines) is reported: no pipeline may run a job. A missing or
-// unreadable p gives no warning.
+// (LoadLukd) is reported: no step may run. A missing or unreadable p gives
+// no warning.
 func runRootWarning(cfg *config.Config, p string) []string {
 	fi, err := os.Lstat(p)
 	if err != nil {
@@ -235,7 +195,7 @@ func runRootWarning(cfg *config.Config, p string) []string {
 	case g.Config != abs:
 		w = append(w, fmt.Sprintf("%s: config %s is not the checked configuration %s: lukd run takes the jobs of the pipelines from it", p, g.Config, abs))
 	default:
-		if _, err := rund.LoadJobPipelines(g.Config, runTop, runOwner); err != nil {
+		if _, err := rund.LoadLukd(g.Config, runTop, runOwner); err != nil {
 			w = append(w, fmt.Sprintf("%s: lukd run refuses the configuration %s, no pipeline may run a job: %v", p, g.Config, err))
 		}
 	}

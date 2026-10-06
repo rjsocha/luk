@@ -15,6 +15,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"luk/internal/config"
+	"luk/internal/runproto"
+	"luk/internal/workspace"
 )
 
 const (
@@ -118,14 +120,12 @@ type StepDef struct {
 
 // Lukd is what lukd run takes from the lukd configuration: per pipeline
 // its steps in order and its timeout (config.DefaultPipelineTimeout when
-// unset), per job the pipelines that may run it, sorted, and the paths
-// that hold data or secrets of lukd, which a unit must not see (sorted,
-// without duplicates).
+// unset), and the paths that hold data or secrets of lukd, which a unit
+// must not see (sorted, without duplicates).
 type Lukd struct {
-	Steps     map[string][]StepDef
-	Timeout   map[string]time.Duration
-	Pipelines map[string][]string
-	Paths     []string
+	Steps   map[string][]StepDef
+	Timeout map[string]time.Duration
+	Paths   []string
 }
 
 // Step is step (from 1) of pipeline; false when the configuration has no
@@ -139,7 +139,7 @@ func (lk *Lukd) Step(pipeline string, step int) (StepDef, bool) {
 }
 
 func emptyLukd() *Lukd {
-	return &Lukd{Steps: map[string][]StepDef{}, Timeout: map[string]time.Duration{}, Pipelines: map[string][]string{}}
+	return &Lukd{Steps: map[string][]StepDef{}, Timeout: map[string]time.Duration{}}
 }
 
 // stepRun reads the run of a step into d: a string is the program, which
@@ -181,21 +181,10 @@ func pipelineTimeout(n *yaml.Node) (time.Duration, error) {
 	return time.Duration(d), nil
 }
 
-// LoadJobPipelines is the Pipelines of LoadLukd.
-func LoadJobPipelines(p, top string, owner uint32) (map[string][]string, error) {
-	lk, err := LoadLukd(p, top, owner)
-	if err != nil {
-		return nil, err
-	}
-	return lk.Pipelines, nil
-}
-
 // LoadLukd reads the steps, the timeouts and the paths of the lukd
 // configuration: the main file p and the *.yaml of config.d next to it
 // (dotfiles left out, in lexical order), as lukd loads them. The steps
-// keep only what lukd run starts (see StepDef). The pipelines of a job
-// are those with a step relay: <job> and those with a run step whose
-// jobs lists it; the paths are the root of the merged configuration
+// keep only what lukd run starts (see StepDef); the paths are the root of the merged configuration
 // (config.DefaultRoot when no file sets it) and those of every file (see
 // jobsFile.paths). A missing p (or a missing directory above it) allows
 // nothing. Every directory from top down to config.d, p and the snippets
@@ -226,7 +215,6 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 	// origin maps each pipeline to the file that defines it.
 	origin := map[string]string{}
 	lk := emptyLukd()
-	rs := lk.Pipelines
 	var paths []string
 	// root of the merged configuration: lukd takes it from the one file
 	// that sets it.
@@ -276,14 +264,6 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 					}
 				}
 				d.Relay = s.Relay
-				var jobs []string
-				if s.Relay != "" {
-					jobs = append(jobs, s.Relay)
-				}
-				// lukd refuses jobs on any other step.
-				if s.Run.Kind != 0 {
-					jobs = append(jobs, d.Jobs...)
-				}
 				// Only a run program asks for nested jobs and has an env.
 				if d.Program == "" {
 					d.Jobs, d.Env = nil, nil
@@ -294,19 +274,9 @@ func LoadLukd(p, top string, owner uint32) (*Lukd, error) {
 						return nil, bad(fmt.Errorf("env.%s: LUK_* names are reserved", k))
 					}
 				}
-				// The steps of one pipeline come one after the other: a
-				// job it already allows ends in name.
-				for _, j := range jobs {
-					if ps := rs[j]; len(ps) == 0 || ps[len(ps)-1] != name {
-						rs[j] = append(ps, name)
-					}
-				}
 			}
 			lk.Steps[name] = steps
 		}
-	}
-	for _, ps := range rs {
-		slices.Sort(ps)
 	}
 	if root = cmp.Or(root, config.DefaultRoot); filepath.IsAbs(root) {
 		paths = append(paths, filepath.Clean(root))
@@ -371,14 +341,69 @@ func decodeOne(data []byte, v any) error {
 	}
 }
 
-// allowed reports whether pipeline may run job by the lukd configuration
-// of g (LoadLukd) and returns that configuration. A refused configuration
-// allows nothing (logged).
-func (s *Server) allowed(g *Global, job, pipeline string) (*Lukd, bool) {
+// what is the unit req asks for, by the lukd configuration of g and
+// run.d, and that configuration: the run program of a run step, the job
+// of a run: {job} or relay step, or a nested job the run step lists in
+// jobs. Anything else is refused before a slot, a lock or a workspace
+// exists for it; a refused configuration allows no step (logged).
+func (s *Server) what(g *Global, req runproto.StepRequest) (*Unit, *Lukd, error) {
+	p, n := req.Pipeline, req.Step
+	no := refusal{fmt.Errorf("pipeline %s step %d: not a run or relay step", p, n)}
+	if req.Job != "" {
+		no = refusal{fmt.Errorf("job %s: not allowed for pipeline %s step %d", req.Job, p, n)}
+	}
 	lk, err := LoadLukd(g.Config, s.Top, s.Owner)
 	if err != nil {
-		s.Log.Error("lukd configuration refused, no pipeline may run a job", "config", g.Config, "err", err)
-		return nil, false
+		s.Log.Error("lukd configuration refused, no step may run", "config", g.Config, "err", err)
+		return nil, nil, no
 	}
-	return lk, slices.Contains(lk.Pipelines[job], pipeline)
+	d, ok := lk.Step(p, n)
+	name := req.Job
+	switch {
+	case !ok:
+		return nil, nil, no
+	case req.Job != "":
+		if d.Program == "" || !slices.Contains(d.Jobs, req.Job) {
+			return nil, nil, no
+		}
+	case d.Program != "":
+		return ProgramUnit(workspace.StepUnit(p, n), d, lk.Timeout[p], p, n), lk, nil
+	case d.Job != "":
+		name = d.Job
+	case d.Relay != "":
+		name = d.Relay
+	default:
+		return nil, nil, no
+	}
+	job, err := s.job(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	return job.Unit(workspace.JobUnit(name), name, p, n), lk, nil
+}
+
+// job is the job name of run.d; a refusal when it is unknown, disabled or
+// run.d is refused (the reason logged).
+func (s *Server) job(name string) (*Job, error) {
+	if !config.ValidJobName(name) {
+		return nil, refusal{fmt.Errorf("job %q: unknown", name)}
+	}
+	err := CheckParents(filepath.Dir(s.Jobs), s.Top, s.Owner)
+	var jobs *Jobs
+	if err == nil {
+		jobs, err = LoadJobs(s.Jobs, s.Owner)
+	}
+	if err != nil {
+		s.Log.Error("run.d refused", "err", err)
+		return nil, refusal{fmt.Errorf("job %s: unavailable", name)}
+	}
+	job, ok := jobs.OK[name]
+	if !ok {
+		if e := jobs.Bad[name]; e != nil {
+			s.Log.Error("job refused", "job", name, "err", e)
+			return nil, refusal{fmt.Errorf("job %s: invalid, see the journal of lukd-run@.service", name)}
+		}
+		return nil, refusal{fmt.Errorf("job %q: unknown", name)}
+	}
+	return job, nil
 }

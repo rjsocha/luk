@@ -1,9 +1,7 @@
 package rund
 
 import (
-	"context"
-	"errors"
-	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,7 +12,6 @@ import (
 	"time"
 
 	"luk/internal/config"
-	"luk/internal/runproto"
 )
 
 const lukdConfig = `listen:
@@ -58,30 +55,43 @@ func relayTree(t *testing.T) (top, p string) {
 	return top, p
 }
 
-func TestLoadJobPipelines(t *testing.T) {
+// The configuration is the main file and the *.yaml of config.d that are
+// not dotfiles; a missing main file allows nothing.
+func TestLoadLukdFiles(t *testing.T) {
 	top, p := relayTree(t)
-	rs, err := LoadJobPipelines(p, top, me)
+	lk, err := LoadLukd(p, top, me)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rs) != 3 || !slices.Equal(rs["j1"], []string{"a", "b"}) || !slices.Equal(rs["j2"], []string{"a", "d"}) || !slices.Equal(rs["j3"], []string{"b"}) {
-		t.Fatalf("%v", rs)
+	// c has no steps, only the default timeout.
+	if got := slices.Sorted(maps.Keys(lk.Steps)); !slices.Equal(got, []string{"a", "b", "d", "e"}) || lk.Timeout["c"] != config.DefaultPipelineTimeout {
+		t.Fatalf("pipelines %q %v", got, lk.Timeout)
+	}
+	if d := lk.Steps["d"]; len(d) != 2 || d[1].Relay != "j2" || d[0].Program != "" || d[0].Relay != "" {
+		t.Fatalf("d %+v", d)
+	}
+	if b, _ := lk.Step("b", 2); b.Program != "/y" || !slices.Equal(b.Jobs, []string{"j3", "j1"}) {
+		t.Fatalf("b %+v", b)
+	}
+	// A store step has no nested jobs.
+	if e, _ := lk.Step("e", 1); e.Jobs != nil {
+		t.Fatalf("e %+v", e)
 	}
 	for _, missing := range []string{filepath.Join(top, "lukd", "none.yaml"), filepath.Join(top, "none", "config.yaml")} {
-		if rs, err := LoadJobPipelines(missing, top, me); err != nil || len(rs) != 0 {
-			t.Fatalf("missing %s: %v %v", missing, rs, err)
+		if lk, err := LoadLukd(missing, top, me); err != nil || len(lk.Steps) != 0 {
+			t.Fatalf("missing %s: %v %v", missing, lk, err)
 		}
 	}
 	os.RemoveAll(filepath.Join(top, "lukd", "config.d"))
-	if rs, err := LoadJobPipelines(p, top, me); err != nil || len(rs) != 3 || !slices.Equal(rs["j1"], []string{"a", "b"}) || !slices.Equal(rs["j2"], []string{"a"}) {
-		t.Fatalf("no config.d: %v %v", rs, err)
+	if lk, err := LoadLukd(p, top, me); err != nil || len(lk.Steps) != 3 || lk.Steps["d"] != nil {
+		t.Fatalf("no config.d: %v %v", lk, err)
 	}
 }
 
 // Any doubt about a file of the configuration refuses the whole
 // derivation: nothing is derived from a file that someone but root may
 // have written, and nothing from a set lukd itself would refuse.
-func TestLoadJobPipelinesRefuses(t *testing.T) {
+func TestLoadLukdRefuses(t *testing.T) {
 	for name, c := range map[string]struct {
 		setup func(t *testing.T, top, p string)
 		want  string
@@ -146,75 +156,20 @@ func TestLoadJobPipelinesRefuses(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			top, p := relayTree(t)
 			c.setup(t, top, p)
-			rs, err := LoadJobPipelines(p, top, me)
-			if err == nil || !strings.Contains(err.Error(), c.want) || rs != nil {
-				t.Fatalf("%v %v, want %q", rs, err, c.want)
+			lk, err := LoadLukd(p, top, me)
+			if err == nil || !strings.Contains(err.Error(), c.want) || lk != nil {
+				t.Fatalf("%v %v, want %q", lk, err, c.want)
 			}
 		})
 	}
 	top, p := relayTree(t)
-	if _, err := LoadJobPipelines(p, top, me+1); err == nil || !strings.Contains(err.Error(), "owned by") {
+	if _, err := LoadLukd(p, top, me+1); err == nil || !strings.Contains(err.Error(), "owned by") {
 		t.Fatalf("owner: %v", err)
 	}
 }
 
-// The pipelines of a job are those that relay to it and those whose run
-// steps list it in jobs; without a usable configuration there are none.
-func TestServeJobPipelines(t *testing.T) {
-	e := newEnv(t)
-	top := e.srv.Top
-	write(t, filepath.Join(e.srv.Jobs, "relayonly.yaml"), "command: /opt/luk/r\n", 0o600)
-	d := filepath.Join(top, "lukd")
-	os.MkdirAll(filepath.Join(d, "config.d"), 0o750)
-	cfg := filepath.Join(d, "config.yaml")
-	write(t, cfg, "pipeline:\n  p:\n    steps: [{run: /x, jobs: [state]}]\n  q:\n    steps: [{relay: relayonly}, {relay: state}]\n", 0o640)
-	write(t, filepath.Join(d, "config.d", "r.yaml"), "pipeline:\n  r:\n    steps: [{run: /y, tee: true, jobs: [s3-upload]}]\n", 0o640)
-	works := map[string]string{"p": e.work}
-	for _, p := range []string{"q", "r"} {
-		works[p] = filepath.Join(filepath.Dir(filepath.Dir(e.work)), p, "1")
-		os.MkdirAll(works[p], 0o750)
-	}
-	ran := 0
-	e.fr.run = func(context.Context, io.Writer, io.Writer) (int, error) {
-		ran++
-		return 0, nil
-	}
-	check := func(what, job, pipeline string, ok bool) {
-		t.Helper()
-		before := ran
-		fs, err := e.exchange(t, string(runproto.Request{Job: job, Work: works[pipeline]}.Encode()))
-		if ok && (err != nil || ran != before+1) {
-			t.Errorf("%s: %s on %s refused: %v %q", what, job, pipeline, err, fs)
-		}
-		if !ok && (err == nil || ran != before || len(fs) != 2 || !strings.Contains(fs[0].p, "pipeline "+pipeline+" not allowed")) {
-			t.Errorf("%s: %s on %s allowed: %v %q", what, job, pipeline, err, fs)
-		}
-	}
-	check("relay", "relayonly", "q", true)
-	check("relay", "relayonly", "p", false)
-	check("union", "state", "p", true)
-	check("union", "state", "q", true)
-	check("union", "state", "r", false)
-	check("config.d jobs", "s3-upload", "r", true)
-	check("config.d jobs", "s3-upload", "p", false)
-
-	os.Chmod(cfg, 0o660)
-	check("writable config", "state", "p", false)
-	check("writable config", "relayonly", "q", false)
-	os.Chmod(cfg, 0o640)
-	check("restored config", "relayonly", "q", true)
-
-	os.Remove(cfg)
-	check("missing config", "state", "p", false)
-	check("missing config", "s3-upload", "r", false)
-
-	if _, err := os.Stat(filepath.Join(e.srv.Locks, "state", "r.lock")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock of a refused pipeline: %v", err)
-	}
-}
-
-// Many pipelines relaying to one job cost time linear in their number.
-func TestLoadJobPipelinesMany(t *testing.T) {
+// Many pipelines cost time linear in their number.
+func TestLoadLukdMany(t *testing.T) {
 	top, p := relayTree(t)
 	const files, per = 8, 3000
 	for f := range files {
@@ -226,12 +181,12 @@ func TestLoadJobPipelinesMany(t *testing.T) {
 		write(t, filepath.Join(filepath.Dir(p), "config.d", "m"+strconv.Itoa(f)+".yaml"), b.String(), 0o640)
 	}
 	start := time.Now()
-	rs, err := LoadJobPipelines(p, top, me)
+	lk, err := LoadLukd(p, top, me)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rs["many"]) != files*per || !slices.IsSorted(rs["many"]) {
-		t.Fatalf("%d pipelines", len(rs["many"]))
+	if n := len(lk.Steps); n != files*per+4 {
+		t.Fatalf("%d pipelines", n)
 	}
 	if d := time.Since(start); d > 10*time.Second {
 		t.Fatalf("took %v", d)
@@ -269,9 +224,6 @@ storage:
 	want := []string{"/data/luk", "/etc/eab.key", "/etc/ssl/private/k.pem", "/run/v/q", "/srv/gpg", "/srv/nonces", "/srv/q/up", "/storage/s"}
 	if !slices.Equal(lk.Paths, want) {
 		t.Fatalf("paths\n got %q\nwant %q", lk.Paths, want)
-	}
-	if !slices.Equal(lk.Pipelines["j1"], []string{"a", "b"}) {
-		t.Fatalf("pipelines %q", lk.Pipelines)
 	}
 }
 

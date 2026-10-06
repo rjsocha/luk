@@ -1,10 +1,8 @@
 package rund
 
 import (
-	"bufio"
+	"cmp"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,29 +10,26 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
-	"unicode/utf8"
-
-	"golang.org/x/sys/unix"
 
 	"luk/internal/config"
 	"luk/internal/queue"
 	"luk/internal/runproto"
 	"luk/internal/runstep"
+	"luk/internal/workspace"
 )
 
 // Runner starts and stops the transient units.
 type Runner interface {
-	// Run runs argv to the end and returns its exit status; err means it
-	// could not run.
-	Run(ctx context.Context, argv []string, stdout, stderr io.Writer) (int, error)
+	// Run runs argv to the end with stdin (nil: /dev/null) and returns its
+	// exit status; err means it could not run. Run may close stdin once
+	// argv started, which then holds it.
+	Run(ctx context.Context, argv []string, stdin *os.File, stdout, stderr io.Writer) (int, error)
 	// Stop stops the unit.
 	Stop(unit string) error
 	// Active reports whether the unit is still running or has a job
@@ -46,17 +41,18 @@ type Runner interface {
 type Server struct {
 	Config string
 	Jobs   string
-	// Locks holds the lock files of the jobs with `state: locked`; empty
-	// means DefaultLocks.
+	// Locks is the RuntimeDirectory of lukd-run@: the state locks of the
+	// jobs with `state: locked`, the unit slots (slot/<n>.lock) and the
+	// workspace locks; empty means DefaultLocks.
 	Locks string
 	// Owner must own the config, run.d and its files and the lukd
 	// configuration (root), and every directory above them from Top (/
 	// when empty) down.
 	Owner uint32
 	Top   string
-	// Checker is the lukd binary whose run check-work (CheckWorkCmd)
-	// starts every job.
-	Checker string
+	// Lukd is the lukd binary: the wrapper and ExecStartPre of every unit
+	// and the helper units that create and remove the workspaces.
+	Lukd string
 	// PeerUID returns the uid of the connected process.
 	PeerUID func() (uint32, error)
 	Runner  Runner
@@ -70,25 +66,31 @@ type refusal struct{ error }
 const DefaultLocks = "/run/lukd-run"
 
 var (
-	// lockPoll is how often a run waiting for its state lock retries.
+	// lockPoll is how often a run waiting for its state lock or a unit
+	// slot retries.
 	lockPoll = 250 * time.Millisecond
 	// activePoll is how often a stopped run checks whether its unit
 	// became inactive.
 	activePoll = 250 * time.Millisecond
-	// stopGrace is how long past the job timeout a stopped run waits for
+	// stopGrace is how long past the unit timeout a stopped run waits for
 	// its unit to become inactive.
 	stopGrace = 2 * time.Minute
-	// requestTimeout bounds receiving the request and answering a
-	// refusal.
+	// requestTimeout bounds receiving the request, writing the started
+	// frame and answering a refusal.
 	requestTimeout = 5 * time.Second
 )
 
-// Serve runs the request of conn: the peer check, the request, the job.
-// Receiving the request and answering a refusal must end within
-// requestTimeout, the job with its output within its timeout plus
-// stopGrace, so a peer that stops sending or reading cannot hold the
-// connection.
-func (s *Server) Serve(conn net.Conn) error {
+// errNotCreated is the refusal of a step whose workspace was not created;
+// the reason goes to the journal.
+var errNotCreated = errors.New("workspace not created")
+
+// Serve runs the step request of conn: the peer check, the request, the
+// unit slot, the workspace, the unit. Receiving the request and answering
+// a refusal must end within requestTimeout, the unit with its output
+// within its timeout plus stopGrace, so a peer that stops sending or
+// reading cannot hold the connection; the wait for a slot or a state lock
+// has no deadline.
+func (s *Server) Serve(conn *net.UnixConn) error {
 	// A missing directory of run.yaml is a missing run.yaml: the
 	// defaults.
 	if err := CheckParents(filepath.Dir(s.Config), s.Top, s.Owner); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -98,9 +100,9 @@ func (s *Server) Serve(conn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	want, err := g.PeerUID()
+	want, err := g.ServiceUID()
 	if err != nil {
-		return err
+		return fmt.Errorf("service user: %w", err)
 	}
 	got, err := s.PeerUID()
 	if err != nil {
@@ -113,116 +115,128 @@ func (s *Server) Serve(conn net.Conn) error {
 		return err
 	}
 	fw := runproto.NewFrameWriter(conn)
-	br := bufio.NewReaderSize(conn, runproto.MaxRequest)
-	err = s.serve(g, got, conn, br, fw)
+	err = s.serve(g, conn, fw)
 	var r refusal
 	if errors.As(err, &r) {
+		conn.SetWriteDeadline(time.Now().Add(requestTimeout))
 		io.WriteString(fw.Stream(runproto.Stderr), "lukd run: "+r.Error()+"\n")
 		fw.Exit(1)
 	}
 	return err
 }
 
-func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, fw *runproto.FrameWriter) error {
-	req, err := runproto.ReadRequest(br)
+func (s *Server) serve(g *Global, conn *net.UnixConn, fw *runproto.FrameWriter) error {
+	req, ch, err := runproto.ReadStepRequest(conn)
 	if err != nil {
 		return refusal{err}
 	}
-	if !config.ValidJobName(req.Job) {
+	// Run closes it once the unit holds it; this covers every other way
+	// out.
+	defer ch.Close()
+	if !config.ValidPipelineName(req.Pipeline) {
+		return refusal{fmt.Errorf("pipeline %q: invalid name", req.Pipeline)}
+	}
+	if !queue.IsID(req.ID) {
+		return refusal{fmt.Errorf("id %q: not a queue entry id", req.ID)}
+	}
+	if req.Job != "" && !config.ValidJobName(req.Job) {
 		return refusal{fmt.Errorf("job %q: unknown", req.Job)}
 	}
-	err = CheckParents(filepath.Dir(s.Jobs), s.Top, s.Owner)
-	var jobs *Jobs
-	if err == nil {
-		jobs, err = LoadJobs(s.Jobs, s.Owner)
-	}
+	u, lk, err := s.what(g, req)
 	if err != nil {
-		s.Log.Error("run.d refused", "err", err)
-		return refusal{fmt.Errorf("job %s: unavailable", req.Job)}
-	}
-	job, ok := jobs.OK[req.Job]
-	if !ok {
-		if e := jobs.Bad[req.Job]; e != nil {
-			s.Log.Error("job refused", "job", req.Job, "err", e)
-			return refusal{fmt.Errorf("job %s: invalid, see the journal of lukd-run@.service", req.Job)}
-		}
-		return refusal{fmt.Errorf("job %q: unknown", req.Job)}
-	}
-	pipeline, err := ParseWork(g.Root, req.Work)
-	if err != nil {
-		s.Log.Warn("work directory refused", "job", req.Job, "err", err)
-		return refusal{errWork}
-	}
-	lk, ok := s.allowed(g, req.Job, pipeline)
-	if !ok {
-		return refusal{fmt.Errorf("job %s: pipeline %s not allowed", req.Job, pipeline)}
-	}
-	work := req.Work
-	_, ino, err := CheckWork(g.Root, work, peer)
-	if err != nil {
-		s.Log.Warn("work directory refused", "job", req.Job, "err", err)
-		return refusal{errWork}
-	}
-	// The group that reads the work directory is the peer's own, not
-	// the group of the directory, which the peer may change.
-	group, err := PeerGroup(peer)
-	if err != nil {
-		s.Log.Error("peer group", "uid", peer, "err", err)
-		return refusal{fmt.Errorf("job %s: unavailable", req.Job)}
-	}
-	// The path-bound variables come from the checked path and run.yaml,
-	// the free-form metadata from the request: lukd run never reads the
-	// work directory.
-	vars := runstep.Vars(work, g.Root, req.Env)
-	unit := UnitName(req.Job)
-	box := &Box{
-		Root: g.Root, Config: filepath.Dir(g.Config), Hide: slices.Concat(g.Hide, lk.Paths),
-		Lukd: s.Checker, Work: ino,
-	}
-	argv, err := job.Argv(box, unit, req.Job, pipeline, work, group, vars)
-	if err != nil {
-		s.Log.Error("job refused", "job", req.Job, "err", err)
-		return refusal{fmt.Errorf("job %s: unavailable", req.Job)}
-	}
-	who := job.User
-	if who == "" {
-		who = DynamicUser(req.Job, pipeline)
-	}
-
-	// No read deadline while waiting for the state lock: the wait ends
-	// with the run holding it, and a refusal still has the write
-	// deadline of the request.
-	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		return err
 	}
-	gone := make(chan struct{})
-	go func() {
-		io.Copy(io.Discard, br)
-		close(gone)
-	}()
-	if job.State == StateLocked {
-		unlock, err := s.lock(req.Job, pipeline, gone)
+	box := &Box{Root: g.Root, Config: filepath.Dir(g.Config), Hide: slices.Concat(g.Hide, lk.Paths), Lukd: s.Lukd}
+	ws := u.Workspace(box)
+	// The step-bound variables come from the checked request, the
+	// workspace-bound ones from run.yaml, the free-form metadata from the
+	// request after CleanStepMeta.
+	argv, err := u.Argv(box, runstep.UnitVars(ws, req.ID, req.Pipeline, req.Step, req.Env))
+	if err != nil {
+		s.Log.Error("unit refused", append(u.attrs(), "err", err)...)
+		return refusal{fmt.Errorf("%s: unavailable", u.what())}
+	}
+
+	// No deadline while waiting for a slot or the state lock: the wait
+	// ends with the run holding it, or when the peer closes.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return err
+	}
+	gone, spoke := watch(conn)
+	// A nested job runs inside a step that holds a slot.
+	if req.Job == "" {
+		free, err := s.slot(g.Limits.Units.Max, gone)
 		if errors.Is(err, errGone) {
-			s.Log.Warn("peer closed while waiting for the state lock", "job", req.Job, "pipeline", pipeline)
+			s.Log.Warn("peer closed while waiting for a unit slot", u.attrs()...)
 			return nil
 		}
 		if err != nil {
-			s.Log.Error("state lock", "job", req.Job, "pipeline", pipeline, "err", err)
-			return refusal{fmt.Errorf("job %s: state lock unavailable", req.Job)}
+			s.Log.Error("unit slot", append(u.attrs(), "err", err)...)
+			return refusal{fmt.Errorf("%s: unit slot unavailable", u.what())}
+		}
+		defer free()
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(requestTimeout)); err != nil {
+		return err
+	}
+	if err := fw.Started(); err != nil {
+		return err
+	}
+	if u.State == StateLocked {
+		unlock, err := s.lock(u.Job, u.Pipeline, gone)
+		if errors.Is(err, errGone) {
+			s.Log.Warn("peer closed while waiting for the state lock", u.attrs()...)
+			return nil
+		}
+		if err != nil {
+			s.Log.Error("state lock", append(u.attrs(), "err", err)...)
+			return refusal{fmt.Errorf("job %s: state lock unavailable", u.Job)}
 		}
 		defer unlock()
 	}
-	attrs := []any{"job", req.Job, "unit", unit, "user", who, "work", work, "pipeline", pipeline}
-	if job.State != "" {
-		attrs = append(attrs, "state", job.State)
+
+	// The lock keeps prune away from the workspace from before its
+	// creation until after its removal.
+	hold, err := workspace.Hold(s.locks(), u.Name)
+	if err != nil {
+		s.Log.Error("workspace lock", append(u.attrs(), "err", err)...)
+		return refusal{errNotCreated}
 	}
-	s.Log.Info("job start", attrs...)
-	// The job ends by RuntimeMaxSec=timeout; past stopGrace more a peer
-	// that does not read fails the writes and reads as gone.
-	if err := conn.SetDeadline(time.Now().Add(time.Duration(job.Timeout) + stopGrace)); err != nil {
-		return err
+	defer func() {
+		if err := hold.Release(); err != nil {
+			s.Log.Warn("workspace lock not released", "unit", u.Name, "err", err)
+		}
+	}()
+	code, err := s.Runner.Run(context.Background(), workspace.HelperArgv(s.Lukd, g.Root, "create", u.Name), nil, io.Discard, io.Discard)
+	if err != nil || code != 0 {
+		s.Log.Error("workspace not created", "unit", u.Name, "exit", code, "err", err)
+		return refusal{errNotCreated}
 	}
 
+	attrs := append(u.attrs(), "user", cmp.Or(u.User, u.Dynamic), "workspace", ws)
+	if u.State != "" {
+		attrs = append(attrs, "state", u.State)
+	}
+	s.Log.Info("job start", attrs...)
+	// The unit ends by RuntimeMaxSec=timeout; past stopGrace more a peer
+	// that does not read fails the writes and reads as gone.
+	if err := conn.SetDeadline(time.Now().Add(u.Timeout + stopGrace)); err != nil {
+		return err
+	}
+	settled, err := s.run(u, argv, ch, fw, gone, spoke)
+	if settled {
+		s.remove(g.Root, u.Name)
+	} else {
+		s.Log.Warn("workspace left to prune", "unit", u.Name)
+	}
+	return err
+}
+
+// run runs the unit u by argv with the channel ch as its stdin and its
+// output as frames of fw, and writes its exit frame. When gone closes
+// first, it stops the unit and waits until it is inactive. settled is
+// false when the unit may still be active.
+func (s *Server) run(u *Unit, argv []string, ch *os.File, fw *runproto.FrameWriter, gone <-chan struct{}, spoke func() bool) (settled bool, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	type result struct {
@@ -231,31 +245,85 @@ func (s *Server) serve(g *Global, peer uint32, conn net.Conn, br *bufio.Reader, 
 	}
 	done := make(chan result, 1)
 	go func() {
-		c, err := s.Runner.Run(ctx, argv, fw.Stream(runproto.Stdout), fw.Stream(runproto.Stderr))
+		c, err := s.Runner.Run(ctx, argv, ch, fw.Stream(runproto.Stdout), fw.Stream(runproto.Stderr))
 		done <- result{c, err}
 	}()
 	select {
 	case r := <-done:
 		if r.err != nil {
-			s.Log.Error("job failed to start", "job", req.Job, "unit", unit, "err", r.err)
-			return refusal{fmt.Errorf("job %s: %v", req.Job, r.err)}
+			s.Log.Error("job failed to start", append(u.attrs(), "err", r.err)...)
+			return true, refusal{fmt.Errorf("%s: %v", u.what(), r.err)}
 		}
-		s.Log.Info("job end", "job", req.Job, "unit", unit, "exit", r.code)
-		return fw.Exit(r.code)
+		s.Log.Info("job end", append(u.attrs(), "exit", r.code)...)
+		return true, fw.Exit(r.code)
 	case <-gone:
-		s.Log.Warn("peer closed, stopping the job", "job", req.Job, "unit", unit)
-		err := s.Runner.Stop(unit)
+		var perr error
+		if spoke() {
+			perr = errors.New("peer sent data during the run")
+			s.Log.Warn("peer sent data during the run, stopping the job", u.attrs()...)
+		} else {
+			s.Log.Warn("peer closed, stopping the job", u.attrs()...)
+		}
+		err := s.Runner.Stop(u.Name)
 		cancel()
 		<-done
-		return s.settle(req.Job, unit, err, time.Now().Add(time.Duration(job.Timeout)+stopGrace))
+		if err := s.settle(u.Job, u.Name, err, time.Now().Add(u.Timeout+stopGrace)); err != nil {
+			return false, errors.Join(perr, err)
+		}
+		return true, perr
 	}
 }
 
+// remove runs the remove helper of unit. A failure is logged and changes
+// nothing else: the helper counts the workspace it leaves.
+func (s *Server) remove(root, unit string) {
+	code, err := s.Runner.Run(context.Background(), workspace.HelperArgv(s.Lukd, root, "remove", unit), nil, io.Discard, io.Discard)
+	if err != nil || code != 0 {
+		s.Log.Warn("workspace not removed", "unit", unit, "exit", code, "err", err)
+	}
+}
+
+// watch reads conn until the peer closes it, sends a byte (a protocol
+// error: the peer only reads once its request is sent) or a read deadline
+// passes, then closes gone; spoke, once gone closed, reports whether the
+// peer sent a byte.
+func watch(conn *net.UnixConn) (gone <-chan struct{}, spoke func() bool) {
+	c := make(chan struct{})
+	var n int
+	go func() {
+		var b [1]byte
+		n, _ = conn.Read(b[:])
+		close(c)
+	}()
+	return c, func() bool {
+		<-c
+		return n > 0
+	}
+}
+
+// what names u in a refusal: the job, or the step of a run program.
+func (u *Unit) what() string {
+	if u.Job != "" {
+		return "job " + u.Job
+	}
+	return fmt.Sprintf("pipeline %s step %d", u.Pipeline, u.Step)
+}
+
+// attrs are the journal attributes of u: the job of a job, the unit, the
+// pipeline and the step.
+func (u *Unit) attrs() []any {
+	var a []any
+	if u.Job != "" {
+		a = append(a, "job", u.Job)
+	}
+	return append(a, "unit", u.Name, "pipeline", u.Pipeline, "step", u.Step)
+}
+
 // settle returns once unit, whose stop gave err and whose systemd-run has
-// ended, is inactive, so the state lock goes only with the job. A failed
-// stop (the unit not loaded yet when it ran) is retried; then the unit is
-// polled until it is inactive, at most until deadline (the job timeout
-// plus stopGrace: RuntimeMaxSec ends the job by then).
+// ended, is inactive, so the state lock and the workspace go only with the
+// unit. A failed stop (the unit not loaded yet when it ran) is retried;
+// then the unit is polled until it is inactive, at most until deadline
+// (the unit timeout plus stopGrace: RuntimeMaxSec ends the unit by then).
 func (s *Server) settle(job, unit string, err error, deadline time.Time) error {
 	if err != nil {
 		s.Log.Warn("stop failed, stopping again", "job", job, "unit", unit, "err", err)
@@ -280,218 +348,97 @@ func (s *Server) settle(job, unit string, err error, deadline time.Time) error {
 
 var errGone = errors.New("peer closed")
 
-// lock takes the exclusive lock of job on pipeline,
-// <Locks>/<job>/<pipeline>.lock, waiting until it is free or gone closes.
-// The lock lasts until unlock or the end of the process.
-func (s *Server) lock(job, pipeline string, gone <-chan struct{}) (unlock func(), err error) {
-	base := s.Locks
-	if base == "" {
-		base = DefaultLocks
-	}
-	dir := filepath.Join(base, job)
+func (s *Server) locks() string { return cmp.Or(s.Locks, DefaultLocks) }
+
+// slot takes a unit slot, the exclusive lock of one of
+// <Locks>/slot/1.lock to <max>.lock, trying all of them every lockPoll
+// until one is free or gone closes. The slot lasts until free or the end
+// of the process.
+func (s *Server) slot(max int, gone <-chan struct{}) (free func(), err error) {
+	dir := filepath.Join(s.locks(), "slot")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, pipeline+".lock"), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return nil, err
-	}
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			return func() { f.Close() }, nil
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
-			f.Close()
-			return nil, fmt.Errorf("flock %s: %w", f.Name(), err)
+		for n := 1; n <= max; n++ {
+			f, err := tryFlock(filepath.Join(dir, strconv.Itoa(n)+".lock"))
+			if err != nil {
+				return nil, err
+			}
+			if f != nil {
+				return func() { f.Close() }, nil
+			}
 		}
 		select {
 		case <-gone:
-			f.Close()
 			return nil, errGone
 		case <-time.After(lockPoll):
 		}
 	}
 }
 
-// workFlags opens a directory below root without following a symlink and
-// without blocking on whatever luk put in its place.
-const workFlags = syscall.O_RDONLY | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC
-
-// errWork is the only answer the peer gets for a refused work directory;
-// the reason goes to the journal.
-var errWork = errors.New("work directory refused")
-
-// ParseWork checks work lexically: an absolute, clean path
-// <root>/work/<id>/<pipeline>/<step> with <id> a queue entry id,
-// <pipeline> a valid pipeline name, <step> a step number, and no control
-// character, white space, "$" or "%" anywhere, as it goes into the
-// systemd-run command line and the unit file. It returns the pipeline.
-func ParseWork(root, work string) (string, error) {
-	if !filepath.IsAbs(work) {
-		return "", fmt.Errorf("work %q: not absolute", work)
-	}
-	if filepath.Clean(work) != work {
-		return "", fmt.Errorf("work %q: not clean", work)
-	}
-	base := filepath.Join(root, "work")
-	rel, ok := strings.CutPrefix(work, base+string(filepath.Separator))
-	if !ok {
-		return "", fmt.Errorf("work %q: not under %s", work, base)
-	}
-	if strings.ContainsFunc(work, unsafePathRune) {
-		return "", fmt.Errorf("work %q: control character, white space, $ or %% in the path", work)
-	}
-	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) != 3 || !queue.IsID(parts[0]) || !config.ValidPipelineName(parts[1]) || !isStep(parts[2]) {
-		return "", fmt.Errorf("work %q: not a step work directory %s/<id>/<pipeline>/<step>", work, base)
-	}
-	return parts[1], nil
-}
-
-// Inode is the identity of a directory: its device and inode number.
-type Inode struct{ Dev, Ino uint64 }
-
-// CheckWork requires work to pass ParseWork and to be a directory owned by
-// uid, reached from root (which may be a symlink: it is root's
-// configuration) through work, <id>, <pipeline> and <step>, each opened
-// with workFlags: no symlink, nothing but a directory, no blocking open.
-// It returns the pipeline and the identity of the directory.
-func CheckWork(root, work string, uid uint32) (string, Inode, error) {
-	st, err := walkWork(root, work, syscall.O_RDONLY|syscall.O_NONBLOCK, workFlags)
-	if err != nil {
-		return "", Inode{}, err
-	}
-	if st.Uid != uid {
-		return "", Inode{}, fmt.Errorf("work %q: owned by uid %d, not the peer", work, st.Uid)
-	}
-	pipeline, _ := ParseWork(root, work)
-	return pipeline, Inode{uint64(st.Dev), st.Ino}, nil
-}
-
-// CheckWorkCmd is the subcommand of lukd run that starts every job: lukd
-// run check-work <root> <work> <dev> <ino> -- <command> <work> runs
-// VerifyWork and then executes the command in its place.
-const CheckWorkCmd = "check-work"
-
-// VerifyWork requires work, inside the namespace of a job, to be the
-// directory want: reached from root as CheckWork does, without following a
-// symlink below root, and with the same device and inode. It needs no
-// privileges: every directory is opened with O_PATH.
-func VerifyWork(root, work string, want Inode) error {
-	const path = unix.O_PATH | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
-	st, err := walkWork(root, work, unix.O_PATH, path)
-	if err != nil {
-		return err
-	}
-	if got := (Inode{uint64(st.Dev), st.Ino}); got != want {
-		return fmt.Errorf("work %q: device %d inode %d, not the checked %d %d", work, got.Dev, got.Ino, want.Dev, want.Ino)
-	}
-	return nil
-}
-
-// walkWork opens root with rootFlags (following a symlink: it is root's
-// configuration), then every element of work below it with flags, each a
-// directory, and returns the stat of work. work must pass ParseWork.
-func walkWork(root, work string, rootFlags, flags int) (*syscall.Stat_t, error) {
-	if _, err := ParseWork(root, work); err != nil {
+// lock takes the exclusive lock of job on pipeline,
+// <Locks>/<job>/<pipeline>.lock, waiting until it is free or gone closes.
+// The lock lasts until unlock or the end of the process.
+func (s *Server) lock(job, pipeline string, gone <-chan struct{}) (unlock func(), err error) {
+	dir := filepath.Join(s.locks(), job)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	fd, err := syscall.Open(root, rootFlags|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("root %s: %w", root, err)
-	}
-	var st syscall.Stat_t
-	rel, _ := filepath.Rel(root, work)
-	for _, name := range strings.Split(rel, string(filepath.Separator)) {
-		next, err := syscall.Openat(fd, name, flags, 0)
-		syscall.Close(fd)
+	for {
+		f, err := tryFlock(filepath.Join(dir, pipeline+".lock"))
 		if err != nil {
-			return nil, fmt.Errorf("work %q: %s: %w", work, name, err)
+			return nil, err
 		}
-		fd = next
-		// O_PATH|O_NOFOLLOW opens a symlink itself.
-		if err := syscall.Fstat(fd, &st); err != nil {
-			syscall.Close(fd)
-			return nil, fmt.Errorf("work %q: %w", work, err)
+		if f != nil {
+			return func() { f.Close() }, nil
 		}
-		if st.Mode&syscall.S_IFMT != syscall.S_IFDIR {
-			syscall.Close(fd)
-			return nil, fmt.Errorf("work %q: %s: not a directory", work, name)
+		select {
+		case <-gone:
+			return nil, errGone
+		case <-time.After(lockPoll):
 		}
 	}
-	syscall.Close(fd)
-	return &st, nil
 }
 
-// unsafePathRune reports a rune refused in a work path: systemd-run and
-// the unit file give it a meaning of its own.
-func unsafePathRune(r rune) bool {
-	return unicode.IsControl(r) || unicode.IsSpace(r) || r == '$' || r == '%' || r == utf8.RuneError
-}
-
-// isStep reports whether s is a step number as in a work directory: 1-based
-// decimal without leading zeros.
-func isStep(s string) bool {
-	if s == "" || s[0] == '0' {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// lookupGroupID is user.LookupGroupId, replaced by tests.
-var lookupGroupID = user.LookupGroupId
-
-// GroupName is the name of gid, or gid in decimal when it has none or one
-// that is not a plain account name (white space would split
-// SupplementaryGroups=).
-func GroupName(gid uint32) string {
-	id := strconv.FormatUint(uint64(gid), 10)
-	if g, err := lookupGroupID(id); err == nil && account.MatchString(g.Name) {
-		return g.Name
-	}
-	return id
-}
-
-// PeerGroup is the primary group of uid, by name (see GroupName).
-func PeerGroup(uid uint32) (string, error) {
-	u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+// tryFlock opens the lock file p (created 0600, not following a symlink)
+// and takes its exclusive lock without waiting; nil, nil while another
+// process holds it.
+func tryFlock(p string) (*os.File, error) {
+	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	gid, err := strconv.ParseUint(u.Gid, 10, 32)
-	if err != nil {
-		return "", err
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		return f, nil
 	}
-	return GroupName(uint32(gid)), nil
-}
-
-// UnitName is a unique transient unit name for job.
-func UnitName(job string) string {
-	b := make([]byte, 6)
-	rand.Read(b)
-	id := strings.Map(func(r rune) rune {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
-			return r
-		}
-		return '-'
-	}, job)
-	return "lukd-run-" + id + "-" + hex.EncodeToString(b)
+	f.Close()
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EINTR) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("flock %s: %w", p, err)
 }
 
 // Systemd runs the units with systemd-run and stops them with systemctl.
 type Systemd struct{}
 
-func (Systemd) Run(ctx context.Context, argv []string, stdout, stderr io.Writer) (int, error) {
+func (Systemd) Run(ctx context.Context, argv []string, stdin *os.File, stdout, stderr io.Writer) (int, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.WaitDelay = 10 * time.Second
-	err := cmd.Run()
+	err := cmd.Start()
+	// systemd-run holds stdin now and passes it on to the unit; an end
+	// kept here would keep the channel open after the unit ended.
+	if stdin != nil {
+		stdin.Close()
+	}
+	if err == nil {
+		err = cmd.Wait()
+	}
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {

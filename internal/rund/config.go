@@ -1,5 +1,6 @@
-// Package rund is lukd run: the root helper that runs jobs of the admin
-// allowlist as other users for luk run steps.
+// Package rund is lukd run: the root helper that runs the units of the
+// steps, run programs as dynamic users and jobs of the admin allowlist as
+// their users, each in a workspace of its own.
 package rund
 
 import (
@@ -9,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -18,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -65,7 +67,6 @@ var (
 // Global is run.yaml.
 type Global struct {
 	Root string `yaml:"root"`
-	Peer string `yaml:"peer"`
 	// Config is the main file of the lukd configuration (see LoadLukd).
 	Config string `yaml:"config"`
 	// Hide lists further absolute paths a unit must not see (see Box).
@@ -78,8 +79,8 @@ type Global struct {
 	} `yaml:"limits"`
 }
 
-// Job is one file of run.d. The pipelines that may run it come from the
-// lukd configuration (see LoadJobPipelines).
+// Job is one file of run.d. The steps that may run it come from the lukd
+// configuration (see LoadLukd).
 type Job struct {
 	User        string            `yaml:"user"`
 	Group       string            `yaml:"group"`
@@ -220,23 +221,6 @@ func LoadGlobal(p string, owner uint32) (*Global, error) {
 		g.Hide[i] = filepath.Clean(h)
 	}
 	return g, nil
-}
-
-// PeerUID is the uid allowed to connect: `peer`, else the owner of root.
-func (g *Global) PeerUID() (uint32, error) {
-	if g.Peer == "" {
-		fi, err := os.Stat(g.Root)
-		if err != nil {
-			return 0, err
-		}
-		return fi.Sys().(*syscall.Stat_t).Uid, nil
-	}
-	u, err := user.Lookup(g.Peer)
-	if err != nil {
-		return 0, fmt.Errorf("peer: %w", err)
-	}
-	id, err := strconv.ParseUint(u.Uid, 10, 32)
-	return uint32(id), err
 }
 
 // ServiceUID is the uid of the service user, the only peer: the owner of
@@ -451,9 +435,6 @@ type Box struct {
 	Config string
 	Hide   []string
 	Lukd   string
-	// Work is the identity of the work directory of Job.Argv, which
-	// CheckWork accepted.
-	Work Inode
 }
 
 // Unit is what lukd run starts for a step or a job: the transient unit
@@ -580,62 +561,6 @@ func (u *Unit) Argv(box *Box, vars []string) ([]string, error) {
 	return append(a, box.Lukd, "run", "workspace", "run", ws, "--", u.Command, ws), nil
 }
 
-// Argv is the systemd-run command line of job name on work (a step of
-// pipeline) as unit, started through box.Lukd run check-work. peerGroup
-// (a name or a numeric gid) is the primary group of the peer, followed by
-// the groups of the job.
-func (j *Job) Argv(box *Box, unit, name, pipeline, work, peerGroup string, vars []string) ([]string, error) {
-	if !strings.HasPrefix(work, box.Root+"/") {
-		return nil, fmt.Errorf("work %q: not under %s", work, box.Root)
-	}
-	var state string
-	if j.State != "" {
-		state = StatePath(name, pipeline)
-	}
-	sb, err := sandbox(box, work, j.Command, state)
-	if err != nil {
-		return nil, err
-	}
-	a := []string{"systemd-run", "--wait", "--collect", "--pipe", "--quiet", "--expand-environment=no", "--unit=" + unit}
-	if j.User != "" {
-		a = append(a, "--uid="+j.User)
-	} else {
-		a = append(a, "-p", "DynamicUser=yes", "-p", "User="+DynamicUser(name, pipeline))
-	}
-	a = append(a, "--working-directory="+work)
-	if j.Group != "" {
-		a = append(a, "--gid="+j.Group)
-	}
-	gs := []string{peerGroup}
-	for _, g := range j.Groups {
-		if !slices.Contains(gs, g) {
-			gs = append(gs, g)
-		}
-	}
-	a = append(a, "-p", "SupplementaryGroups="+strings.Join(gs, " "))
-	a = append(a, "-p", "PrivateTmp=yes")
-	a = append(a, sb...)
-	if j.State != "" {
-		a = append(a, "-p", "StateDirectory="+StateDir+"/"+name+"/"+pipeline, "-p", "StateDirectoryMode=0700")
-	}
-	for _, n := range sortedKeys(j.Credentials) {
-		a = append(a, "-p", "LoadCredential="+n+":"+j.Credentials[n])
-	}
-	a = append(a, "-p", "RuntimeMaxSec="+strconv.FormatInt(int64(time.Duration(j.Timeout)/time.Second), 10))
-	for _, k := range sortedKeys(j.Env) {
-		a = append(a, "--setenv="+k+"="+j.Env[k])
-	}
-	for _, kv := range vars {
-		a = append(a, "--setenv="+kv)
-	}
-	a = append(a, "--setenv=LUK_JOB="+name, "--setenv=LUK_TMP="+TmpDir)
-	if j.State != "" {
-		a = append(a, "--setenv=LUK_STATE="+state)
-	}
-	return append(a, box.Lukd, "run", CheckWorkCmd, box.Root, work,
-		strconv.FormatUint(box.Work.Dev, 10), strconv.FormatUint(box.Work.Ino, 10), "--", j.Command, work), nil
-}
-
 // systemDirs may be neither the root nor the directory of the lukd
 // configuration: the unit would lose the system below them.
 var systemDirs = []string{
@@ -708,6 +633,12 @@ func sandbox(box *Box, ws, command, state string) ([]string, error) {
 		"-p", "TemporaryFileSystem="+box.Root+":ro",
 		"-p", "BindPaths="+ws+":"+ws+":norbind",
 	), nil
+}
+
+// unsafePathRune reports a rune refused in a path of a unit: systemd-run
+// and the unit file give it a meaning of its own.
+func unsafePathRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.IsSpace(r) || r == '$' || r == '%' || r == utf8.RuneError
 }
 
 // unitPath requires p to be a clean absolute path other than / without a
