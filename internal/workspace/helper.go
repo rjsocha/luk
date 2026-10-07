@@ -17,8 +17,7 @@ import (
 	"luk/internal/btrfs"
 )
 
-// ErrBusy marks a workspace still mounted somewhere (EBUSY): a process
-// stuck in I/O or a container holding a bind of it.
+// ErrBusy marks a workspace the kernel still holds mounted (EBUSY).
 var ErrBusy = errors.New("workspace busy")
 
 func busy(err error) error { return fmt.Errorf("%w: %w", ErrBusy, err) }
