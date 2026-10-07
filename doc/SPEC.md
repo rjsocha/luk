@@ -4875,8 +4875,11 @@ sudo are involved.
     mount namespace, the only place the workspace is bound, is gone by
     then: a requirement of the job unit, which therefore keeps
     `KillMode=control-group`. The helper opens `<root>/root/job` with the
-    chain rule, then the name with `O_DIRECTORY|O_NOFOLLOW`, verifies that
-    it is a subvolume (inode 256 on btrfs), and refuses while the job
+    chain rule, then the name with `O_DIRECTORY|O_NOFOLLOW` (`openat`:
+    the seccomp filter of `RestrictSUIDSGID=yes` refuses `openat2`),
+    requires it on the mount of `job/` (the mount ids of `statx`
+    `STATX_MNT_ID` equal, else `EXDEV`), verifies that it is a subvolume
+    (inode 256 on btrfs), and refuses while the job
     unit of that name is still active (`systemctl show -p ActiveState
     --value <unit>.service` is neither `inactive` nor `failed`, and the
     unit is loaded). It deletes every subvolume the job created inside

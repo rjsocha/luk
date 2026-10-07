@@ -301,18 +301,21 @@ func checkInactive(unit string, show Show) error {
 // destroy deletes the workspace unit of the directory job. Destroy by id
 // reaches any subvolume of the filesystem, so only the ids found below
 // the workspace are destroyed, and the workspace only when it is a
-// subvolume directly inside the subvolume of job/; the name is opened
-// without crossing a mount point, so nothing mounted over it counts.
+// subvolume directly inside the subvolume of job/; the name must lie on
+// the mount of job/, so nothing mounted over it counts (EXDEV).
 func destroy(job *os.File, unit string) error {
 	jfd := int(job.Fd())
-	ws, err := unix.Openat2(jfd, unit, &unix.OpenHow{
-		Flags:   uint64(dirFlags),
-		Resolve: unix.RESOLVE_NO_XDEV | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_BENEATH,
-	})
+	// openat, not openat2: the seccomp filter of RestrictSUIDSGID=yes
+	// refuses openat2 with ENOSYS.
+	ws, err := unix.Openat(jfd, unit, dirFlags, 0)
 	if errors.Is(err, unix.ENOENT) {
 		return nil
 	}
 	if err != nil {
+		return fmt.Errorf("workspace %s: %w", unit, err)
+	}
+	if err := sameMount(jfd, ws); err != nil {
+		unix.Close(ws)
 		return fmt.Errorf("workspace %s: %w", unit, err)
 	}
 	ids, err := below(jfd, ws, job.Name())
@@ -330,6 +333,34 @@ func destroy(job *os.File, unit string) error {
 		}
 	}
 	return nil
+}
+
+// sameMount refuses with EXDEV unless the directories a and b lie on the
+// same mount (statx STATX_MNT_ID).
+func sameMount(a, b int) error {
+	ma, err := mountID(a)
+	if err != nil {
+		return err
+	}
+	mb, err := mountID(b)
+	if err != nil {
+		return err
+	}
+	if ma != mb {
+		return fmt.Errorf("on another mount: %w", unix.EXDEV)
+	}
+	return nil
+}
+
+func mountID(fd int) (uint64, error) {
+	var st unix.Statx_t
+	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW, unix.STATX_MNT_ID, &st); err != nil {
+		return 0, fmt.Errorf("statx: %w", err)
+	}
+	if st.Mask&unix.STATX_MNT_ID == 0 {
+		return 0, errors.New("statx: no mount id")
+	}
+	return st.Mnt_id, nil
 }
 
 // below lists the subvolumes to destroy for the workspace ws in the

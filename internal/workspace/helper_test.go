@@ -318,6 +318,35 @@ func TestErrBusy(t *testing.T) {
 	}
 }
 
+func TestSameMount(t *testing.T) {
+	open := func(p string) int {
+		fd, err := unix.Open(p, dirFlags, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { unix.Close(fd) })
+		return fd
+	}
+	dir := t.TempDir()
+	os.Mkdir(filepath.Join(dir, "a"), 0o700)
+	if err := sameMount(open(dir), open(filepath.Join(dir, "a"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := sameMount(open(dir), open("/proc")); !errors.Is(err, unix.EXDEV) {
+		t.Fatalf("another mount: %v", err)
+	}
+}
+
+func TestRemoveRefusesSymlink(t *testing.T) {
+	top, root := newRoot(t)
+	unit := "lukd-run-a-0123456789ab"
+	os.Mkdir(filepath.Join(top, "elsewhere"), 0o700)
+	os.Symlink(filepath.Join(top, "elsewhere"), Path(root, unit))
+	if err := Remove(top, root, unit, me, notFound); !errors.Is(err, unix.ENOTDIR) {
+		t.Fatalf("symlink: %v", err)
+	}
+}
+
 // btrfsDir is the opt-in test directory on btrfs: LUK_TEST_BTRFS, as root.
 func btrfsDir(t *testing.T) string {
 	t.Helper()
