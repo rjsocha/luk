@@ -206,6 +206,10 @@ func expiredAt(exp string, now time.Time) bool {
 	return err != nil || !t.After(now)
 }
 
+// linkOnHold refuses to remove or replace a link the operator put on
+// hold.
+func linkOnHold() error { return fail(http.StatusConflict, "link is on hold") }
+
 // linkErr maps a store error of a link action to its answer.
 func linkErr(err error) error {
 	switch {
@@ -213,6 +217,8 @@ func linkErr(err error) error {
 		return noLink()
 	case errors.Is(err, store.ErrAliased):
 		return fail(http.StatusConflict, "link declares an alias")
+	case errors.Is(err, store.ErrOnHold):
+		return linkOnHold()
 	}
 	return err
 }
@@ -257,6 +263,9 @@ func (s *Server) linkTTL(t *linkTarget, sc store.Sidecar, id *wire.Identity, ep 
 func (s *Server) linkReplace(r *http.Request, cs *chanSession, sn *snapshot, t *linkTarget, sc store.Sidecar, id *wire.Identity, ep *config.Endpoint, link string, meta wire.Meta, now time.Time) (int, any, error) {
 	if !sc.Client.Mutable {
 		return 0, nil, fail(http.StatusConflict, "link is not mutable")
+	}
+	if sc.Hold {
+		return 0, nil, linkOnHold()
 	}
 	// The new content keeps the tags and the access of the link, also in
 	// the other storages the pipelines store into.

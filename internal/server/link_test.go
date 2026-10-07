@@ -444,6 +444,44 @@ func TestLinkReplaceRemovedMeanwhile(t *testing.T) {
 	}
 }
 
+// A link on hold is neither removed nor replaced by its owner; its ttl
+// still changes.
+func TestLinkOnHold(t *testing.T) {
+	f := linkFixture(t, nil)
+	link := f.drop(t, f.user, wire.Meta{Mutable: true}, "old")
+	l := store.Local{Base: filepath.Join(f.root, "data", "s/drop"), Conflict: "version"}
+	hold := func(on bool) {
+		t.Helper()
+		sc := f.dropSidecar(t, link)
+		if _, err := l.Amend(path.Base(link), sc.ID, func(sc *store.Sidecar) error { sc.Hold = on; return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hold(true)
+	body := []byte("new")
+	m := fileMeta(body)
+	for what, rec := range map[string]*httptest.ResponseRecorder{
+		"remove":  f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: link}),
+		"replace": f.link(t, linkReq{signer: f.user, action: wire.LinkReplace, link: link, meta: &m, body: body}),
+	} {
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"link is on hold"`) {
+			t.Errorf("%s: %d %s", what, rec.Code, rec.Body)
+		}
+	}
+	f.settle(t)
+	if code, got := f.fetch(t, link); code != 200 || got != "old" {
+		t.Fatalf("after refusals: %d %q", code, got)
+	}
+	if a := linkAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkTTL, link: link, ttl: "1h"}), http.StatusOK); a.Expires == "" {
+		t.Fatalf("ttl %+v", a)
+	}
+	if sc := f.dropSidecar(t, link); !sc.Hold || sc.Expires == "" {
+		t.Fatalf("sidecar after ttl %+v", sc)
+	}
+	hold(false)
+	linkAnswer(t, f.link(t, linkReq{signer: f.user, action: wire.LinkRemove, link: link}), http.StatusOK)
+}
+
 func TestMutableNeedsReplace(t *testing.T) {
 	f := newFixture(t)
 	var read int

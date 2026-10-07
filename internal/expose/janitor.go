@@ -28,7 +28,8 @@ type Janitor int
 
 const (
 	// Expire removes expired files, files past cleanup.age (those without
-	// an expiry) and stale claimed files of every local storage.
+	// an expiry) and stale claimed files of every local storage; never a
+	// file on hold.
 	Expire Janitor = 1 << iota
 	// Maintain removes the files the retention rules prune (see
 	// store.Local.Retain), repairs aliases and the catalog (see
@@ -113,6 +114,10 @@ func expire(cfg *config.Config, log *slog.Logger, now time.Time) {
 			if sc.AliasOf != "" {
 				return nil
 			}
+			// A file on hold stays, expired or not.
+			if sc.Hold {
+				return nil
+			}
 			why := ""
 			if sc.Expires != "" {
 				exp, err := time.Parse(time.RFC3339, sc.Expires)
@@ -131,7 +136,7 @@ func expire(cfg *config.Config, log *slog.Logger, now time.Time) {
 			}
 			beforeRemove()
 			err := st.RemoveExpired(rel, sc.ID, sc.Expires)
-			if errors.Is(err, fs.ErrNotExist) {
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, store.ErrOnHold) {
 				return nil
 			}
 			if err != nil {

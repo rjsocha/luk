@@ -557,6 +557,9 @@ type Sidecar struct {
 	// of a permanent name (client permanent) was accepted: the namespace
 	// the version belongs to.
 	PermanentPath string `json:"permanent_path,omitempty"`
+	// Hold keeps the file from every removal until it is released (see
+	// ErrOnHold); the operator sets and clears it.
+	Hold bool `json:"hold,omitempty"`
 }
 
 // Local is a storage under Base; Conflict is version (default), reject or
@@ -1140,6 +1143,10 @@ func (l Local) put(r *os.Root, src, tmp string, staged fs.FileInfo, rel string, 
 	if l.versioning() {
 		old, err = l.rotate(r, tmp, rel, vers)
 	} else {
+		// A file on hold is never overwritten.
+		if cur, cerr := readSidecar(r, p); cerr == nil && cur.Hold && cur.ID != sc.ID {
+			return "", "", false, fmt.Errorf("%s: %w", rel, ErrOnHold)
+		}
 		// A replaced file keeps a second name until the new sidecar is
 		// placed, to be put back on a failure.
 		if backup, err = l.backup(r, p); err != nil {
@@ -1666,6 +1673,11 @@ func tryOpen(r *os.Root, rel string) (*os.File, Sidecar, bool, error) {
 	return nil, Sidecar{}, false, nil
 }
 
+// ErrOnHold refuses to remove, replace or overwrite a stored file whose
+// sidecar has hold: every removal of a stored name gives it, so nothing
+// removes the file until the hold is cleared.
+var ErrOnHold = errors.New("on hold")
+
 // Remove deletes the stored file at rel and its sidecar.
 func (l Local) Remove(rel string) error { return l.remove(rel, nil) }
 
@@ -1713,6 +1725,9 @@ func (l Local) removeHeld(r *os.Root, h *held, rel string, keep func(Sidecar) bo
 			return fmt.Errorf("%s: %w", rel, fs.ErrNotExist)
 		}
 	}
+	if scErr == nil && sc.Hold {
+		return fmt.Errorf("%s: %w", rel, ErrOnHold)
+	}
 	srel := sidecarRel(p)
 	if err := noSymlinks(r, srel); err != nil {
 		return err
@@ -1746,8 +1761,9 @@ var ErrAliased = errors.New("declares an alias")
 
 // current reads, under the base lock, the sidecar of the stored file rel and
 // checks that it is the file id: a regular file, not an alias, without an
-// alias of its own. Otherwise it gives fs.ErrNotExist (or ErrAliased).
-func (l Local) current(r *os.Root, rel, id string) (Sidecar, error) {
+// alias of its own unless aliased admits one. Otherwise it gives
+// fs.ErrNotExist (or ErrAliased).
+func (l Local) current(r *os.Root, rel, id string, aliased bool) (Sidecar, error) {
 	p, err := l.path(r, rel)
 	if err != nil {
 		return Sidecar{}, err
@@ -1762,7 +1778,7 @@ func (l Local) current(r *os.Root, rel, id string) (Sidecar, error) {
 	if fi, err := r.Lstat(p); err != nil || !fi.Mode().IsRegular() || sc.ID != id || sc.AliasOf != "" {
 		return Sidecar{}, fmt.Errorf("%s: %w", rel, fs.ErrNotExist)
 	}
-	if a, _ := sc.alias(); a != "" {
+	if a, _ := sc.alias(); a != "" && !aliased {
 		return Sidecar{}, fmt.Errorf("%s: %w", rel, ErrAliased)
 	}
 	return sc, nil
@@ -1792,6 +1808,16 @@ func writeSidecar(r *os.Root, p string, sc Sidecar) error {
 // file gone or replaced by another upload gives fs.ErrNotExist, as does
 // an error of fn wrapping it.
 func (l Local) Update(rel, id string, fn func(*Sidecar) error) (Sidecar, error) {
+	return l.update(rel, id, fn, false)
+}
+
+// Amend is Update that also takes a file declaring an alias: the alias
+// pointing at it gets the new sidecar too.
+func (l Local) Amend(rel, id string, fn func(*Sidecar) error) (Sidecar, error) {
+	return l.update(rel, id, fn, true)
+}
+
+func (l Local) update(rel, id string, fn func(*Sidecar) error, aliased bool) (Sidecar, error) {
 	r, err := os.OpenRoot(l.Base)
 	if err != nil {
 		return Sidecar{}, err
@@ -1802,7 +1828,7 @@ func (l Local) Update(rel, id string, fn func(*Sidecar) error) (Sidecar, error) 
 		return Sidecar{}, err
 	}
 	defer h.unlock()
-	sc, err := l.current(r, rel, id)
+	sc, err := l.current(r, rel, id, aliased)
 	if err != nil {
 		return Sidecar{}, err
 	}
@@ -1813,10 +1839,19 @@ func (l Local) Update(rel, id string, fn func(*Sidecar) error) (Sidecar, error) 
 	if err := writeSidecar(r, l.phys(rel), sc); err != nil {
 		return Sidecar{}, err
 	}
+	// The sidecar of an alias is a copy of its target's.
+	var aerr error
+	if a := l.declares(r, rel, sc); a != "" {
+		if cur, err := readSidecar(r, l.phys(a)); err == nil && cur.AliasOf == rel {
+			cp := sc
+			cp.AliasOf = rel
+			aerr = writeSidecar(r, l.phys(a), cp)
+		}
+	}
 	// A new expiry may make another version the newest live one.
 	err = l.syncPermanent(r, l.permanentKey(sc))
 	l.rebuild(r)
-	return sc, err
+	return sc, errors.Join(aerr, err)
 }
 
 // Replace puts a copy of src at the stored name rel in place of its
@@ -1852,9 +1887,12 @@ func (l Local) ReplaceStaged(s *Staged, rel, id string, fn func(*Sidecar) error)
 		return err
 	}
 	defer h.unlock()
-	sc, err := l.current(r, rel, id)
+	sc, err := l.current(r, rel, id, false)
 	if err != nil {
 		return err
+	}
+	if sc.Hold {
+		return fmt.Errorf("%s: %w", rel, ErrOnHold)
 	}
 	prev := sc
 	if err := fn(&sc); err != nil {

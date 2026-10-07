@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"luk/internal/config"
 	"luk/internal/store"
@@ -66,4 +67,48 @@ func TestMaintainRetention(t *testing.T) {
 	if strings.Join(names, ",") != "db1-prod/3,db1-prod/4b,db1-stage/1,db1-stage/2" {
 		t.Errorf("catalog %v", names)
 	}
+}
+
+// A file on hold outlives its expiry, cleanup.age and the retention rules
+// until it is released.
+func TestJanitorHold(t *testing.T) {
+	base := t.TempDir()
+	st := &config.Storage{Type: "local", Base: base, Conflict: "version", Retention: []config.Retention{{Keep: config.Keep{Last: 1}}}}
+	st.Cleanup.Age = config.Duration(24 * time.Hour)
+	cfg := &config.Config{Storage: map[string]*config.Storage{"archive": st}}
+	e := &env{cfg: cfg, base: base, st: store.FromConfig(st), now: t0, logs: &bytes.Buffer{}}
+	old := t0.Add(-25 * time.Hour).Format(time.RFC3339)
+	e.put(t, "aged", "a", store.Sidecar{Received: old, Origin: "a"})
+	e.put(t, "expired", "b", store.Sidecar{Origin: "b", Expires: t0.Add(-time.Second).Format(time.RFC3339)})
+	e.put(t, "series/1", "c1", store.Sidecar{Origin: "c", Received: t0.Add(-2 * time.Hour).Format(time.RFC3339), Client: wire.Meta{File: "db.sql"}})
+	e.put(t, "series/2", "c2", store.Sidecar{Origin: "c", Received: t0.Add(-time.Hour).Format(time.RFC3339), Client: wire.Meta{File: "db.sql"}})
+	held := []string{"aged", "expired", "series/1"}
+	hold := func(on bool) {
+		t.Helper()
+		for _, rel := range held {
+			if _, err := e.st.Amend(rel, "id-"+rel, func(sc *store.Sidecar) error { sc.Hold = on; return nil }); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	present := func(want bool) {
+		t.Helper()
+		for _, rel := range held {
+			if exists(filepath.Join(base, store.DataDir, rel)) != want || exists(e.st.SidecarPath(rel)) != want {
+				t.Errorf("%s: present %v, want %v", rel, !want, want)
+			}
+		}
+		if !exists(filepath.Join(base, store.DataDir, "series/2")) {
+			t.Error("series/2 removed")
+		}
+	}
+	hold(true)
+	sweep(cfg, e.log(), t0)
+	present(true)
+	if e.logs.Len() != 0 {
+		t.Errorf("log: %s", e.logs)
+	}
+	hold(false)
+	sweep(cfg, e.log(), t0)
+	present(false)
 }

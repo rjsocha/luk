@@ -269,6 +269,178 @@ func TestStorageRm(t *testing.T) {
 	}
 }
 
+// storedSidecar reads the sidecar of the stored name of the storage drop of
+// storageConfig.
+func storedSidecar(t *testing.T, base, name string) store.Sidecar {
+	t.Helper()
+	f, sc, err := store.Local{Base: base, Conflict: "version"}.Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	return sc
+}
+
+func TestStorageTTL(t *testing.T) {
+	cfg, base := storageConfig(t)
+	ttl := func(args ...string) (string, error) {
+		return runLukd(t, append([]string{"storage", "ttl", "--storage", "drop", "-c", cfg}, args...)...)
+	}
+	for expires, why := range map[string]string{
+		"soon":                 "want never, a duration such as 30d or 12h, or an RFC 3339 time",
+		"0s":                   "want a positive duration",
+		"2026-10-07":           "want never, a duration",
+		"2020-01-01T00:00:00Z": "in the past",
+	} {
+		if _, err := ttl("--name", "c", "--expires", expires); err == nil || !strings.Contains(err.Error(), "--expires") || !strings.Contains(err.Error(), why) {
+			t.Errorf("--expires %s: %v", expires, err)
+		}
+	}
+	for name, why := range map[string]string{"nope": `storage drop: no stored file "nope"`, "../x": "refused"} {
+		if _, err := ttl("--name", "c", "--name", name, "--expires", "30d"); err == nil || !strings.Contains(err.Error(), why) {
+			t.Errorf("--name %s: %v", name, err)
+		}
+	}
+	if _, err := ttl("--name", "c"); err == nil || !strings.Contains(err.Error(), "expires") {
+		t.Errorf("no --expires: %v", err)
+	}
+	if sc := storedSidecar(t, base, "c"); sc.Expires != "" {
+		t.Fatalf("a refused command set %q", sc.Expires)
+	}
+
+	// The ttl policy of the storage does not bind the operator.
+	before := time.Now()
+	out, err := ttl("--name", "c", "--name", "sub/b", "--expires", "400d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"c", "sub/b"} {
+		sc := storedSidecar(t, base, name)
+		at, perr := time.Parse(time.RFC3339, sc.Expires)
+		if d := at.Sub(before.Add(400 * 24 * time.Hour)); perr != nil || d < -2*time.Second || d > time.Minute {
+			t.Errorf("%s: expires %q", name, sc.Expires)
+		}
+		if !strings.Contains(out, name+": expires "+sc.Expires+"\n") {
+			t.Errorf("%s: output %q", name, out)
+		}
+	}
+	if sc := storedSidecar(t, base, "c"); sc.ID != "id-c" || sc.OwnerKey != "cert:hosts:web1" {
+		t.Fatalf("sidecar %+v", sc)
+	}
+	out, err = ttl("--name", "c", "--expires", "2030-01-02T03:04:05+02:00")
+	if err != nil || out != "c: expires 2030-01-02T01:04:05Z\n" || storedSidecar(t, base, "c").Expires != "2030-01-02T01:04:05Z" {
+		t.Fatalf("timestamp: %v %q", err, out)
+	}
+	out, err = ttl("--name", "a", "--expires", "never")
+	if err != nil || out != "a: expires never\n" || storedSidecar(t, base, "a").Expires != "" {
+		t.Fatalf("never: %v %q", err, out)
+	}
+
+	// An alias is refused like rm refuses it, and follows its target.
+	l := store.Local{Base: base, Conflict: "version"}
+	src := filepath.Join(t.TempDir(), "src")
+	if err := os.WriteFile(src, []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	sc := store.Sidecar{ID: "id-t", Endpoint: "drop", Size: 1, Received: time.Now().UTC().Format(time.RFC3339),
+		Client: wire.Meta{Portal: wire.PortalDirect}, Meta: json.RawMessage(`{"alias":"latest"}`)}
+	if _, err := l.Put(src, "target", sc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ttl("--name", "latest", "--expires", "1h"); err == nil || !strings.Contains(err.Error(), `"latest" is an alias of "target"; name that file`) {
+		t.Fatalf("alias: %v", err)
+	}
+	if _, err := ttl("--name", "target", "--expires", "2031-01-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if a := storedSidecar(t, base, "latest"); a.AliasOf != "target" || a.Expires != "2031-01-01T00:00:00Z" {
+		t.Fatalf("alias sidecar %+v", a)
+	}
+}
+
+func TestStorageHold(t *testing.T) {
+	cfg, base := storageConfig(t)
+	run := func(cmd string, args ...string) (string, error) {
+		out, _, err := runLukdIn(t, "", append([]string{"storage", cmd, "--storage", "drop", "-c", cfg}, args...)...)
+		return out, err
+	}
+	flags := func(name string) string {
+		t.Helper()
+		out, err := run("ls")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range strings.Split(out, "\n")[1:] {
+			if f := strings.Fields(l); len(f) > 7 && f[0] == name {
+				return f[7]
+			}
+		}
+		t.Fatalf("no %s in\n%s", name, out)
+		return ""
+	}
+	// Every name is checked first: a once upload is never held.
+	if _, err := run("hold", "--name", "c", "--name", "a"); err == nil || !strings.Contains(err.Error(), `storage drop: "a": a once upload cannot be held`) {
+		t.Fatalf("once: %v", err)
+	}
+	if _, err := run("hold", "--name", "c", "--name", "nope"); err == nil || !strings.Contains(err.Error(), `no stored file "nope"`) {
+		t.Fatalf("unknown: %v", err)
+	}
+	if storedSidecar(t, base, "c").Hold || flags("c") != "-" {
+		t.Fatal("a refused command held c")
+	}
+	out, err := run("hold", "--name", "c", "--name", "sub/b")
+	if err != nil || out != "c: on hold\nsub/b: on hold\n" {
+		t.Fatalf("hold: %v %q", err, out)
+	}
+	if flags("c") != "hold" || flags("sub/b") != "mutable,hold" || flags("a") != "once,reveal" {
+		t.Fatalf("flags %s %s %s", flags("c"), flags("sub/b"), flags("a"))
+	}
+	out, err = run("ls", "--json")
+	var got []storageFile
+	if err != nil || json.Unmarshal([]byte(out), &got) != nil || len(got) != 3 || !got[0].Hold || got[1].Hold || !got[2].Hold ||
+		strings.Count(out, `"hold": true`) != 2 || strings.Contains(out, `"hold": false`) {
+		t.Fatalf("json %v %q", err, out)
+	}
+	// Held again, it stays held.
+	if out, err := run("hold", "--name", "c"); err != nil || out != "c: on hold\n" || !storedSidecar(t, base, "c").Hold {
+		t.Fatalf("hold twice: %v %q", err, out)
+	}
+
+	// rm refuses a file on hold, and removes nothing beside it.
+	if _, err := run("rm", "--name", "a", "--name", "c", "--yes"); err == nil ||
+		!strings.Contains(err.Error(), `storage drop: "c" is on hold; release it first (lukd storage release)`) {
+		t.Fatalf("rm: %v", err)
+	}
+	for _, name := range []string{"a", "c"} {
+		if _, err := os.Lstat(filepath.Join(base, "file", name)); err != nil {
+			t.Fatalf("%s removed by a refused rm: %v", name, err)
+		}
+	}
+	// The expiry of a file on hold changes.
+	if _, err := run("ttl", "--name", "c", "--expires", "1h"); err != nil || !storedSidecar(t, base, "c").Hold || storedSidecar(t, base, "c").Expires == "" {
+		t.Fatalf("ttl of a held file: %v", err)
+	}
+
+	out, err = run("release", "--name", "c", "--name", "a")
+	if err != nil || out != "c: released\na: released\n" || storedSidecar(t, base, "c").Hold || flags("c") != "-" {
+		t.Fatalf("release: %v %q", err, out)
+	}
+	if !storedSidecar(t, base, "sub/b").Hold {
+		t.Fatal("release of c released sub/b")
+	}
+	if out, err := run("rm", "--name", "c", "--yes"); err != nil || out != "c: removed\n" {
+		t.Fatalf("rm after release: %v %q", err, out)
+	}
+	for _, cmd := range []string{"hold", "release"} {
+		if _, err := run(cmd); err == nil || !strings.Contains(err.Error(), "name") {
+			t.Errorf("%s without --name: %v", cmd, err)
+		}
+		if _, err := runLukd(t, "storage", cmd, "--storage", "off", "--name", "a", "-c", cfg); err == nil || !strings.Contains(err.Error(), "not a local storage") {
+			t.Errorf("%s of s3: %v", cmd, err)
+		}
+	}
+}
+
 func TestStorageAsOwner(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("runs as root")
@@ -412,6 +584,33 @@ series pipeline=nightly origin=db1-stage file=db.sql: no rule
 		if _, err := os.Stat(filepath.Join(l.Base, store.DataDir, f)); err != nil {
 			t.Errorf("plan removed %s: %v", f, err)
 		}
+	}
+
+	// A file on hold is kept and takes no place in the counts of its rule.
+	if out, err := runLukd(t, "storage", "hold", "--storage", "archive", "--name", "db1-prod/db.sql", "-c", cfgPath); err != nil || out != "db1-prod/db.sql: on hold\n" {
+		t.Fatalf("hold: %v %q", err, out)
+	}
+	out, err = runLukd(t, "storage", "retention", "--storage", "archive", "-c", cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `series pipeline=nightly origin=db1-prod file=db.sql: rule 1 (origin *-prod; keep last 1, daily 2)
+  NAME                        RECEIVED              ACTION  REASONS
+  db1-prod/db.sql             2026-10-04T18:00:00Z  HELD    hold
+  db1-prod/db.sql.1759550400  2026-10-04T06:00:00Z  KEEP    last, daily 2026-10-04
+  db1-prod/db.sql.1759464000  2026-10-03T06:00:00Z  KEEP    daily 2026-10-03
+
+series pipeline=nightly origin=db1-stage file=db.sql: no rule
+  NAME              RECEIVED              ACTION  REASONS
+  db1-stage/db.sql  2026-10-04T06:00:00Z  KEEP    no rule
+`
+	if out != want {
+		t.Fatalf("plan with a hold:\n%s\nwant:\n%s", out, want)
+	}
+	out, err = runLukd(t, "storage", "retention", "--storage", "archive", "--json", "-c", cfgPath)
+	if err != nil || json.Unmarshal([]byte(out), &plans) != nil || !plans[0].Files[0].Hold || !plans[0].Files[0].Keep || plans[0].Files[1].Hold ||
+		!strings.Contains(out, `"hold": true`) {
+		t.Fatalf("json with a hold: %v\n%s", err, out)
 	}
 }
 

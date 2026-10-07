@@ -41,8 +41,8 @@ func storageCmd(cfgPath *string) *cobra.Command {
 		Use:   "storage",
 		Short: "Files of a local storage",
 		Long: "Files of a local storage, read from their sidecars. The commands work on files\n" +
-			"and may run while lukd runs (rm takes the base lock). Run as root they run\n" +
-			"again as the owner of the storage base (the service user).",
+			"and may run while lukd runs (rm, ttl, hold and release take the base lock). Run\n" +
+			"as root they run again as the owner of the storage base (the service user).",
 	}
 
 	var lsStorage, owner, older string
@@ -53,7 +53,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 		Long: "List the stored files of a local storage, newest first: name, size, received,\n" +
 			"expiry, owner (the name the portal shows, and the owner key), endpoint, flags\n" +
 			"(once, mutable, reveal or download, private or any, shared when other names\n" +
-			"hold the same content as hardlinks) and the URL when the\n" +
+			"hold the same content as hardlinks, hold for a file on hold) and the URL when the\n" +
 			"storage is exposed (the luk:// URL of its protect expose for a private file).\n" +
 			"--owner keeps the files of an identity: a key name, or the full owner key\n" +
 			"(key:<name>, cert:<ca>:<keyid>); --older those received longer ago than the\n" +
@@ -97,6 +97,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 		Long: "Remove stored files and their sidecars under the base lock; emptied\n" +
 			"directories are pruned, an alias moves to the next newest file and the\n" +
 			"catalog is rebuilt. Every name is checked before anything is removed.\n" +
+			"A file on hold is refused: release it first.\n" +
 			"Asks for confirmation on a terminal; elsewhere --yes is required.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -123,8 +124,8 @@ func storageCmd(cfgPath *string) *cobra.Command {
 			"series (pipeline, origin, file name) the rule that applies and every file,\n" +
 			"newest first, with KEEP and the reasons (last, within, daily 2026-10-04,\n" +
 			"weekly 2026-W40, monthly 2026-10, yearly 2026) or PRUNE. Files of a series no rule\n" +
-			"matches are kept (no rule). The maintenance of the process role removes the\n" +
-			"pruned files.",
+			"matches are kept (no rule). A file on hold is HELD: kept, and not counted by\n" +
+			"the rule. The maintenance of the process role removes the pruned files.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			_, st, l, err := openStorage(*cfgPath, retStorage)
@@ -175,8 +176,172 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	wat.MarkFlagRequired("storage")
 	completeFlags(wat, map[string]cobra.CompletionFunc{"storage": completeStorage})
 
-	cmd.AddCommand(ls, rm, ret, wat, storagePermanentCmd(cfgPath))
+	var ttlStorage, expires string
+	var ttlNames []string
+	ttl := &cobra.Command{
+		Use:   "ttl",
+		Short: "Set the expiry of stored files",
+		Long: "Set the expiry of stored files under the base lock, whatever the ttl policy of\n" +
+			"the storage says (ttl.user, ttl.min, ttl.max do not apply). --expires takes\n" +
+			"never (no expiry), a duration from now (30d, 12h) or an RFC 3339 time, which\n" +
+			"must not be past. Every name is checked before anything changes. The name of\n" +
+			"an alias or a permanent name is refused: name the file it points to, and the\n" +
+			"alias or permanent name follows.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			exp, err := parseExpires(expires, time.Now())
+			if err != nil {
+				return err
+			}
+			_, _, l, err := openStorage(*cfgPath, ttlStorage)
+			if err != nil {
+				return err
+			}
+			return amendStored(l, ttlStorage, ttlNames, nil, func(sc *store.Sidecar) { sc.Expires = exp },
+				"expires "+cmp.Or(exp, "never"), cmd.OutOrStdout())
+		},
+	}
+	ttl.Flags().StringVar(&ttlStorage, "storage", "", "storage name")
+	ttl.Flags().StringArrayVar(&ttlNames, "name", nil, "stored name, as ls shows it (repeatable)")
+	ttl.Flags().StringVar(&expires, "expires", "", "never, a duration from now (e.g. 30d) or an RFC 3339 time")
+	ttl.MarkFlagRequired("storage")
+	ttl.MarkFlagRequired("name")
+	ttl.MarkFlagRequired("expires")
+	completeFlags(ttl, map[string]cobra.CompletionFunc{"storage": completeStorage, "name": completeStored, "expires": completeNone})
+
+	cmd.AddCommand(ls, rm, ttl, holdCmd(cfgPath, true), holdCmd(cfgPath, false), ret, wat, storagePermanentCmd(cfgPath))
 	return cmd
+}
+
+// holdCmd is lukd storage hold (on) or release.
+func holdCmd(cfgPath *string, on bool) *cobra.Command {
+	var storage string
+	var names []string
+	cmd := &cobra.Command{
+		Use:   "release",
+		Short: "Release stored files from hold",
+		Long: "Clear the hold of stored files under the base lock: the expiry, the retention\n" +
+			"rules and cleanup.age apply to them again, and they may be removed and\n" +
+			"replaced. Every name is checked before anything changes.",
+		Args: cobra.NoArgs,
+	}
+	if on {
+		cmd.Use, cmd.Short = "hold", "Put stored files on hold"
+		cmd.Long = "Put stored files on hold under the base lock. Nothing removes a file on hold:\n" +
+			"not its expiry, the retention rules (which keep their number of copies beside\n" +
+			"it) or cleanup.age, and lukd storage rm and the link actions remove and\n" +
+			"replace refuse it, until lukd storage release. An expired file on hold is kept\n" +
+			"but not served. A once upload cannot be held. Every name is checked before\n" +
+			"anything changes. The name of an alias or a permanent name is refused: name\n" +
+			"the file it points to."
+	}
+	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		_, _, l, err := openStorage(*cfgPath, storage)
+		if err != nil {
+			return err
+		}
+		check, done := func(store.Sidecar) error { return nil }, "released"
+		if on {
+			done = "on hold"
+			check = func(sc store.Sidecar) error {
+				if sc.Client.Once {
+					return errors.New("a once upload cannot be held")
+				}
+				return nil
+			}
+		}
+		return amendStored(l, storage, names, check, func(sc *store.Sidecar) { sc.Hold = on }, done, cmd.OutOrStdout())
+	}
+	cmd.Flags().StringVar(&storage, "storage", "", "storage name")
+	cmd.Flags().StringArrayVar(&names, "name", nil, "stored name, as ls shows it (repeatable)")
+	cmd.MarkFlagRequired("storage")
+	cmd.MarkFlagRequired("name")
+	completeFlags(cmd, map[string]cobra.CompletionFunc{"storage": completeStorage, "name": completeStored})
+	return cmd
+}
+
+// parseExpires is the expiry --expires asks for at now: empty for never,
+// now plus a duration, or an RFC 3339 time after now; in UTC.
+func parseExpires(s string, now time.Time) (string, error) {
+	if s == "never" {
+		return "", nil
+	}
+	if d, err := wire.ParseDuration(s); err == nil {
+		if d <= 0 {
+			return "", fmt.Errorf("--expires %q: want a positive duration", s)
+		}
+		return now.Add(d).UTC().Format(time.RFC3339), nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return "", fmt.Errorf("--expires %q: want never, a duration such as 30d or 12h, or an RFC 3339 time", s)
+	}
+	if !t.After(now) {
+		return "", fmt.Errorf("--expires %q: in the past", s)
+	}
+	return t.UTC().Format(time.RFC3339), nil
+}
+
+// checkStored reads the sidecars of the stored files names of l, refusing
+// an invalid or unknown name and an alias or permanent name, which is told
+// to do (remove, name) the file it points to instead.
+func checkStored(l store.Local, storage string, names []string, do string) ([]store.Sidecar, error) {
+	var scs []store.Sidecar
+	for _, name := range names {
+		f, sc, err := l.Open(name)
+		switch {
+		case errors.Is(err, store.ErrInvalid):
+			return nil, fmt.Errorf("--name %q: refused: %w", name, err)
+		case errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("storage %s: no stored file %q", storage, name)
+		case err != nil:
+			return nil, err
+		}
+		f.Close()
+		if sc.AliasOf != "" {
+			return nil, fmt.Errorf("storage %s: %q is an alias of %q; %s that file", storage, name, sc.AliasOf, do)
+		}
+		scs = append(scs, sc)
+	}
+	return scs, nil
+}
+
+// amendStored rewrites the sidecars of the stored files names of l with
+// set, after checking them all (check, when set, may refuse one), and
+// prints done for each. A file replaced since the check is left alone.
+func amendStored(l store.Local, storage string, names []string, check func(store.Sidecar) error, set func(*store.Sidecar), done string, w io.Writer) error {
+	scs, err := checkStored(l, storage, names, "name")
+	if err != nil {
+		return err
+	}
+	if check != nil {
+		for i, name := range names {
+			if err := check(scs[i]); err != nil {
+				return fmt.Errorf("storage %s: %q: %w", storage, name, err)
+			}
+		}
+	}
+	var errs []error
+	for i, name := range names {
+		_, err := l.Amend(name, scs[i].ID, func(sc *store.Sidecar) error {
+			if check != nil {
+				if err := check(*sc); err != nil {
+					return err
+				}
+			}
+			set(sc)
+			return nil
+		})
+		if errors.Is(err, fs.ErrNotExist) {
+			err = errors.New("removed or replaced meanwhile")
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		fmt.Fprintf(w, "%s: %s\n", status.Clean(name), done)
+	}
+	return errors.Join(errs...)
 }
 
 // watchRow is one line of lukd storage watch: the evaluation of a series
@@ -285,7 +450,10 @@ func printRetention(w io.Writer, st *config.Storage, plans []store.SeriesPlan, a
 		fmt.Fprintln(tw, "  NAME\tRECEIVED\tACTION\tREASONS")
 		for _, f := range p.Files {
 			action := "PRUNE"
-			if f.Keep {
+			switch {
+			case f.Hold:
+				action = "HELD"
+			case f.Keep:
 				action = "KEEP"
 			}
 			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", status.Clean(f.Name), dash(status.Clean(f.Received)), action,
@@ -445,6 +613,9 @@ func printStorage(w io.Writer, files []storageFile, exposed, asJSON, human bool)
 		if f.Links > 1 {
 			flags = append(flags, "shared")
 		}
+		if f.Hold {
+			flags = append(flags, "hold")
+		}
 		size := strconv.FormatInt(f.Size, 10)
 		if human {
 			size = wire.HumanSize(f.Size)
@@ -461,25 +632,17 @@ func printStorage(w io.Writer, files []storageFile, exposed, asJSON, human bool)
 }
 
 // removeStored removes the stored files names of l after checking them all
-// and, without yes, a confirmation on a terminal. A file replaced since
-// the check is kept.
+// and, without yes, a confirmation on a terminal. A file on hold is
+// refused. A file replaced or put on hold since the check is kept.
 func removeStored(l store.Local, storage string, names []string, yes bool, in io.Reader, w, errw io.Writer) error {
-	var scs []store.Sidecar
-	for _, name := range names {
-		f, sc, err := l.Open(name)
-		switch {
-		case errors.Is(err, store.ErrInvalid):
-			return fmt.Errorf("--name %q: refused: %w", name, err)
-		case errors.Is(err, fs.ErrNotExist):
-			return fmt.Errorf("storage %s: no stored file %q", storage, name)
-		case err != nil:
-			return err
+	scs, err := checkStored(l, storage, names, "remove")
+	if err != nil {
+		return err
+	}
+	for i, name := range names {
+		if scs[i].Hold {
+			return fmt.Errorf("storage %s: %q is on hold; release it first (lukd storage release)", storage, name)
 		}
-		f.Close()
-		if sc.AliasOf != "" {
-			return fmt.Errorf("storage %s: %q is an alias of %q; remove that file", storage, name, sc.AliasOf)
-		}
-		scs = append(scs, sc)
 	}
 	if !yes {
 		if !stdinIsTerminal() {
@@ -501,6 +664,9 @@ func removeStored(l store.Local, storage string, names []string, yes bool, in io
 		err := l.RemoveIf(name, scs[i].ID)
 		if errors.Is(err, fs.ErrNotExist) {
 			err = fmt.Errorf("%s: removed or replaced meanwhile, kept", name)
+		}
+		if errors.Is(err, store.ErrOnHold) {
+			err = fmt.Errorf("%s: put on hold meanwhile, kept", name)
 		}
 		if err != nil {
 			errs = append(errs, err)

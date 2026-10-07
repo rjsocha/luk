@@ -175,10 +175,10 @@ func acceptedAfter(a, b Sidecar) bool {
 func sameUpload(a, b Sidecar) bool { return a.Order() == b.Order() && a.ID == b.ID }
 
 // permanentSound reports whether the current version of dir is t: the
-// same id, expiry and content, and its data the inode of t.
+// same id, expiry, hold and content, and its data the inode of t.
 func (l Local) permanentSound(r *os.Root, dir string, t target) bool {
 	cur, err := readCurrent(r, dir)
-	if err != nil || cur.AliasOf != t.rel || cur.ID != t.sc.ID || cur.Expires != t.sc.Expires || cur.SHA256 != t.sc.SHA256 ||
+	if err != nil || cur.AliasOf != t.rel || cur.ID != t.sc.ID || cur.Expires != t.sc.Expires || cur.Hold != t.sc.Hold || cur.SHA256 != t.sc.SHA256 ||
 		cur.Size != t.sc.Size || cur.Received != t.sc.Received || cur.Order() != t.sc.Order() || cur.Endpoint != t.sc.Endpoint {
 		return false
 	}
@@ -480,7 +480,7 @@ func (l Local) dropOthers(r *os.Root, h *held, key string, keep target) ([]Perma
 		}
 		id := v.sc.ID
 		err := l.removeHeld(r, h, v.rel, func(s Sidecar) bool { return s.ID == id })
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrOnHold) {
 			continue
 		}
 		if err != nil {
@@ -633,7 +633,8 @@ func (l Local) reconcilePermanent(r *os.Root, h *held, dry bool) (changed, any b
 			fix(func() error { return l.publish(r, key, t) })
 		}
 		for _, v := range versions[key] {
-			if v.rel == keep {
+			// A version on hold stays a stored file.
+			if v.rel == keep || v.sc.Hold {
 				continue
 			}
 			id := v.sc.ID

@@ -39,16 +39,19 @@ func SeriesOf(sc Sidecar) Series {
 const (
 	KeptNoRule     = "no rule"
 	KeptUnreadable = "received unreadable"
+	KeptHold       = "hold"
 )
 
 // RetainedFile is one file of a series in a retention plan: kept with the
 // reasons (last, within, daily 2026-10-04, weekly 2026-W40, monthly
-// 2026-10, yearly 2026, KeptNoRule, KeptUnreadable), or pruned.
+// 2026-10, yearly 2026, KeptNoRule, KeptUnreadable, KeptHold), or pruned.
+// Hold is a file on hold: kept whatever the rule says.
 type RetainedFile struct {
 	Name     string   `json:"name"`
 	ID       string   `json:"id"`
 	Received string   `json:"received"`
 	Keep     bool     `json:"keep"`
+	Hold     bool     `json:"hold,omitempty"`
 	Reasons  []string `json:"reasons,omitempty"`
 }
 
@@ -107,7 +110,8 @@ func SelectRetained(at []time.Time, k config.Keep, now time.Time) [][]string {
 // in series order, and decides per series by the first rule of st whose
 // origin globs match its origin; a series no rule matches is kept whole.
 // now is the end of the within windows. Files whose received time cannot
-// be read are kept and take no place in the counts. Unreadable sidecars
+// be read and files on hold are kept and take no place in the counts: a
+// series keeps what its rule keeps beside them. Unreadable sidecars
 // are returned as the error, after the plan of the readable ones.
 func (l Local) RetentionPlan(st *config.Storage, now time.Time) ([]SeriesPlan, error) {
 	type file struct {
@@ -123,7 +127,7 @@ func (l Local) RetentionPlan(st *config.Storage, now time.Time) ([]SeriesPlan, e
 		}
 		at, perr := time.Parse(time.RFC3339, sc.Received)
 		s := SeriesOf(sc)
-		groups[s] = append(groups[s], file{RetainedFile{Name: rel, ID: sc.ID, Received: sc.Received}, at, sc.Order(), perr == nil})
+		groups[s] = append(groups[s], file{RetainedFile{Name: rel, ID: sc.ID, Received: sc.Received, Hold: sc.Hold}, at, sc.Order(), perr == nil})
 		return nil
 	})
 	plans := make([]SeriesPlan, 0, len(groups))
@@ -145,21 +149,25 @@ func (l Local) RetentionPlan(st *config.Storage, now time.Time) ([]SeriesPlan, e
 			p.Rule, p.Keep = rule+1, &k
 			var at []time.Time
 			for _, f := range files {
-				if f.ok {
+				if f.ok && !f.Hold {
 					at = append(at, f.at)
 				}
 			}
 			reasons = SelectRetained(at, k, now)
 		}
+		counted := 0
 		for i, f := range files {
 			p.Files[i] = f.RetainedFile
 			switch {
+			case f.Hold:
+				p.Files[i].Reasons = []string{KeptHold}
 			case rule < 0:
 				p.Files[i].Reasons = []string{KeptNoRule}
 			case !f.ok:
 				p.Files[i].Reasons = []string{KeptUnreadable}
 			default:
-				p.Files[i].Reasons = reasons[i]
+				p.Files[i].Reasons = reasons[counted]
+				counted++
 			}
 			p.Files[i].Keep = p.Files[i].Reasons != nil
 		}
@@ -216,8 +224,8 @@ func planUntil(plans []SeriesPlan) time.Time {
 
 // Retain removes the files the retention plan of st prunes, each as
 // RemoveIf does (base lock, sidecar, aliases, content objects; the catalog
-// as l rebuilds it), calling removed after each removal. A file replaced
-// or removed meanwhile is skipped. It does nothing while the base and the
+// as l rebuilds it), calling removed after each removal. A file replaced,
+// removed or put on hold meanwhile is skipped. It does nothing while the base and the
 // rules are as at its last pass in this process that removed every file
 // it pruned, and no file that pass kept for within has left its window
 // by now.
@@ -245,7 +253,7 @@ func (l Local) Retain(st *config.Storage, now time.Time, removed func(SeriesPlan
 				continue
 			}
 			err := l.RemoveIf(f.Name, f.ID)
-			if errors.Is(err, fs.ErrNotExist) {
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrOnHold) {
 				continue
 			}
 			if err != nil {

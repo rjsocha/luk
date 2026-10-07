@@ -741,12 +741,14 @@ luk-link@v2
 
 Answers:
 
-- `remove`: 200 `{"url", "removed": true}`.
+- `remove`: 200 `{"url", "removed": true}`; 409 `link is on hold` for a
+  file the operator put on hold.
 - `ttl`: 200 `{"url", "expires", "ttl", "ttl_note", "ttl_min",
   "ttl_max"}` (`expires` and `ttl` omitted when there is no expiry); 422
   when the storage takes no client ttl.
 - `replace`: 409 `link is not mutable` for an upload sent without
-  `mutable`; else the OP gets the parts offer and the content goes in
+  `mutable`, 409 `link is on hold` for a file the operator put on hold;
+  else the OP gets the parts offer and the content goes in
   parts exactly as an upload (5.2; never deduplicated, no dry run); the
   COMPLETE answers 202 `{"url", "id", "size", "sha256"}`.
 - `list`: 200 `{"links": [{"url", "file", "size", "received", "expires",

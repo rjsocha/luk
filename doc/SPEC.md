@@ -1341,7 +1341,8 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
 
 - `remove`: the file and its sidecar are removed under the base lock (the
   empty directories pruned, an alias moved, the catalog rebuilt). 200
-  `{"url", "removed": true}`.
+  `{"url", "removed": true}`. A link on hold (see Hold in Storage) is
+  not removed: 409 `link is on hold`.
 - `ttl`: the new expiry is now plus the lifetime the storage `ttl` policy
   gives the requested `ttl` (clamped to `ttl.min` and `ttl.max` as for an
   upload; `max` gives `ttl.max`, and without one clears the expiry); the
@@ -1394,7 +1395,9 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   (rolled back as above), leaves the entry in the queue; it runs again
   at the next start. A link that declares an alias
   is not changed in place (409 for `ttl`, a failed store for
-  `replace`). Replaces are not ordered by acceptance: of two replaces of
+  `replace`). A link on hold (see Hold in Storage) is not replaced: 409
+  `link is on hold` at the request, a failed store when the hold was set
+  between the request and the store; its `ttl` still changes. Replaces are not ordered by acceptance: of two replaces of
   one link, the content of the one processed last stays.
 
 - `list`: one page of the files of the respond storage of the endpoint
@@ -1557,7 +1560,9 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   - either way every other stored version of the name is then removed as
     `lukd storage rm` removes a file (sidecar, objects, catalog), logged
     as `permanent version replaced`; a name has at most one stored
-    version;
+    version, besides versions on hold (see Hold in Storage): those stay
+    as stored files, and the newest live one is published again when no
+    newer version is left;
   - accepted before the current version (an older upload whose entry ran
     late): it never becomes current; it is removed again at once, logged
     as `permanent version superseded`;
@@ -3416,6 +3421,7 @@ purpose.
 - `cleanup.age` (local only, e.g. `14d`) - the retention of files without
   an expiry: they are removed once their `received` time is older,
   exposed or not (an archive too). Files with an expiry are left to it.
+  A file on hold is kept (see Hold).
 - `retention` (local only) - rules that keep a number of files per series
   (grandfather-father-son), and optionally every file of a recent window,
   and prune the rest:
@@ -3467,6 +3473,9 @@ purpose.
     stored path at once and so bypasses retention.
   - Retention works next to `ttl` and `cleanup.age`: a file goes when any
     of them removes it.
+  - A file on hold (see Hold) is kept and takes no place in the counts
+    and windows of its rule: the series keeps what the rule keeps of its
+    other files beside it. Released, it is a file of its series again.
   - The maintenance of the process role applies the rules (see Service)
     whenever the base or the rules changed since its last pass, or a file
     that pass kept for `within` has left its window since (the pass
@@ -3481,6 +3490,28 @@ purpose.
     logged at INFO: `retention removed` with `storage`, `name`, `id`,
     `pipeline`, `origin`, `file` and `rule` (1-based).
   - `lukd storage retention` shows the plan without changing anything.
+- Hold (local only) - the operator puts a stored file on hold with `lukd
+  storage hold` and clears it with `lukd storage release`; the sidecar
+  carries `hold: true` meanwhile. Nothing removes a file on hold:
+  - the expiry pass of the janitor skips it, expired or past
+    `cleanup.age`; an expired file on hold stays on disk but is not
+    served or listed, as any expired file, and goes at the first pass
+    after its release;
+  - `retention` keeps it without counting it (see `retention`);
+  - `lukd storage rm` and the link actions `remove` and `replace` refuse
+    it;
+  - a store with `conflict: replace` over its name fails (`<name>: on
+    hold`, the upload fails as any failed store); with `conflict:
+    version` the file becomes a version as usual and stays on hold under
+    the version name;
+  - a newer version of a permanent name does not remove a version on
+    hold (see Permanent names).
+  The removal itself checks the hold under the base lock, so a hold set
+  while a pass or a command runs is honoured. A hold changes nothing
+  else: the file is served, listed, watched (`watch` counts it as a copy
+  of its series) and its expiry may be changed (`luk link ttl`, `lukd
+  storage ttl`). A `once` upload cannot be held. Aliases and permanent
+  names are not held themselves: they follow the file they point to.
 - `watch` (local only) - monitoring rules of the series (as in
   `retention`: pipeline, origin and file name), with thresholds that are
   only the configured values (nothing is learned or adapted):
@@ -3604,7 +3635,7 @@ purpose.
   size, sha256, received, `accepted` and `accepted_seq` (see Acceptance
   order), expires, `owner` unless `no_owner`, `owner_key`,
   `pipeline` and `origin` of the store (see `retention`), `updated` after
-  a replace). Keeping sidecars out of the data tree
+  a replace, `hold: true` while the file is on hold). Keeping sidecars out of the data tree
   means an uploaded `x.json` can never collide with the sidecar of `x`,
   and expose never serves anything under `.db/`. A drop stores the blob
   as `<base>/file/<random>`; two uploads with the same `--name` get two
@@ -3746,7 +3777,8 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   display name of the sidecar), `OWNER KEY`, `ENDPOINT`, `FLAGS` (`once`,
   `mutable`, then `reveal` or `download`, then `private` or `any`, then
   `shared` when other names hold the same content as hardlinks: other
-  uploads through `hardlink`, versions, aliases, claimed copies), and
+  uploads through `hardlink`, versions, aliases, claimed copies, then
+  `hold` for a file on hold), and
   `URL` (the expose URL of the name; for a private file the `luk://` URL
   of the protect expose, and for a file of an `expose` with `auth.ssh`
   the `luk://` URL of that expose (`https://` with `auth.basic` too),
@@ -3760,7 +3792,7 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   than the duration (`7d`, `12h`). `--json` prints an array of the full
   records: `name`, `url` (when exposed), `links` (the number of names
   holding the content: the hardlinks of the file less its object) and
-  every sidecar field. Sidecars
+  every sidecar field (`"hold": true` for a file on hold). Sidecars
   that cannot be read are reported after the list (exit 1).
 - `lukd storage rm --storage NAME --name STORED [--name STORED]... [--yes]`:
   removes each stored file and its sidecar under the base lock, as the
@@ -3770,19 +3802,47 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   is refused with the reason (`--name "../x": refused: "../x": element
   ".." is not a name: invalid path`), an unknown one (no file or no
   sidecar) and an alias (`"<name>" is an alias of "<target>"; remove
-  that file`) fail. Without
+  that file`; a permanent name is such an alias of its current version)
+  fail, and so does a file on hold (`"<name>" is on hold; release it
+  first (lukd storage release)`). Without
   `--yes` it lists the files on stderr and asks for confirmation on a
   terminal (`[y/N]`), and refuses when stdin is not one. A file replaced
   between the check and the removal is kept. Prints `<name>: removed`
+  per file.
+- `lukd storage ttl --storage NAME --name STORED [--name STORED]...
+  --expires never|DURATION|TIME`: sets the expiry of each stored file,
+  whatever the `ttl` policy of the storage says (`ttl.user`, `ttl.min`
+  and `ttl.max` bind clients, not the operator). `never` clears the
+  expiry (the file is then subject to `cleanup.age`), a duration (`30d`,
+  `12h`; positive) means now plus it, and a time must be RFC 3339 and
+  not past (`--expires "<value>": in the past`); it is stored in UTC.
+  The sidecar is replaced atomically under the base lock, as the link
+  `ttl` does, a permanent name whose current version it is published
+  again and the catalog rebuilt. Every name is checked first as `rm`
+  checks it and nothing changes when one fails; an alias and a permanent
+  name are refused (`"<name>" is an alias of "<target>"; name that
+  file`): the expiry is set on the file they point to and they follow
+  it, also for a file that declares an alias. A file on hold takes a new
+  expiry. A file replaced between the check and the change is left
+  alone. Prints `<name>: expires <time>` (`expires never`) per file.
+- `lukd storage hold --storage NAME --name STORED [--name STORED]...` and
+  `lukd storage release --storage NAME --name STORED [--name
+  STORED]...`: set and clear the hold of each stored file (see Hold in
+  Storage) in its sidecar, under the base lock. The names are checked as
+  for `ttl` (aliases and permanent names refused the same way); `hold`
+  also refuses a `once` upload (`"<name>": a once upload cannot be
+  held`). Holding a file on hold and releasing one that is not change
+  nothing and succeed. Print `<name>: on hold` and `<name>: released`
   per file.
 - `lukd storage retention --storage NAME [--json]`: the retention plan
   (see `retention`), read only. Per series, in order of pipeline, origin
   and file name, a line naming the series and the rule that applies,
   then its files newest first as aligned columns `NAME`, `RECEIVED`,
-  `ACTION` (`KEEP` or `PRUNE`) and `REASONS` (`last`, `within`, `daily
+  `ACTION` (`KEEP`, `PRUNE`, or `HELD` for a file on hold) and `REASONS`
+  (`last`, `within`, `daily
   2026-10-04`, `weekly 2026-W40`, `monthly 2026-10`, `yearly 2026`;
   `no rule` for every file of a series no rule matches, `received
-  unreadable`; `-` for a pruned file). An empty pipeline or origin shows
+  unreadable`, `hold`; `-` for a pruned file). An empty pipeline or origin shows
   as `-`.
 
   ```
@@ -3800,8 +3860,8 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   `--json` prints an array of the series: `pipeline`, `origin`, `file`,
   `rule` (1-based, omitted for none), `keep` (the counts of the rule,
   `within` as in the configuration, `"2d"`) and
-  `files`, each with `name`, `id`, `received`, `keep` (true or false) and
-  `reasons`. Sidecars that cannot be read are reported after the plan
+  `files`, each with `name`, `id`, `received`, `keep` (true or false),
+  `hold` (true for a file on hold, else omitted) and `reasons`. Sidecars that cannot be read are reported after the plan
   (exit 1).
 - `lukd storage permanent --storage NAME [--json]`: the permanent
   names of the storage (the directories of `.db/permanent/`), read only,
