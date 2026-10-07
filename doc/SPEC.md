@@ -4674,7 +4674,7 @@ sudo are involved.
     `relay`) running at once, at least 1, default 16. Each step holds
     its connection for its whole run. A step request over the limit
     waits in lukd run for a free slot (an exclusive `flock` on one of
-    `/run/lukd-run/slot/<n>.lock`, `<n>` from 1 to the limit, polled),
+    `/run/lukd-run/.slot/<n>.lock`, `<n>` from 1 to the limit, polled),
     its unit not yet started, without a limit, as an upload waits for
     `queue.concurrency`: the wait does not count toward the pipeline
     `timeout`, which measures work only and starts when the unit starts

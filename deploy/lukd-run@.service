@@ -24,7 +24,7 @@ StandardError=journal
 MemoryMax=128M
 TasksMax=64
 RuntimeMaxSec=15d
-# Lock files shared by all instances: the unit slots (slot/<n>.lock), the
+# Lock files shared by all instances: the unit slots (.slot/<n>.lock), the
 # workspaces in use (.ws/<unit>.lock) and the jobs with state: locked
 # (<job>/<pipeline>.lock). Kept when an instance stops, emptied by a reboot.
 RuntimeDirectory=lukd-run

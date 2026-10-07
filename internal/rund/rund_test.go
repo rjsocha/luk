@@ -800,6 +800,11 @@ func TestServeProgramStep(t *testing.T) {
 	if ents, err := os.ReadDir(filepath.Join(e.srv.Locks, workspace.LockDir)); err != nil || len(ents) != 0 {
 		t.Fatalf("workspace locks %v %v", ents, err)
 	}
+	// The unit slots lie in .slot, apart from the state locks of a job
+	// (<job>/<pipeline>.lock), which a job named slot would share.
+	if _, err := os.Stat(filepath.Join(e.srv.Locks, SlotDir, "1.lock")); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // The job of a run: {job} step, of a relay step and a nested job run as

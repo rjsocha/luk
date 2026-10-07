@@ -42,7 +42,7 @@ type Server struct {
 	Config string
 	Jobs   string
 	// Locks is the RuntimeDirectory of lukd-run@: the state locks of the
-	// jobs with `state: locked`, the unit slots (slot/<n>.lock) and the
+	// jobs with `state: locked`, the unit slots (.slot/<n>.lock) and the
 	// workspace locks; empty means DefaultLocks.
 	Locks string
 	// Owner must own the config, run.d and its files and the lukd
@@ -374,12 +374,17 @@ var errGone = errors.New("peer closed")
 
 func (s *Server) locks() string { return cmp.Or(s.Locks, DefaultLocks) }
 
+// SlotDir holds the unit slots below the lock directory. The dot keeps it
+// apart from the state locks <job>/<pipeline>.lock: no job name starts
+// with a dot.
+const SlotDir = ".slot"
+
 // slot takes a unit slot, the exclusive lock of one of
-// <Locks>/slot/1.lock to <max>.lock, trying all of them every lockPoll
+// <Locks>/.slot/1.lock to <max>.lock, trying all of them every lockPoll
 // until one is free or gone closes. The slot lasts until free or the end
 // of the process.
 func (s *Server) slot(max int, gone <-chan struct{}) (free func(), err error) {
-	dir := filepath.Join(s.locks(), "slot")
+	dir := filepath.Join(s.locks(), SlotDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
