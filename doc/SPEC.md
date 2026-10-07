@@ -4738,7 +4738,12 @@ sudo are involved.
   - `state` (optional, needs `user`): `locked` or `shared`, a state
     directory kept between runs, one per job and pipeline; absent means
     none. See
-    Environment and state below.
+    Environment and state below. A dynamic user cannot have one:
+    systemd fails such a unit at NAMESPACE under `PrivatePIDs=yes`
+    (upstream bug https://github.com/systemd/systemd/issues/41014, seen on
+    systemd 257 and 262); the refusal is `state needs user (systemd bug
+    #41014: a dynamic user with a state directory fails under
+    PrivatePIDs)`.
   - `privileged` (optional, needs `user`): `true` runs the job without
     `NoNewPrivileges=yes`, for the setuid `newuidmap` of rootless podman
     (see Containers). Every setuid binary of the host then works in that

@@ -328,8 +328,14 @@ func (j *Job) validate() error {
 	if j.Privileged && j.User == "" {
 		bad("privileged needs user")
 	}
+	// Upstream bug systemd#41014: a dynamic user with a StateDirectory=
+	// fails at NAMESPACE (226) under PrivatePIDs=yes, because the id-mapped
+	// mount of /var/lib/private writes uid_map through the host procfs.
+	// Seen on systemd 257.13 (kernel 6.12) and 262 (kernel 7.2). Once fixed,
+	// drop this rule; a job that needs state before that could get a per-job
+	// opt-out of PrivatePIDs instead.
 	if j.State != "" && j.User == "" {
-		bad("state needs user")
+		bad("state needs user (systemd bug #41014: a dynamic user with a state directory fails under PrivatePIDs)")
 	}
 	for _, g := range j.Groups {
 		if !account.MatchString(g) {
