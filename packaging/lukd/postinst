@@ -15,5 +15,10 @@ if [ "$1" = configure ]; then
   systemctl daemon-reload || true
   if [ -n "$2" ]; then
     systemctl try-restart lukd-receive.service lukd-process.service || true
+    # A running lukd wants its run socket; an upgrade does not restart
+    # lukd.service itself, so start what it would pull in.
+    if systemctl is-active --quiet lukd.service; then
+      systemctl start lukd-run.socket || true
+    fi
   fi
 fi

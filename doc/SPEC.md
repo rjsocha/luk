@@ -4638,8 +4638,9 @@ sudo are involved.
   `RuntimeMaxSec=15d` as a backstop: they bound the helper, not the unit
   it starts, which systemd-run starts as a transient unit of its own in
   `system.slice`). `/run/luk` comes from tmpfiles.d
-  (`deploy/luk.tmpfiles.conf`, `root:luk` 0750). Enable with `systemctl
-  enable --now lukd-run.socket`. `deploy/lukd-run-prune.service` and
+  (`deploy/luk.tmpfiles.conf`, `root:luk` 0750). `lukd.service` pulls
+  the socket in (`Wants=`), so it listens whenever lukd runs: every
+  `run` and `relay` step needs it. `deploy/lukd-run-prune.service` and
   `deploy/lukd-run-prune.timer` remove leftover workspaces (see
   Workspace below).
 - `lukd-process` (and `lukd`) need no drop-in: `ProtectSystem=strict`
