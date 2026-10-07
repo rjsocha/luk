@@ -4931,8 +4931,9 @@ sudo are involved.
   - Prune: `<lukd> run workspace prune` (its own unit,
     `lukd-run-prune.service` with the sandbox of the helpers, pulled in
     by `lukd.service` at start and run every 15 minutes by
-    `lukd-run-prune.timer`; it talks to nobody) removes, with the code of
-    the remove helper, every workspace of `<root>/root/job` named like a
+    `lukd-run-prune.timer`, `TimeoutStartSec=10min`, so a prune stuck
+    in btrfs I/O is killed and the unit fails; it talks to nobody)
+    removes, with the code of the remove helper, every workspace of `<root>/root/job` named like a
     unit (the pattern above) whose unit is not active; any other entry is
     logged and left alone. lukd run holds an exclusive `flock` on
     `/run/lukd-run/.ws/<unit>.lock` (root, 0600, removed on release) from

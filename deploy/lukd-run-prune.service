@@ -5,6 +5,10 @@ Description=luk run: remove leftover workspaces of lukd run
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/lukd run workspace prune
+# A oneshot has no start timeout by default: a prune stuck in btrfs I/O
+# would never end, the timer could not start it again and the count would
+# stay as it is. Killed, it fails visibly in systemd.
+TimeoutStartSec=10min
 # The sandbox of the helper units of lukd run (see Workspace in
 # doc/SPEC.md). A root other than /var/lib/luk needs its path in a drop-in.
 # The workspaces and the count of leftovers are the only writable paths;
