@@ -4861,7 +4861,9 @@ sudo are involved.
     validates the name the same way, reads the UID and GID systemd
     allocated to that unit (`systemctl show -p UID -p GID --value
     <unit>`, never the environment; a dynamic user exists from the start
-    of its unit, before `ExecStartPre`) and sets them as owner of the
+    of its unit, before `ExecStartPre`; the helpers run
+    `/usr/bin/systemctl` with an environment of their own, so neither
+    `PATH` nor `LD_PRELOAD` of the job `env` reaches it) and sets them as owner of the
     workspace of that name through the bind (the same inode; opened with
     `O_DIRECTORY|O_NOFOLLOW`, `fchown`), mode 0700, nothing else: the
     wrapper creates what lies inside, as the user of the unit. A failure

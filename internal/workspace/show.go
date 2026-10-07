@@ -9,10 +9,20 @@ import (
 // Show reads properties of the service unit unit, as Systemctl does.
 type Show func(unit string, props ...string) (map[string]string, error)
 
+// systemctl is the systemctl binary, by absolute path, and systemctlEnv
+// its whole environment: own runs as root (ExecStartPre=+) with the
+// environment of the job unit, whose PATH, LD_PRELOAD or SYSTEMD_* must
+// not reach it.
+const systemctl = "/usr/bin/systemctl"
+
+var systemctlEnv = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
+
 // Systemctl reads props of <unit>.service with systemctl show; a
 // property missing from the output is an error.
 func Systemctl(unit string, props ...string) (map[string]string, error) {
-	out, err := exec.Command("systemctl", "show", "-p", strings.Join(props, ","), unit+".service").Output()
+	cmd := exec.Command(systemctl, "show", "-p", strings.Join(props, ","), unit+".service")
+	cmd.Env = systemctlEnv
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("systemctl show %s: %w", unit, err)
 	}
