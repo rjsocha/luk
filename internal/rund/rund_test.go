@@ -922,8 +922,9 @@ func TestServeWorkspaceNotCreated(t *testing.T) {
 	if len(fs) != 3 || fs[0].typ != runproto.Started || fs[1].p != "lukd run: workspace not created\n" || fs[2].p != "1" {
 		t.Fatalf("%+v", fs)
 	}
-	if n := len(e.fr.argvs()); n != 1 {
-		t.Fatalf("%d runs", n)
+	// The remove helper follows the failed create, under its lock.
+	if runs := e.fr.argvs(); len(runs) != 2 || helperAction(runs[0]) != "create" || helperAction(runs[1]) != "remove" {
+		t.Fatalf("%q", runs)
 	}
 	if ents, err := os.ReadDir(filepath.Join(e.srv.Locks, workspace.LockDir)); err != nil || len(ents) != 0 {
 		t.Fatalf("workspace locks %v %v", ents, err)
@@ -1294,7 +1295,7 @@ func TestServeHelperTimeout(t *testing.T) {
 	if err != nil || len(fs) != 2 || fs[1] != (frame{runproto.Exit, "0"}) {
 		t.Fatalf("hung remove: %+v %v", fs, err)
 	}
-	if runs := e.fr.argvs(); len(runs) != 4 || helperAction(runs[3]) != "remove" {
+	if runs := e.fr.argvs(); len(runs) != 5 || helperAction(runs[1]) != "remove" || helperAction(runs[4]) != "remove" {
 		t.Fatalf("%q", runs)
 	}
 }

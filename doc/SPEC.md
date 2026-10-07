@@ -4854,7 +4854,8 @@ sudo are involved.
     parent descriptor and the name), `root:root` 0700, empty. A failure
     fails the step before the job unit starts: lukd run answers with the
     refusal `lukd run: workspace not created`, the reason in the journal
-    of the helper unit.
+    of the helper unit, and starts the remove helper (below) for what a
+    create that failed half-way may have left.
   - Own: `ExecStartPre=+<lukd> run workspace own <unit>` of the job unit
     (root, in the namespace of the unit, before the main process)
     validates the name the same way, reads the UID and GID systemd
@@ -4933,9 +4934,9 @@ sudo are involved.
     by `lukd.service` at start and run every 15 minutes by
     `lukd-run-prune.timer`, `TimeoutStartSec=10min`, so a prune stuck
     in btrfs I/O is killed and the unit fails; it talks to nobody)
-    removes, with the code of the remove helper, every workspace of `<root>/root/job` named like a
-    unit (the pattern above) whose unit is not active; any other entry is
-    logged and left alone. lukd run holds an exclusive `flock` on
+    removes, with the code of the remove helper, every workspace of
+    `<root>/root/job` named like a unit (the pattern above) whose unit is
+    not active; any other entry is logged and left alone. lukd run holds an exclusive `flock` on
     `/run/lukd-run/.ws/<unit>.lock` (root, 0600, removed on release) from
     before the create helper until after the remove helper, and prune
     skips a workspace whose lock is held, so it never removes one that is

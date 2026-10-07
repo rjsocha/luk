@@ -215,6 +215,10 @@ func (s *Server) serve(g *Global, conn *net.UnixConn, fw *runproto.FrameWriter) 
 	code, err := s.helper(g.Root, "create", u.Name)
 	if err != nil || code != 0 {
 		s.Log.Error("workspace not created", "unit", u.Name, "exit", code, "err", err)
+		// A create that failed after the subvolume existed leaves it:
+		// lukd run removes what it may have created, a missing one is
+		// no error.
+		s.remove(g.Root, u.Name)
 		return refusal{errNotCreated}
 	}
 
