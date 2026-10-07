@@ -85,6 +85,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	ls.Flags().StringVar(&older, "older", "", "only the files received longer ago than this (e.g. 7d)")
 	ls.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	ls.Flags().BoolVarP(&human, "human", "H", false, "sizes with a unit (1.5K, 4M, 12.5G) instead of bytes")
+	ls.Flags().BoolVar(&human, "human-readable", false, "same as --human")
 	ls.MarkFlagRequired("storage")
 	completeFlags(ls, map[string]cobra.CompletionFunc{"storage": completeStorage, "owner": completeOwner, "older": completeNone})
 
