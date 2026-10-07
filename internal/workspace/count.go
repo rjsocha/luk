@@ -78,8 +78,9 @@ func decodeCount(f *os.File, path string) (*Count, error) {
 
 // updateCount replaces the count in dir with next(old) under an exclusive
 // flock on the lock file, through a temporary file renamed over it; the
-// file is 0640 and of the group of dir, so the group luk of CountDir can
-// read it.
+// file is 0640 and gets the group luk from CountDir, which is setgid
+// (2750 root:luk from tmpfiles.d), so the group luk can read it without
+// CAP_CHOWN in the writer.
 func updateCount(dir string, now time.Time, log *slog.Logger, next func(int) int) error {
 	d, err := os.OpenFile(dir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -112,17 +113,13 @@ func updateCount(dir string, now time.Time, log *slog.Logger, next func(int) int
 	if err != nil {
 		return err
 	}
-	var st unix.Stat_t
-	if err := unix.Fstat(dfd, &st); err != nil {
-		return err
-	}
 	tmp := "." + CountName + ".tmp-" + random12()
 	fd, err := unix.Openat(dfd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o640)
 	if err != nil {
 		return fmt.Errorf("%s: %w", filepath.Join(dir, tmp), err)
 	}
 	f := os.NewFile(uintptr(fd), filepath.Join(dir, tmp))
-	err = writeCount(f, b, int(st.Gid))
+	err = writeCount(f, b)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -136,10 +133,7 @@ func updateCount(dir string, now time.Time, log *slog.Logger, next func(int) int
 	return nil
 }
 
-func writeCount(f *os.File, b []byte, gid int) error {
-	if err := unix.Fchown(int(f.Fd()), -1, gid); err != nil {
-		return err
-	}
+func writeCount(f *os.File, b []byte) error {
 	if err := unix.Fchmod(int(f.Fd()), 0o640); err != nil {
 		return err
 	}

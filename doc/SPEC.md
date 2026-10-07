@@ -4940,9 +4940,10 @@ sudo are involved.
     skips a workspace whose lock is held, so it never removes one that is
     being set up or in use.
   - The count of leftover workspaces lives in
-    `/run/luk/workspaces/count.json` (the directory `root:luk` 0750 from
-    tmpfiles.d, the file 0640, `{"leftover": N, "updated": "<UTC
-    time>"}`, replaced atomically under an exclusive `flock` on
+    `/run/luk/workspaces/count.json` (the directory `root:luk` 2750 from
+    tmpfiles.d, setgid so the file gets the group `luk` without
+    `CAP_CHOWN` in the helpers, the file 0640, `{"leftover": N,
+    "updated": "<UTC time>"}`, replaced atomically under an exclusive `flock` on
     `/run/luk/workspaces/lock`): a failed remove adds one at once, and
     prune writes the number it still could not remove, so only prune
     lowers it, when it cleans up. lukd process reports it in

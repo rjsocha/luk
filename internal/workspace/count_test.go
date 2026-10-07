@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestLeftoverCount(t *testing.T) {
@@ -28,6 +30,12 @@ func TestLeftoverCount(t *testing.T) {
 	fi, _ := os.Stat(filepath.Join(dir, CountName))
 	if fi.Mode().Perm() != 0o640 {
 		t.Fatalf("mode %v", fi.Mode())
+	}
+	var dst, fst unix.Stat_t
+	unix.Stat(dir, &dst)
+	unix.Stat(filepath.Join(dir, CountName), &fst)
+	if fst.Gid != dst.Gid {
+		t.Fatalf("group %d, dir %d", fst.Gid, dst.Gid)
 	}
 	if err := SetLeftover(dir, 2, now.Add(time.Hour), quiet); err != nil {
 		t.Fatal(err)
