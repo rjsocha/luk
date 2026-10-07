@@ -42,7 +42,7 @@ Typical uses:
 ## Install
 
 Releases carry the `luk` client for Linux and macOS, and Debian packages
-(amd64) of `luk` and `lukd`:
+of `luk` (amd64, arm64) and `lukd` (amd64):
 
 ```sh
 # client

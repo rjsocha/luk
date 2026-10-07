@@ -12,27 +12,24 @@ before:
     - sh -c 'go run ./cmd/luk-job completion bash > packaging/build/luk-job.bash'
 
 builds:
-  # luk for linux/amd64 alone feeds the deb; luk for the other
-  # platforms only the release binaries.
-  - id: luk-amd64
+  # luk for linux feeds the debs (amd64 and arm64); luk for macOS only
+  # the release binaries.
+  - id: luk-linux
     main: ./cmd/luk
     binary: luk
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags: ["-s -w -X main.buildVersion={{ .Version }}"]
     goos: [linux]
-    goarch: [amd64]
+    goarch: [amd64, arm64]
   - id: luk
     main: ./cmd/luk
     binary: luk
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags: ["-s -w -X main.buildVersion={{ .Version }}"]
-    goos: [linux, darwin]
+    goos: [darwin]
     goarch: [amd64, arm64]
-    ignore:
-      - goos: linux
-        goarch: amd64
   - id: lukd
     main: ./cmd/lukd
     binary: lukd
@@ -51,10 +48,11 @@ builds:
     goarch: [amd64]
 
 # The release carries the luk client only: plain binaries for linux and
-# macOS (luk-linux-amd64, ...), and the deb packages (amd64).
+# macOS (luk-linux-amd64, ...), and the deb packages (luk for amd64 and
+# arm64, lukd for amd64).
 archives:
   - id: luk
-    ids: [luk, luk-amd64]
+    ids: [luk, luk-linux]
     formats: [binary]
     name_template: "luk-{{ .Os }}-{{ .Arch }}"
 
@@ -64,7 +62,7 @@ checksum:
 nfpms:
   - id: luk
     package_name: luk
-    ids: [luk-amd64]
+    ids: [luk-linux]
     contents:
       - src: packaging/build/luk.bash
         dst: /usr/share/bash-completion/completions/luk
