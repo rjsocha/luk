@@ -2718,7 +2718,7 @@ func ValidJobName(n string) bool { return len(n) <= maxJobName && jobName.MatchS
 
 // ValidPipelineName reports whether n may name a pipeline: [A-Za-z0-9_.-],
 // not starting with a dot or a dash, at most maxPipelineName bytes. lukd
-// run refuses a work directory of any other pipeline name.
+// run refuses a request of any other pipeline name.
 func ValidPipelineName(n string) bool {
 	return len(n) <= maxPipelineName && pipelineName.MatchString(n)
 }
