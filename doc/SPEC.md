@@ -4797,7 +4797,7 @@ sudo are involved.
   (--uid=<user> | -p DynamicUser=yes -p User=<dynamic user>)
   --working-directory=<workspace> [--gid=<group>]
   [-p SupplementaryGroups=<groups>] [-p NoNewPrivileges=yes]
-  -p PrivateTmp=yes -p ProtectProc=invisible -p PrivatePIDs=yes
+  -p PrivateTmp=yes -p ProtectProc=invisible [-p PrivatePIDs=yes]
   -p InaccessiblePaths=-<config dir> -p InaccessiblePaths=-/run/luk
   [-p InaccessiblePaths=-<path> ...] -p TemporaryFileSystem=<root>:ro
   -p BindPaths=<workspace>:<workspace>:norbind
@@ -5053,6 +5053,13 @@ sudo are involved.
     runs of one step or one job share a dynamic user, jobs share a
     static `user`) would otherwise reach each other's workspace and
     `.luk/run.sock` through `/proc/<pid>/root` and `/proc/<pid>/cwd`.
+    Not on a job without `user` that has `state`: systemd 257 refuses
+    `PrivatePIDs=yes` with the state directory of a dynamic user (the
+    unit fails at step `NAMESPACE`). With `state: locked` nothing is lost
+    (one run per job and pipeline at a time, the only units of that
+    dynamic user); with `state: shared` the concurrent runs of the job on
+    one pipeline can reach each other's workspace, as they share the
+    state directory anyway; give such a job a `user` to isolate them.
   - `NoNewPrivileges=yes` on every unit (`sudo` and setuid binaries
     fail), except a job with `privileged`.
   - The `-` of `InaccessiblePaths=` skips a missing path; a missing

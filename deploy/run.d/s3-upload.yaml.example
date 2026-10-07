@@ -9,10 +9,10 @@
 
 # User of the job, optional: without user the job runs as a systemd
 # dynamic user, one per job and pipeline, shared by the concurrent runs of
-# the job on that pipeline (each unit has its own PID namespace), that
-# writes only its own /tmp, /var/tmp, the state directory and its
-# workspace. With user the workspace belongs to
-# that user. A unit gets no group of luk: its workspace is its own.
+# the job on that pipeline (each unit has its own PID namespace, except
+# with state, see Sandbox of a unit in doc/SPEC.md), that writes only its
+# own /tmp, /var/tmp, the state directory and its workspace. With user
+# the workspace belongs to that user. A unit gets no group of luk: its workspace is its own.
 # groups adds supplementary groups and keeps the user's own. group
 # (needs user) would replace the primary group.
 user: luk-s3

@@ -509,7 +509,9 @@ func (u *Unit) Argv(box *Box, vars []string) ([]string, error) {
 	if u.State != "" {
 		state = StatePath(u.Job, u.Pipeline)
 	}
-	sb, err := sandbox(box, ws, u.Command, state)
+	// systemd 257 refuses PrivatePIDs=yes with the state directory of a
+	// dynamic user (EPERM setting up the mount namespace).
+	sb, err := sandbox(box, ws, u.Command, state, u.User != "" || state == "")
 	if err != nil {
 		return nil, err
 	}
@@ -581,13 +583,14 @@ func under(p, d string) bool {
 // empty read-only tmpfs with only the workspace ws bound back, read-write
 // and at the same path, so LUK_WORK, LUK_IN, LUK_OUT, LUK_META and LUK_TMP
 // stay valid. The workspace and its parent are root's, so the unit cannot
-// swap them. The processes of other users are hidden, those of other
-// units of the same user too (a PID namespace of its own, so no
+// swap them. The processes of other users are hidden, with pids those of
+// other units of the same user too (a PID namespace of its own, so no
 // /proc/<pid>/root of another unit is reachable). The credentials are
 // read by systemd before the namespace is set up. command, the state
 // directory state (none when empty) and box.Lukd must lie outside every
-// hidden path, ws outside every one but the root.
-func sandbox(box *Box, ws, command, state string) ([]string, error) {
+// hidden path, ws outside every one but the root. pids gives the unit its
+// own PID namespace.
+func sandbox(box *Box, ws, command, state string, pids bool) ([]string, error) {
 	for _, p := range []string{box.Root, box.Config, ws, box.Lukd} {
 		if err := unitPath(p); err != nil {
 			return nil, err
@@ -627,7 +630,10 @@ func sandbox(box *Box, ws, command, state string) ([]string, error) {
 			}
 		}
 	}
-	a := []string{"-p", "ProtectProc=invisible", "-p", "PrivatePIDs=yes"}
+	a := []string{"-p", "ProtectProc=invisible"}
+	if pids {
+		a = append(a, "-p", "PrivatePIDs=yes")
+	}
 	for _, h := range append([]string{box.Config, RunDir}, hide...) {
 		a = append(a, "-p", "InaccessiblePaths=-"+h)
 	}
