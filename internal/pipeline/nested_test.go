@@ -278,6 +278,11 @@ func TestNestedProtocolErrors(t *testing.T) {
 		defer f.Close()
 		ch.Send(jobchan.Frame{T: jobchan.TIn, Name: "f"}, f)
 	}
+	// runs waits until the nested job runs at lukd run: a violation sent
+	// earlier stops the job while its request is half-way, and the closed
+	// connection fails fakeRund.
+	var running chan struct{}
+	runs := func(_ *testing.T, _ *jobchan.Conn) { <-running }
 	for _, c := range []struct {
 		name  string
 		sends []send
@@ -291,12 +296,14 @@ func TestNestedProtocolErrors(t *testing.T) {
 		{"refused, then invalid name", []send{job("x"), in("a/b")}, `job x: in: "a/b": invalid name`},
 		{"in after go", []send{job("x"), frame(jobchan.TGo), in("a")}, `unexpected frame "in"`},
 		{"go twice", []send{job("x"), frame(jobchan.TGo), frame(jobchan.TGo)}, `unexpected frame "go"`},
-		{"second job", []send{job("w"), frame(jobchan.TGo), job("w")}, "nested job w while job w runs"},
+		{"second job", []send{job("w"), frame(jobchan.TGo), runs, job("w")}, "nested job w while job w runs"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e := newRunEnv(t, "    steps:\n      - run: /bin/true\n        jobs: [w]\n")
+			running = make(chan struct{}, 1)
 			fakeRund(t, e, func(u *fakeUnit) int {
 				if u.req.Job != "" {
+					running <- struct{}{}
 					io.Copy(io.Discard, u.c)
 					return 1
 				}
