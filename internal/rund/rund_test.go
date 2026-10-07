@@ -110,7 +110,9 @@ func TestLoadJobsRules(t *testing.T) {
 		"luk-work.yaml":            "user: a\ncommand: /x\nenv:\n  LUK_WORK: /tmp\n",
 		"luk-any.yaml":             "user: a\ncommand: /x\nenv:\n  LUK_STATE: /tmp\n",
 		"bad-state.yaml":           "user: a\ncommand: /x\nstate: exclusive\n",
-		"locked.yaml":              "command: /x\nstate: locked\n",
+		"locked.yaml":              "user: a\ncommand: /x\nstate: locked\n",
+		"locked-no-user.yaml":      "command: /x\nstate: locked\n",
+		"shared-no-user.yaml":      "command: /x\nstate: shared\n",
 		"shared.yaml":              "user: a\ncommand: /x\nstate: shared\n",
 		"no-user.yaml":             "command: /x\ngroups: [luk]\n",
 		"group-no-user.yaml":       "group: luk\ncommand: /x\n",
@@ -155,7 +157,7 @@ func TestLoadJobsRules(t *testing.T) {
 		t.Fatalf("ok %v", ok)
 	}
 	wantBad := []string{"Upper", "bad-cred", "bad-state", "broken", "dir", "empty-pipelines", "group-no-user", "group-writable",
-		"long", "luk-any", "luk-work", "no-command", "null-pipelines", "pipelines", "relative", "short", "symlink", "tilde-pipelines", "unknown-key"}
+		"locked-no-user", "long", "luk-any", "luk-work", "no-command", "null-pipelines", "pipelines", "relative", "shared-no-user", "short", "symlink", "tilde-pipelines", "unknown-key"}
 	if !slices.Equal(bad, wantBad) {
 		t.Fatalf("bad %v", bad)
 	}
@@ -165,6 +167,11 @@ func TestLoadJobsRules(t *testing.T) {
 	}
 	if err := js.Bad["group-no-user"]; !strings.Contains(err.Error(), "needs user") {
 		t.Fatalf("group without user: %v", err)
+	}
+	for _, n := range []string{"locked-no-user", "shared-no-user"} {
+		if err := js.Bad[n]; err == nil || !strings.Contains(err.Error(), "state needs user") {
+			t.Fatalf("%s: %v", n, err)
+		}
 	}
 	for _, n := range []string{"pipelines", "empty-pipelines", "null-pipelines", "tilde-pipelines"} {
 		if err := js.Bad[n]; !strings.Contains(err.Error(), "pipelines: removed") || !strings.Contains(err.Error(), "jobs of the run step") {
@@ -313,7 +320,7 @@ func TestArgvJob(t *testing.T) {
 			t.Errorf("missing %q in %s", want, s)
 		}
 	}
-	if strings.Contains(s, "NoNewPrivileges") || !strings.Contains(s, "-p PrivatePIDs=yes") {
+	if strings.Contains(s, "NoNewPrivileges") {
 		t.Fatalf("privileged job: %s", s)
 	}
 	for _, a := range argv {
@@ -329,19 +336,8 @@ func TestArgvJob(t *testing.T) {
 	}
 	s = strings.Join(argv, " ")
 	if !strings.Contains(s, "-p DynamicUser=yes -p User="+DynamicUser("n", "p")+" ") || strings.Contains(s, "SupplementaryGroups") ||
-		!strings.Contains(s, "-p NoNewPrivileges=yes") || strings.Contains(s, "LUK_STATE") || !strings.Contains(s, "--setenv=LUK_JOB=n") ||
-		!strings.Contains(s, "-p PrivatePIDs=yes") {
+		!strings.Contains(s, "-p NoNewPrivileges=yes") || strings.Contains(s, "LUK_STATE") || !strings.Contains(s, "--setenv=LUK_JOB=n") {
 		t.Fatalf("dynamic job: %s", s)
-	}
-	// systemd refuses PrivatePIDs with the state directory of a dynamic
-	// user: such a unit goes without it.
-	dyn.State = StateLocked
-	argv, err = dyn.Unit("lukd-run-n-0123456789ab", "n", "p", 3).Argv(box("/var/lib/luk", "/etc/site/lukd"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s = strings.Join(argv, " "); strings.Contains(s, "PrivatePIDs") || !strings.Contains(s, "-p StateDirectory=lukd-run/n/p") {
-		t.Fatalf("dynamic job with state: %s", s)
 	}
 }
 
@@ -605,7 +601,7 @@ func newEnv(t *testing.T) *env {
 	os.Mkdir(jobs, 0o755)
 	write(t, filepath.Join(jobs, "s3-upload.yaml"), s3Job, 0o600)
 	write(t, filepath.Join(jobs, "broken.yaml"), "user: [\n", 0o600)
-	write(t, filepath.Join(jobs, "state.yaml"), "command: /opt/luk/state\nstate: locked\n", 0o600)
+	write(t, filepath.Join(jobs, "state.yaml"), "user: a\ncommand: /opt/luk/state\nstate: locked\n", 0o600)
 	lukd := filepath.Join(top, "lukd")
 	os.Mkdir(lukd, 0o750)
 	conf := filepath.Join(lukd, "config.yaml")
@@ -827,7 +823,7 @@ func TestServeJobs(t *testing.T) {
 		job, user string
 	}{
 		{runproto.StepRequest{Pipeline: "p", Step: 2, ID: id1}, "s3-upload", "--uid=luk-s3"},
-		{runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1}, "state", "User=" + DynamicUser("state", "p")},
+		{runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1}, "state", "--uid=a"},
 		{runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1, Job: "s3-upload"}, "s3-upload", "--uid=luk-s3"},
 	} {
 		fs, err := e.exchange(t, c.req, true)
@@ -1099,8 +1095,7 @@ storage:
 	ws := workspace.Path(e.root, unitName(a))
 	got := strings.Join(a, " ")
 	hidden := []string{filepath.Join(top, "lukd"), "/run/luk", "/etc/ssl/luk.crt", "/etc/ssl/private/luk.key", "/srv/extra", "/srv/gpg", "/srv/nonces", "/srv/queue", "/storage/backup"}
-	// A dynamic user with a state directory: no PrivatePIDs (TestArgvJob).
-	want := "-p ProtectProc=invisible -p InaccessiblePaths=-" + strings.Join(hidden, " -p InaccessiblePaths=-") + " " +
+	want := "-p ProtectProc=invisible -p PrivatePIDs=yes -p InaccessiblePaths=-" + strings.Join(hidden, " -p InaccessiblePaths=-") + " " +
 		"-p TemporaryFileSystem=" + e.root + ":ro -p BindPaths=" + ws + ":" + ws + ":norbind " +
 		"-p ExecStartPre=+/usr/bin/lukd run workspace own " + unitName(a) + " "
 	if !strings.Contains(got, want) {

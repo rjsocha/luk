@@ -4735,8 +4735,9 @@ sudo are involved.
     removed: list the job in jobs of the run step of the lukd
     configuration, a relay step allows its own job`); the steps that may
     run a job come from the lukd configuration (see What a step runs).
-  - `state` (optional): `locked` or `shared`, a state directory kept
-    between runs, one per job and pipeline; absent means none. See
+  - `state` (optional, needs `user`): `locked` or `shared`, a state
+    directory kept between runs, one per job and pipeline; absent means
+    none. See
     Environment and state below.
   - `privileged` (optional, needs `user`): `true` runs the job without
     `NoNewPrivileges=yes`, for the setuid `newuidmap` of rootless podman
@@ -4797,7 +4798,7 @@ sudo are involved.
   (--uid=<user> | -p DynamicUser=yes -p User=<dynamic user>)
   --working-directory=<workspace> [--gid=<group>]
   [-p SupplementaryGroups=<groups>] [-p NoNewPrivileges=yes]
-  -p PrivateTmp=yes -p ProtectProc=invisible [-p PrivatePIDs=yes]
+  -p PrivateTmp=yes -p ProtectProc=invisible -p PrivatePIDs=yes
   -p InaccessiblePaths=-<config dir> -p InaccessiblePaths=-/run/luk
   [-p InaccessiblePaths=-<path> ...] -p TemporaryFileSystem=<root>:ro
   -p BindPaths=<workspace>:<workspace>:norbind
@@ -5053,13 +5054,11 @@ sudo are involved.
     runs of one step or one job share a dynamic user, jobs share a
     static `user`) would otherwise reach each other's workspace and
     `.luk/run.sock` through `/proc/<pid>/root` and `/proc/<pid>/cwd`.
-    Not on a job without `user` that has `state`: systemd 257 refuses
-    `PrivatePIDs=yes` with the state directory of a dynamic user (the
-    unit fails at step `NAMESPACE`). With `state: locked` nothing is lost
-    (one run per job and pipeline at a time, the only units of that
-    dynamic user); with `state: shared` the concurrent runs of the job on
-    one pipeline can reach each other's workspace, as they share the
-    state directory anyway; give such a job a `user` to isolate them.
+    Every unit has a PID namespace of its own (the wrapper is PID 1), so
+    concurrent runs see the same PIDs. In any place shared between runs
+    (a `state: shared` directory, the home or other directories of a
+    static `user`) never use `$$` or a pidfile for unique names or locks:
+    use `mktemp` for unique names and `flock` for mutual exclusion.
   - `NoNewPrivileges=yes` on every unit (`sudo` and setuid binaries
     fail), except a job with `privileged`.
   - The `-` of `InaccessiblePaths=` skips a missing path; a missing
