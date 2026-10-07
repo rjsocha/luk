@@ -182,7 +182,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 		Use:   "ttl",
 		Short: "Set the expiry of stored files",
 		Long: "Set the expiry of stored files under the base lock, whatever the ttl policy of\n" +
-			"the storage says (ttl.user, ttl.min, ttl.max do not apply). --expires takes\n" +
+			"the storage says (ttl.user, ttl.min, ttl.max and the tag ttls do not apply). --expires takes\n" +
 			"never (no expiry), a duration from now (30d, 12h) or an RFC 3339 time, which\n" +
 			"must not be past. Every name is checked before anything changes. The name of\n" +
 			"an alias or a permanent name is refused: name the file it points to, and the\n" +
