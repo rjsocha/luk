@@ -54,7 +54,7 @@ class Base(unittest.TestCase):
 class TestPaths(unittest.TestCase):
     def test_default_status(self):
         # Written by the process role under the lukd root.
-        self.assertEqual(ls.DEFAULT_STATUS, "/var/lib/luk/status/process/status.json")
+        self.assertEqual(ls.DEFAULT_STATUS, "/var/lib/luk/data/status/process/status.json")
 
 
 class TestParsing(unittest.TestCase):

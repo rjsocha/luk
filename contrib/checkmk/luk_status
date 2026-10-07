@@ -9,7 +9,7 @@ import re
 import sys
 from datetime import datetime, timezone
 
-DEFAULT_STATUS = "/var/lib/luk/status/process/status.json"
+DEFAULT_STATUS = "/var/lib/luk/data/status/process/status.json"
 DEFAULT_CONF = "/etc/site/luk/check.conf"
 OK, WARN, CRIT, UNKNOWN = 0, 1, 2, 3
 DUR_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
