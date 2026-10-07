@@ -48,8 +48,8 @@ InaccessiblePaths=-/var/lib/luk/data/tls -/var/lib/luk/data/acme -/run/luk/nonce
 # lukd receive cannot be read from here.
 SystemCallFilter=~@debug
 PrivatePIDs=yes
-# Drop-ins (systemctl edit lukd-process) (examples in
-# /usr/share/doc/lukd/examples/lukd-process.service.d):
+# Drop-ins (systemctl edit lukd-process); examples in
+# /usr/share/doc/lukd/examples/lukd-process.service.d:
 #
 #   # storage.conf: a storage base (also in lukd-receive) outside
 #   # /var/lib/luk

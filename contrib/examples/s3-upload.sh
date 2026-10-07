@@ -1,10 +1,9 @@
 #!/bin/bash
 # Example lukd run job (/opt/luk/s3-upload, job file
-# deploy/run.d/s3-upload.yaml.example): uploads the input files of a run step
-# work directory with credentials only root and this job can read.
-# Started by lukd run as user luk-s3; the work directory is the only
-# argument. lukd run adds the group of the work directory (luk), which
-# gives read access to it.
+# deploy/run.d/s3-upload.yaml.example): uploads the input files of a step
+# with credentials only root and this job can read.
+# Started by lukd run as user luk-s3 in a workspace of its own, which is
+# the only argument and belongs to that user.
 set -eufo pipefail
 IFS=$'\t\n'
 
