@@ -243,7 +243,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 	f.StringVarP(&endpoint, "endpoint", "e", "", "endpoint name from the config, or a URL (may end with #PIN[,PIN...], the lukd pins)")
 	f.StringVarP(&key, "key", "k", "", "private key file (uses PATH-cert.pub when present), a .pub file of an agent key, or SHA256:... fingerprint of an agent key")
 	f.StringArrayVarP(&tags, "tag", "t", nil, "tag (repeatable)")
-	f.BoolVar(&backup, "backup", false, "add backup meta: hostname, absolute path, mtime")
+	f.BoolVar(&backup, "backup", false, "add backup meta: hostname, absolute path, mtime; for a stream the hostname and the time of sending")
 	f.StringVar(&ttl, "ttl", "", "lifetime, e.g. 24h or 7d, or max for the longest the storage allows")
 	f.BoolVar(&once, "once", false, "delete after the first download")
 	f.BoolVar(&portal, "portal", false, "download page with the metadata and a Download button before the content")
@@ -440,10 +440,17 @@ func secretBody(secret []byte, meta *wire.Meta) content {
 	return content{source: bytes.NewReader(secret), size: n}
 }
 
+// streamBackup is the backup meta of a stream (--stdin, a pipe): the
+// hostname and the moment the stream is sent, without a path.
+func streamBackup() *wire.Backup {
+	host, _ := os.Hostname()
+	return &wire.Backup{Hostname: host, Mtime: time.Now().UTC().Format(time.RFC3339)}
+}
+
 func input(file, name string, stdin, prompt, backup bool, meta *wire.Meta) (content, io.Closer, error) {
 	if prompt {
 		if backup {
-			return content{}, nil, usageError{errors.New("--backup needs a regular file")}
+			return content{}, nil, usageError{errors.New("--backup needs --file or --stdin")}
 		}
 		secret, err := askSecret("secret: ")
 		if err != nil {
@@ -463,7 +470,7 @@ func input(file, name string, stdin, prompt, backup bool, meta *wire.Meta) (cont
 	}
 	if stdin {
 		if backup {
-			return content{}, nil, usageError{errors.New("--backup needs a regular file")}
+			meta.Backup = streamBackup()
 		}
 		meta.Source = wire.SourceStdin
 		return content{body: os.Stdin, size: -1}, nil, nil
@@ -477,12 +484,12 @@ func input(file, name string, stdin, prompt, backup bool, meta *wire.Meta) (cont
 		return content{}, nil, usageError{fmt.Errorf("%s is a directory", path)}
 	}
 	if !st.Mode().IsRegular() {
-		if backup {
-			return content{}, nil, usageError{errors.New("--backup needs a regular file")}
-		}
 		fh, err := os.Open(path)
 		if err != nil {
 			return content{}, nil, usageError{err}
+		}
+		if backup {
+			meta.Backup = streamBackup()
 		}
 		meta.Source = wire.SourcePipe
 		return content{body: fh, size: -1}, fh, nil

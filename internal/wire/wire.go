@@ -112,7 +112,7 @@ var (
 
 type Backup struct {
 	Hostname string `json:"hostname"`
-	Path     string `json:"path"`
+	Path     string `json:"path,omitempty"`
 	Mtime    string `json:"mtime,omitempty"`
 }
 

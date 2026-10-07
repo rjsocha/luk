@@ -767,6 +767,9 @@ it is true is not):
   sidecar with the rest of the client meta.
 - `backup` - set by `--backup`; `hostname` is a single path element (no
   `/` or control character, not starting with `.`, at most 255 bytes).
+  For a regular file `path` is its absolute path and `mtime` its
+  modification time; for a stream (`--stdin`, `--file` on a pipe) there
+  is no `path` and `mtime` is the moment luk starts to send it.
   An endpoint with `backup.hostname` refuses a hostname the signer may
   not send with 403 before the body (see Capabilities).
 - `permanent` - set by `--permanent`; the upload is a new version of
@@ -5368,8 +5371,8 @@ luk send [flags]      (aliases: put, push)
                             the endpoint, else config "key", else the first
                             agent key
   -t, --tag TAG             repeatable
-      --backup              add backup meta (hostname, absolute path, mtime);
-                            regular --file only
+      --backup              add backup meta (hostname, absolute path, mtime;
+                            for a stream the hostname and the time of sending)
       --ttl DURATION|max    lifetime (with --once: the latest moment of the one
                             download); counts where the storage has ttl.user,
                             within its ttl.min and ttl.max; max asks for the

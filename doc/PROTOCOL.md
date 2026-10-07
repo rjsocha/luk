@@ -500,7 +500,7 @@ A JSON object. Fields omitted when empty or false, except `source` and
 | `no_owner` | bool | no "Sent by" on the landing page |
 | `mutable` | bool | the content may be replaced through the link |
 | `access` | string | `private` or `any`; absent for a public upload; only with `portal: direct` |
-| `backup` | object | `{"hostname", "path", "mtime"}` (`mtime` optional); `hostname` one path element, no control character, not starting with `.`, at most 255 bytes |
+| `backup` | object | `{"hostname", "path", "mtime"}` (`path` and `mtime` optional; a stream has no `path`); `hostname` one path element, no control character, not starting with `.`, at most 255 bytes |
 | `dry_run` | bool | check everything up to the content, store nothing |
 | `permanent` | string | a permanent name (relative, clean, at most 1024 bytes, no element `current` or `current.*`); excludes `once`, a portal other than `direct`, `access`, `mutable`, `pretty_url` |
 

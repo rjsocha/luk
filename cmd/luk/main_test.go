@@ -20,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -413,17 +414,50 @@ func TestSendFileDirectory(t *testing.T) {
 	}
 }
 
-func TestSendBackupNeedsRegularFile(t *testing.T) {
+func TestSendBackupStream(t *testing.T) {
 	e := newSendEnv(t)
-	if code, _, _ := e.send(t, "--stdin", "--backup"); code != 1 {
-		t.Errorf("--stdin --backup: exit %d, want 1", code)
+	host, _ := os.Hostname()
+	check := func(what string) {
+		t.Helper()
+		b := e.meta.Backup
+		if b == nil || b.Hostname != host || b.Path != "" {
+			t.Fatalf("%s: backup %+v, want hostname %q and no path", what, b, host)
+		}
+		at, err := time.Parse(time.RFC3339, b.Mtime)
+		if err != nil || time.Since(at) < 0 || time.Since(at) > time.Minute {
+			t.Errorf("%s: mtime %q is not the time of sending", what, b.Mtime)
+		}
 	}
+	defer stdinFrom(t, "stream")()
+	if code, _, errs := e.send(t, "--stdin", "--backup", "--name", "etc.tar.gz"); code != 0 {
+		t.Fatalf("--stdin --backup: exit %d: %s", code, errs)
+	}
+	if string(e.body) != "stream" || e.meta.File != "etc.tar.gz" {
+		t.Errorf("body %q file %q", e.body, e.meta.File)
+	}
+	check("stdin")
+	e.meta = wire.Meta{}
 	p := filepath.Join(t.TempDir(), "pipe")
 	if err := syscall.Mkfifo(p, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, _, _ := e.send(t, "--file", p, "--backup"); code != 1 {
-		t.Errorf("fifo --backup: exit %d, want 1", code)
+	go func() {
+		if w, err := os.OpenFile(p, os.O_WRONLY, 0); err == nil {
+			w.WriteString("fifo")
+			w.Close()
+		}
+	}()
+	if code, _, errs := e.send(t, "--file", p, "--backup"); code != 0 {
+		t.Fatalf("fifo --backup: exit %d: %s", code, errs)
+	}
+	check("fifo")
+}
+
+func TestSendBackupNeedsContent(t *testing.T) {
+	e := newSendEnv(t)
+	code, _, errs := e.send(t, "--secret", "--backup")
+	if code != 1 || !strings.Contains(errs, "--backup needs --file or --stdin") {
+		t.Errorf("--secret --backup: exit %d: %s", code, errs)
 	}
 }
 
