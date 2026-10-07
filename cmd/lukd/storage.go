@@ -46,7 +46,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	}
 
 	var lsStorage, owner, older string
-	var asJSON bool
+	var asJSON, human bool
 	ls := &cobra.Command{
 		Use:   "ls",
 		Short: "List the stored files",
@@ -74,7 +74,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 			}
 			// Unreadable entries are reported after the readable ones.
 			files, werr := storageFiles(cfg, lsStorage, l, owner, age, time.Now())
-			if err := printStorage(cmd.OutOrStdout(), files, st.Expose != "" || st.Protect != "", asJSON); err != nil {
+			if err := printStorage(cmd.OutOrStdout(), files, st.Expose != "" || st.Protect != "", asJSON, human); err != nil {
 				return err
 			}
 			return werr
@@ -84,6 +84,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	ls.Flags().StringVar(&owner, "owner", "", "only the files of this identity: a key name or an owner key")
 	ls.Flags().StringVar(&older, "older", "", "only the files received longer ago than this (e.g. 7d)")
 	ls.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	ls.Flags().BoolVarP(&human, "human", "H", false, "sizes with a unit (1.5K, 4M, 12.5G) instead of bytes")
 	ls.MarkFlagRequired("storage")
 	completeFlags(ls, map[string]cobra.CompletionFunc{"storage": completeStorage, "owner": completeOwner, "older": completeNone})
 
@@ -412,7 +413,7 @@ func storageFiles(cfg *config.Config, name string, l store.Local, owner string, 
 	return files, err
 }
 
-func printStorage(w io.Writer, files []storageFile, exposed, asJSON bool) error {
+func printStorage(w io.Writer, files []storageFile, exposed, asJSON, human bool) error {
 	if asJSON {
 		b, err := json.MarshalIndent(files, "", "  ")
 		if err != nil {
@@ -444,7 +445,11 @@ func printStorage(w io.Writer, files []storageFile, exposed, asJSON bool) error 
 		if f.Links > 1 {
 			flags = append(flags, "shared")
 		}
-		line := strings.Join([]string{status.Clean(f.Name), strconv.FormatInt(f.Size, 10), dash(status.Clean(f.Received)),
+		size := strconv.FormatInt(f.Size, 10)
+		if human {
+			size = wire.HumanSize(f.Size)
+		}
+		line := strings.Join([]string{status.Clean(f.Name), size, dash(status.Clean(f.Received)),
 			dash(status.Clean(f.Expires)), dash(status.Clean(f.Owner)), dash(status.Clean(f.OwnerKey)),
 			dash(status.Clean(f.Endpoint)), dash(strings.Join(flags, ","))}, "\t")
 		if exposed {

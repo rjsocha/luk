@@ -3739,8 +3739,10 @@ must run as root or as <owner> (owner of <base>)`. A `base` that is a
 symlink is refused (`lukd storage: <base> is a symlink`).
 
 - `lukd storage ls --storage NAME [--owner IDENTITY] [--older DURATION]
-  [--json]`: the stored files, newest first (by acceptance order), as aligned
-  columns `NAME`, `SIZE` (bytes), `RECEIVED`, `EXPIRES`, `OWNER` (the
+  [-H|--human] [--json]`: the stored files, newest first (by acceptance order), as aligned
+  columns `NAME`, `SIZE` (bytes; with `--human` in the units of the
+  configuration sizes with at most one decimal: `512`, `1.5K`, `4M`,
+  `12.5G`; `--json` always has bytes), `RECEIVED`, `EXPIRES`, `OWNER` (the
   display name of the sidecar), `OWNER KEY`, `ENDPOINT`, `FLAGS` (`once`,
   `mutable`, then `reveal` or `download`, then `private` or `any`, then
   `shared` when other names hold the same content as hardlinks: other
