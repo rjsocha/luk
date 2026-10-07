@@ -115,12 +115,11 @@ func peerUID(c *net.UnixConn) (uint32, error) {
 }
 
 // relayWarnings names the relay steps, the run: {job} steps and the jobs
-// of the run steps of cfg whose job has no file in dir, the run.d of lukd run, or whose
-// readable file does not load (with the reason), then the valid jobs of
-// dir that no step names (unused) and the other readable
-// job files that do not load. dir is root's and
-// changes without a reload, so it is never required: an unreadable dir or
-// file gives no warning.
+// of the run steps of cfg whose job has no file in dir, the run.d of lukd
+// run, or whose readable file does not load (with the reason), then the
+// valid jobs of dir that no step names (unused) and the other readable job
+// files that do not load. dir is root's and changes without a reload, so
+// it is never required: an unreadable dir or file gives no warning.
 func relayWarnings(cfg *config.Config, dir string) []string {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
