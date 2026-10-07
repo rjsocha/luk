@@ -1,5 +1,5 @@
 [Unit]
-Description=luk run socket (allowlisted jobs as other users for run steps)
+Description=luk run socket (steps and jobs of lukd run in units of their own)
 
 [Socket]
 ListenStream=/run/luk/run.sock
@@ -11,7 +11,8 @@ SocketMode=0660
 # to luk.
 DirectoryMode=0750
 Accept=yes
-MaxConnections=16
+# A backstop: the limit of running units is limits.units.max of run.yaml.
+MaxConnections=1024
 
 [Install]
 WantedBy=sockets.target

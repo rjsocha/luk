@@ -1,3 +1,5 @@
+# The lukd root. Relative paths of this file resolve against <root>/data;
+# the workspaces of lukd run live in <root>/root/job, on btrfs.
 root: /var/lib/luk
 
 listen:
@@ -192,6 +194,12 @@ pipeline:
   #     - run: /opt/luk/s3copy
   #       tee: true             # only consumes the set: out/ stays empty, the next step gets the same files
   #       jobs: [s3-upload]     # jobs of lukd run (/etc/site/lukd/run.d) the program may start with luk-job run
+  #                             # in the middle of its work; the job gets its own workspace and user
+  #     - store: archive
+  # dbjob:
+  #   endpoint: [backup]
+  #   steps:
+  #     - run: {job: db-dump}     # the job db-dump of /etc/site/lukd/run.d as the whole step, no program of luk
   #     - store: archive
   # s3upload:
   #   endpoint: [backup]
@@ -325,4 +333,4 @@ expose:
 # gpg:
 #   keys: /etc/site/lukd/gpg.d   # the default; *.asc, *.gpg, *.pgp, *.key public keys of `key` recipients
 #   wkd:
-#     cache: 1d                 # WKD keys cached in <root>/gpg-cache (default 1d)
+#     cache: 1d                 # WKD keys cached in <root>/data/gpg-cache (default 1d)

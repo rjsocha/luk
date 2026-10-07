@@ -28,7 +28,7 @@ Typical uses:
   `--parallel` parts at once. Every check (signature, identity, endpoint
   access, size, quota, disk space) runs before the first part.
 - Pipelines selected by endpoint and tags: `store`, `encrypt` (OpenPGP, keys
-  from files or WKD), `run` (any program), `relay` (an allowlisted job
+  from files or WKD), `run` (any program, in a unit and a workspace of its own), `relay` (an allowlisted job
   as another user, through a small root helper and systemd).
 - Links with a TTL, one-time downloads, private files fetched by signed
   requests, mutable links, content deduplication.

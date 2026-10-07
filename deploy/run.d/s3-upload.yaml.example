@@ -2,25 +2,25 @@
 # name; [a-z0-9][a-z0-9._-]*). Owned by root, not writable by group or
 # others. Read per request: adding or removing a file needs no reload.
 # The pipelines the job runs for come from the lukd configuration: those
-# with a step `relay: s3-upload` and those with a run step whose `jobs`
-# lists s3-upload (its program starts the job with luk-job run). A
-# request from a work directory of any other pipeline is refused.
+# with a step `relay: s3-upload`, those with a step `run: {job: s3-upload}`
+# and those with a run step whose `jobs` lists s3-upload (its program
+# starts the job with luk-job run). A request from any other pipeline is
+# refused.
 
 # User of the job, optional: without user the job runs as a systemd
-# dynamic user, one per job and pipeline (lukd-<job>-<pipeline>-<hash>),
-# that writes only its own /tmp, /var/tmp, the state directory and the
-# work directory where its groups may. The job always gets the
-# primary group of the peer (luk) as a supplementary group, which gives
-# read access to the work directory; groups adds more and keeps the
-# user's own. group (needs user) would replace the primary group.
+# dynamic user, one per unit, that writes only its own /tmp, /var/tmp, the
+# state directory and its workspace. With user the workspace belongs to
+# that user. A unit gets no group of luk: its workspace is its own.
+# groups adds supplementary groups and keeps the user's own. group
+# (needs user) would replace the primary group.
 user: luk-s3
 # groups: [backup]
 # group: luk-s3
 
-# Absolute path; receives the work directory as its only argument (also
-# in LUK_WORK). It must lie outside the lukd root, /etc/site/lukd,
-# /run/luk and every other path the sandbox of a job hides: the job
-# sees none of them, of the root only its work directory.
+# Absolute path; receives the workspace as its only argument (also in
+# LUK_WORK and as the working directory). It must lie outside the lukd
+# root, /etc/site/lukd, /run/luk and every other path the sandbox of a
+# job hides: the job sees none of them, of the root only its workspace.
 command: /opt/luk/s3-upload
 
 # systemd LoadCredential= entries, name: path. The job reads them from
@@ -32,6 +32,12 @@ credentials:
 # RuntimeMaxSec of the job, under 7 days. Default: 1h.
 timeout: 1h
 
+# Needs user. true runs the job without NoNewPrivileges=yes, for the
+# setuid newuidmap of rootless podman; every setuid binary of the host
+# then works in this job (sudo as far as the sudoers allow the job user,
+# su, newuidmap). Default: false.
+# privileged: true
+
 # State directory kept between runs, one per job and pipeline:
 # /var/lib/lukd-run/<job>/<pipeline>, in LUK_STATE (absent without state).
 # locked: lukd run lets only one run of the job per pipeline use it at a
@@ -41,8 +47,8 @@ timeout: 1h
 # state: locked
 
 # Fixed environment of the job. LUK_* names are reserved: lukd run sets
-# the step metadata a run program gets (LUK_WORK, LUK_ID, ... from the
-# path; LUK_FILE, LUK_NAME, LUK_TAGS, LUK_ORIGIN, ... as luk sends them),
+# the step metadata a run program gets (LUK_WORK, LUK_IN, LUK_OUT, LUK_ID,
+# ...; LUK_FILE, LUK_NAME, LUK_TAGS, LUK_ORIGIN, ... as luk sends them),
 # then LUK_JOB, LUK_TMP and LUK_STATE.
 env:
   BUCKET: example-backup

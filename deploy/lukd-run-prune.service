@@ -1,0 +1,33 @@
+[Unit]
+Description=luk run: remove leftover workspaces of lukd run
+# Pulled in by lukd.service at start and run by lukd-run-prune.timer.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/lukd run workspace prune
+# The sandbox of the helper units of lukd run (see Workspace in
+# doc/SPEC.md). A root other than /var/lib/luk needs its path in a drop-in.
+# The workspaces and the count of leftovers are the only writable paths;
+# the locks of the workspaces in use (/run/lukd-run/.ws) are only read.
+ProtectSystem=strict
+ReadWritePaths=-/var/lib/luk/root/job -/run/luk/workspaces
+# CAP_SYS_ADMIN: btrfs tree search and delete by id; the DAC capabilities
+# and CAP_FOWNER: the workspaces belong to the job users.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077

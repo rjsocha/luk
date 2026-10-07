@@ -112,6 +112,14 @@ nfpms:
         dst: /lib/systemd/system/lukd-run@.service
         file_info:
           mode: 0644
+      - src: deploy/lukd-run-prune.service
+        dst: /lib/systemd/system/lukd-run-prune.service
+        file_info:
+          mode: 0644
+      - src: deploy/lukd-run-prune.timer
+        dst: /lib/systemd/system/lukd-run-prune.timer
+        file_info:
+          mode: 0644
       - src: deploy/luk.tmpfiles.conf
         dst: /usr/lib/tmpfiles.d/luk.conf
         file_info:

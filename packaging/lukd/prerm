@@ -2,6 +2,6 @@
 set -e
 
 if [ "$1" = remove ]; then
-  systemctl stop lukd-run.socket lukd.service lukd-receive.service lukd-process.service || true
-  systemctl disable lukd.service lukd-run.socket || true
+  systemctl stop lukd-run-prune.timer lukd-run.socket lukd.service lukd-receive.service lukd-process.service || true
+  systemctl disable lukd-run-prune.timer lukd.service lukd-run.socket || true
 fi

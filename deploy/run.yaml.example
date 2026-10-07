@@ -4,26 +4,34 @@
 # /etc/site/lukd/run.d/, one <job>.yaml per job
 # (deploy/run.d/s3-upload.yaml.example).
 
-# The lukd root: a job runs only on a work directory strictly under
-# <root>/work, owned by the peer. Compared as written, so it must be the
-# same path as root of the lukd configuration. Default: /var/lib/luk.
+# The lukd root; must be the same path as root of the lukd configuration
+# (compared as written). Every unit gets it as an empty tmpfs, so a step
+# sees nothing of it but its own workspace, which lives in <root>/root/job
+# (a btrfs subvolume per unit). Default: /var/lib/luk.
 # root: /var/lib/luk
 
 # The main file of the lukd configuration; lukd run reads it and its
-# config.d per connection, only for the relay steps and the jobs of the
-# run steps of the pipelines: they decide which pipelines may run a job.
+# config.d per connection, for the run steps and the relay steps: they
+# decide what each step runs and which jobs it may start.
 # The files and every directory above them must be owned by root and not
 # writable by group or others; a missing file allows no pipeline, a
 # refused one neither (logged). Default: /etc/site/lukd/config.yaml.
 # config: /etc/site/lukd/config.yaml
-# It also names the paths a job must not see: its directory, root and,
+# It also names the paths a unit must not see: its directory, root and,
 # when absolute, auth.nonces, gpg.keys, the TLS and EAB key files, the
-# queues and the storage bases (see the sandbox of a job in doc/SPEC.md).
+# queues and the storage bases (see the sandbox of a unit in doc/SPEC.md).
 
-# Further absolute paths a job must not see, for data of luk the
+# Further absolute paths a unit must not see, for data of luk the
 # configuration does not name. Default: none.
 # hide: [/srv/luk-archive]
 
-# The only user allowed to connect to the socket (SO_PEERCRED); any other
-# connection is closed without an answer. Default: the owner of root.
-# peer: luk
+# Limits. limits.units.max: the units of steps (run, run: {job}, relay)
+# running at once, at least 1. A step over the limit waits in lukd run for
+# a free slot, its unit not yet started; the wait does not count toward
+# the pipeline timeout, which starts when the unit starts. Default: 16.
+# limits:
+#   units:
+#     max: 16
+
+# The only user allowed to connect to the socket is the owner of
+# <root>/data (SO_PEERCRED); there is no setting for it.

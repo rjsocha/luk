@@ -2,8 +2,9 @@
 Description=luk server (receive and process roles)
 # Groups lukd-receive.service and lukd-process.service: start, stop,
 # restart and reload of lukd act on both roles; each role can still be
-# restarted or reloaded alone.
-Wants=lukd-receive.service lukd-process.service
+# restarted or reloaded alone. Also pulls in the removal of leftover
+# workspaces of lukd run (at start, then every 15 minutes).
+Wants=lukd-receive.service lukd-process.service lukd-run-prune.service lukd-run-prune.timer
 
 [Service]
 Type=oneshot
