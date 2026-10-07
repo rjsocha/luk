@@ -114,9 +114,11 @@ type Config struct {
 	Endpoint map[string]*Endpoint `yaml:"endpoint"`
 	Pipeline map[string]*Pipeline `yaml:"pipeline"`
 	Storage  map[string]*Storage  `yaml:"storage"`
-	Expose   map[string]*Expose   `yaml:"expose"`
-	GPG      GPG                  `yaml:"gpg"`
-	Log      Log                  `yaml:"log"`
+	// Tag is the policy of the upload tags, by tag name.
+	Tag    map[string]Tag     `yaml:"tag"`
+	Expose map[string]*Expose `yaml:"expose"`
+	GPG    GPG                `yaml:"gpg"`
+	Log    Log                `yaml:"log"`
 
 	// Path is the main file and Files every file Load read (the main file,
 	// the snippets, the ssh.d files); empty after Parse.
@@ -128,6 +130,12 @@ type Config struct {
 	// PasswordDir is the password.d directory next to the main file;
 	// empty after Parse.
 	PasswordDir string `yaml:"-"`
+}
+
+// Tag is the policy of an upload tag: TTL is the lifetime of an upload
+// carrying the tag in every local storage (see Storage.Lifetime).
+type Tag struct {
+	TTL Duration `yaml:"ttl"`
 }
 
 // Log configures the lukd log: Level is debug, info (the default), warn or
@@ -961,6 +969,8 @@ type Storage struct {
 		User bool     `yaml:"user"`
 		Min  Duration `yaml:"min"`
 		Max  Duration `yaml:"max"`
+		// Tag is the ttl of a tag here, in place of its tag.<name>.ttl.
+		Tag map[string]Duration `yaml:"tag"`
 	} `yaml:"ttl"`
 	// Cleanup.Age removes files without an expiry once they are that old
 	// (local only).
@@ -978,6 +988,9 @@ type Storage struct {
 
 	pathTmpl *template.Template
 	nested   []string
+	// tagTTL is the ttl of each policy tag here: tag.<name>.ttl of the
+	// configuration with ttl.tag over it.
+	tagTTL map[string]time.Duration
 	// permanent maps the endpoints whose respond storage this is and that
 	// have permanent names to their permanent block.
 	permanent map[string]*Permanent
@@ -1181,14 +1194,32 @@ func (s *Storage) PathTemplate() *template.Template { return s.pathTmpl }
 // would never be served, so they are reserved.
 func (s *Storage) Nested() []string { return s.nested }
 
-// Lifetime is the lifetime of an upload stored here for the client ttl
-// (empty: none; else as wire.ParseTTL reads it) and what became of that
-// ttl (wire.TTLCapped, wire.TTLRaised, wire.TTLIgnored, or empty when
-// applied as asked or not given). With ttl.user the client ttl is clamped
-// to min and max, and max is the lifetime without one and for
-// wire.TTLMax; otherwise the lifetime is max. 0 never expires.
-func (s *Storage) Lifetime(ttl string) (time.Duration, string) {
-	hi, lo := time.Duration(s.TTL.Max), time.Duration(s.TTL.Min)
+// Bounds is the lowest and the highest lifetime a client ttl gets here for
+// an upload with the tags (0: no bound): ttl.min and ttl.max, the highest
+// lowered to the shortest ttl of the policy tags among tags. A ttl.min
+// above that tag ttl gives way to it.
+func (s *Storage) Bounds(tags []string) (lo, hi time.Duration) {
+	lo, hi = time.Duration(s.TTL.Min), time.Duration(s.TTL.Max)
+	for _, t := range tags {
+		if d := s.tagTTL[t]; d > 0 && (hi == 0 || d < hi) {
+			hi = d
+		}
+	}
+	if hi > 0 && lo > hi {
+		lo = hi
+	}
+	return lo, hi
+}
+
+// Lifetime is the lifetime of an upload with the tags stored here for the
+// client ttl (empty: none; else as wire.ParseTTL reads it) and what became
+// of that ttl (wire.TTLCapped, wire.TTLRaised, wire.TTLIgnored, or empty
+// when applied as asked or not given). With ttl.user the client ttl is
+// clamped to the Bounds of the tags, and the highest is the lifetime
+// without one and for wire.TTLMax; otherwise the lifetime is the highest.
+// 0 never expires.
+func (s *Storage) Lifetime(ttl string, tags []string) (time.Duration, string) {
+	lo, hi := s.Bounds(tags)
 	client, max, err := wire.ParseTTL(ttl)
 	switch {
 	case ttl == "" || err != nil:
@@ -1773,7 +1804,29 @@ func (c *Config) validate() []error {
 		}
 	}
 
+	for name, t := range c.Tag {
+		if !wire.ValidTag(name) {
+			bad("tag %q: invalid name (allowed: a-z 0-9 . _ -)", name)
+		}
+		if t.TTL <= 0 {
+			bad("tag %s: ttl must be positive", name)
+		}
+	}
+
 	for name, s := range c.Storage {
+		s.tagTTL = make(map[string]time.Duration, len(c.Tag)+len(s.TTL.Tag))
+		for tag, t := range c.Tag {
+			s.tagTTL[tag] = time.Duration(t.TTL)
+		}
+		for tag, d := range s.TTL.Tag {
+			if !wire.ValidTag(tag) {
+				bad("storage %s: ttl.tag %q: invalid name (allowed: a-z 0-9 . _ -)", name, tag)
+			}
+			if d <= 0 {
+				bad("storage %s: ttl.tag.%s must be positive", name, tag)
+			}
+			s.tagTTL[tag] = time.Duration(d)
+		}
 		switch s.Type {
 		case "local":
 			if s.Base == "" {
@@ -1858,7 +1911,7 @@ func (c *Config) validate() []error {
 		if s.Cleanup.Age < 0 {
 			bad("storage %s: cleanup.age must be positive", name)
 		}
-		if (s.TTL.Max != 0 || s.TTL.Min != 0 || s.TTL.User || s.Cleanup.Age != 0) && s.Type != "local" {
+		if (s.TTL.Max != 0 || s.TTL.Min != 0 || s.TTL.User || len(s.TTL.Tag) > 0 || s.Cleanup.Age != 0) && s.Type != "local" {
 			bad("storage %s: ttl and cleanup.age need a local storage", name)
 		}
 		if len(s.Retention) > 0 && s.Type != "local" {

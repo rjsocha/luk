@@ -1040,18 +1040,20 @@ func (s *Server) accept(u *upload, e queue.Entry, n int64, sum string, dedup boo
 }
 
 // lifetime is the lifetime of the upload in one storage (0: never expires),
-// what became of the client ttl there and the ttl.min and ttl.max of the
-// storage (0: none).
+// what became of the client ttl there and the bounds of a client ttl
+// there for the tags of the upload (0: none).
 type lifetime struct {
 	d        time.Duration
 	note     string
 	min, max time.Duration
 }
 
-// lifetimeIn is the lifetime in st for the client ttl (empty: none).
-func lifetimeIn(st *config.Storage, ttl string) lifetime {
-	d, note := st.Lifetime(ttl)
-	return lifetime{d, note, time.Duration(st.TTL.Min), time.Duration(st.TTL.Max)}
+// lifetimeIn is the lifetime in st of an upload with the tags for the
+// client ttl (empty: none).
+func lifetimeIn(st *config.Storage, ttl string, tags []string) lifetime {
+	d, note := st.Lifetime(ttl, tags)
+	lo, hi := st.Bounds(tags)
+	return lifetime{d, note, lo, hi}
 }
 
 // lifetimes maps every local storage the upload is stored into (and the
@@ -1077,7 +1079,7 @@ func lifetimes(u *upload) map[string]lifetime {
 	out := make(map[string]lifetime, len(names))
 	for n := range names {
 		if st := u.sn.cfg.Storage[n]; st != nil && st.Type == "local" {
-			out[n] = lifetimeIn(st, u.meta.TTL)
+			out[n] = lifetimeIn(st, u.meta.TTL, u.meta.Tags)
 		}
 	}
 	return out
@@ -1103,8 +1105,8 @@ func (lt lifetime) ttl() (string, string) {
 	return wire.FormatDuration(lt.d), lt.note
 }
 
-// bounds is what an answer states about the ttl policy: ttl.min and
-// ttl.max, each empty when unset.
+// bounds is what an answer states about the ttl policy: the lowest and
+// the highest client ttl, each empty when unset.
 func (lt lifetime) bounds() (string, string) {
 	var lo, hi string
 	if lt.min > 0 {

@@ -226,6 +226,10 @@ pipeline:
     steps:
       - store: drop
 
+# tag:                         # the lifetime of the uploads carrying a tag, in every
+#   ttl-3d: {ttl: 3d}           # local storage: at most the ttl.max of the storage,
+#   ttl-7d: {ttl: 7d}           # the shortest of several tags; names are free
+
 storage:
   archive:
     type: local
@@ -278,6 +282,8 @@ storage:
       user: true                # the client ttl counts, clamped to min and max
       min: 1h
       max: 7d                   # also the lifetime without a client ttl
+      # tag:
+      #   ttl-7d: 2d            # the ttl of this tag here, in place of tag.ttl-7d.ttl
     # random:                   # .Random characters (default 32 characters, no look-alikes)
     #   alphabet: "abcdefghjkmnpqrstuvwxyz23456789"
     #   length: 26              # default: the shortest with 128 bits

@@ -162,7 +162,7 @@ func ttlPolicy(st *config.Storage) *wire.TTLPolicy {
 			*v.to = wire.FormatDuration(v.d)
 		}
 	}
-	if d, _ := st.Lifetime(""); d > 0 {
+	if d, _ := st.Lifetime("", nil); d > 0 {
 		p.Default = wire.FormatDuration(d)
 	}
 	return p

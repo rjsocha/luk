@@ -232,10 +232,10 @@ func (s *Server) linkRemove(t *linkTarget, sc store.Sidecar, id *wire.Identity, 
 }
 
 // linkTTL sets a new expiry: now plus the requested ttl under the ttl
-// policy of the storage, as for an upload; none (wire.TTLMax without
-// ttl.max) clears it.
+// policy of the storage for the tags of the stored upload, as for an
+// upload; none (wire.TTLMax without ttl.max and a tag ttl) clears it.
 func (s *Server) linkTTL(t *linkTarget, sc store.Sidecar, id *wire.Identity, ep *config.Endpoint, link, ttl string, now time.Time) (int, any, error) {
-	lt := lifetimeIn(t.st, ttl)
+	lt := lifetimeIn(t.st, ttl, sc.Client.Tags)
 	exp := ""
 	if lt.d > 0 {
 		exp = now.Add(lt.d).UTC().Format(time.RFC3339)

@@ -190,6 +190,9 @@ func (m Meta) PermanentConflicts() []string {
 	return set
 }
 
+// ValidTag reports whether t is a tag as a normalized meta carries it.
+func ValidTag(t string) bool { return tagRe.MatchString(t) }
+
 // Normalize lowercases, deduplicates and sorts the tags, then validates.
 func (m *Meta) Normalize() error {
 	seen := map[string]bool{}
@@ -634,7 +637,8 @@ type Respond struct {
 // (respond: accept) carries neither. TTL is the lifetime the server gave
 // the upload (none: it never expires) and TTLNote what it did with the
 // client ttl (TTLCapped, TTLRaised, TTLIgnored; none: applied as asked).
-// TTLMin and TTLMax are the ttl.min and ttl.max of the storage (none: no
+// TTLMin and TTLMax are the bounds of a client ttl for this upload: the
+// ttl.min and ttl.max of the storage, lowered by a tag ttl (none: no
 // such bound).
 type Receipt struct {
 	ID      string `json:"id"`

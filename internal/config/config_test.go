@@ -661,9 +661,104 @@ func TestStorageLifetime(t *testing.T) {
 		{"user false, no client ttl", policy(false, 0, 21*d), "", 21 * d, ""},
 		{"user false, no max", policy(false, 0, 0), "1d", 0, wire.TTLIgnored},
 	} {
-		if got, note := tc.st.Lifetime(tc.client); got != tc.want || note != tc.note {
+		if got, note := tc.st.Lifetime(tc.client, []string{"prod"}); got != tc.want || note != tc.note {
 			t.Errorf("%s: %v %q, want %v %q", tc.name, got, note, tc.want, tc.note)
 		}
+	}
+}
+
+func TestStorageLifetimeTag(t *testing.T) {
+	const h, d = time.Hour, 24 * time.Hour
+	policy := func(user bool, lo, hi time.Duration, tags map[string]time.Duration) *Storage {
+		s := &Storage{tagTTL: tags}
+		s.TTL.User, s.TTL.Min, s.TTL.Max = user, Duration(lo), Duration(hi)
+		return s
+	}
+	tag := map[string]time.Duration{"ttl-3d": 3 * d, "ttl-7d": 7 * d, "ttl-30d": 30 * d}
+	for _, tc := range []struct {
+		name   string
+		st     *Storage
+		client string
+		tags   []string
+		want   time.Duration
+		note   string
+		lo, hi time.Duration
+	}{
+		{"fixed, tag below max", policy(false, 0, 14*d, tag), "", []string{"ttl-3d"}, 3 * d, "", 0, 3 * d},
+		{"fixed, tag above max", policy(false, 0, 14*d, tag), "", []string{"ttl-30d"}, 14 * d, "", 0, 14 * d},
+		{"fixed, no max", policy(false, 0, 0, tag), "", []string{"ttl-3d"}, 3 * d, "", 0, 3 * d},
+		{"fixed, client ttl ignored", policy(false, 0, 14*d, tag), "1d", []string{"ttl-3d"}, 3 * d, wire.TTLIgnored, 0, 3 * d},
+		{"shortest of several", policy(false, 0, 14*d, tag), "", []string{"prod", "ttl-3d", "ttl-7d"}, 3 * d, "", 0, 3 * d},
+		{"no policy tag", policy(false, 0, 14*d, tag), "", []string{"prod"}, 14 * d, "", 0, 14 * d},
+		{"no policy tag, no max", policy(true, h, 0, tag), "", []string{"prod"}, 0, "", h, 0},
+		{"no tags", policy(true, h, 14*d, tag), "20d", nil, 14 * d, wire.TTLCapped, h, 14 * d},
+		{"user, no client ttl", policy(true, h, 14*d, tag), "", []string{"ttl-3d"}, 3 * d, "", h, 3 * d},
+		{"user, no client ttl, no max", policy(true, 0, 0, tag), "", []string{"ttl-3d"}, 3 * d, "", 0, 3 * d},
+		{"user, inside", policy(true, h, 14*d, tag), "2d", []string{"ttl-3d"}, 2 * d, "", h, 3 * d},
+		{"user, above tag", policy(true, h, 14*d, tag), "5d", []string{"ttl-3d"}, 3 * d, wire.TTLCapped, h, 3 * d},
+		{"user, above tag, no max", policy(true, 0, 0, tag), "5d", []string{"ttl-3d"}, 3 * d, wire.TTLCapped, 0, 3 * d},
+		{"user, tag above max", policy(true, h, 14*d, tag), "20d", []string{"ttl-30d"}, 14 * d, wire.TTLCapped, h, 14 * d},
+		{"user, below min", policy(true, h, 14*d, tag), "1m", []string{"ttl-3d"}, h, wire.TTLRaised, h, 3 * d},
+		{"user, max", policy(true, h, 14*d, tag), wire.TTLMax, []string{"ttl-3d"}, 3 * d, "", h, 3 * d},
+		{"user, max, no max", policy(true, 0, 0, tag), wire.TTLMax, []string{"ttl-3d"}, 3 * d, "", 0, 3 * d},
+		{"min above tag, below", policy(true, 5*d, 14*d, tag), "1d", []string{"ttl-3d"}, 3 * d, wire.TTLRaised, 3 * d, 3 * d},
+		{"min above tag, above", policy(true, 5*d, 14*d, tag), "6d", []string{"ttl-3d"}, 3 * d, wire.TTLCapped, 3 * d, 3 * d},
+		{"min above tag, no client ttl", policy(true, 5*d, 14*d, tag), "", []string{"ttl-3d"}, 3 * d, "", 3 * d, 3 * d},
+	} {
+		got, note := tc.st.Lifetime(tc.client, tc.tags)
+		lo, hi := tc.st.Bounds(tc.tags)
+		if got != tc.want || note != tc.note || lo != tc.lo || hi != tc.hi {
+			t.Errorf("%s: %v %q [%v, %v], want %v %q [%v, %v]", tc.name, got, note, lo, hi, tc.want, tc.note, tc.lo, tc.hi)
+		}
+	}
+}
+
+func TestTagTTL(t *testing.T) {
+	const d = 24 * time.Hour
+	drop := `ttl: {user: true, max: 7d}`
+	src := strings.Replace(good, drop, `ttl: {user: true, max: 14d, tag: {ttl-7d: 2d, local-1d: 1d}}`, 1) + "tag:\n  ttl-3d: {ttl: 3d}\n  ttl-7d: {ttl: 7d}\n"
+	c, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		storage, tag string
+		want         time.Duration
+	}{
+		{"archive", "ttl-3d", 3 * d}, {"archive", "ttl-7d", 7 * d}, {"archive", "local-1d", 0},
+		{"drop", "ttl-3d", 3 * d}, {"drop", "ttl-7d", 2 * d}, {"drop", "local-1d", d}, {"drop", "prod", 14 * d},
+	} {
+		if got, _ := c.Storage[tc.storage].Lifetime("", []string{tc.tag}); got != tc.want {
+			t.Errorf("storage %s tag %s: %v, want %v", tc.storage, tc.tag, got, tc.want)
+		}
+	}
+	for add, want := range map[string]string{
+		"tag:\n  ttl-3d: {ttl: 0s}\n":   "tag ttl-3d: ttl must be positive",
+		"tag:\n  ttl-3d: {ttl: -1h}\n":  "tag ttl-3d: ttl must be positive",
+		"tag:\n  ttl-3d: {}\n":          "tag ttl-3d: ttl must be positive",
+		"tag:\n  ttl-3d:\n":             "tag ttl-3d: ttl must be positive",
+		"tag:\n  ttl-3d: {ttl: soon}\n": "soon",
+		"tag:\n  TTL-3d: {ttl: 3d}\n":   `tag "TTL-3d": invalid name (allowed: a-z 0-9 . _ -)`,
+		"tag:\n  \"a b\": {ttl: 3d}\n":  `tag "a b": invalid name (allowed: a-z 0-9 . _ -)`,
+		"tag:\n  ttl-3d: {max: 3d}\n":   "field max not found",
+	} {
+		if _, err := Parse([]byte(good + add)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v", add, err)
+		}
+	}
+	for ttl, want := range map[string]string{
+		"{max: 7d, tag: {ttl-3d: 0s}}":   "storage drop: ttl.tag.ttl-3d must be positive",
+		"{max: 7d, tag: {ttl-3d: -1h}}":  "storage drop: ttl.tag.ttl-3d must be positive",
+		"{max: 7d, tag: {ttl-3d: soon}}": "soon",
+		"{max: 7d, tag: {Ttl: 1d}}":      `storage drop: ttl.tag "Ttl": invalid name (allowed: a-z 0-9 . _ -)`,
+	} {
+		if _, err := Parse([]byte(strings.Replace(good, drop, "ttl: "+ttl, 1))); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v", ttl, err)
+		}
+	}
+	src = strings.Replace(good, "storage:\n", "storage:\n  off: {type: s3, bucket: b, ttl: {tag: {ttl-3d: 1d}}}\n", 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage off: ttl and cleanup.age need a local storage") {
+		t.Errorf("ttl.tag on s3: %v", err)
 	}
 }
 

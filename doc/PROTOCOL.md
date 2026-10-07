@@ -635,7 +635,9 @@ Receipt (202, `respond: accept`): `{"id", "size", "sha256", "ttl",
 "ttl_note", "ttl_min", "ttl_max", "deduplicated"}`. `ttl` is the lifetime
 given (`7d`, `1h30m`; omitted: never expires), `ttl_note` what became of
 the client ttl (`capped`, `raised`, `ignored`; omitted: as asked),
-`ttl_min` and `ttl_max` the bounds of the storage. A client compares the
+`ttl_min` and `ttl_max` the bounds of a client ttl for this upload (those
+of the storage, lowered where the server bounds the upload by one of its
+tags). A client compares the
 answered `sha256` with the one it sent or computed (`luk`: a mismatch is
 an error). The `url` of a private upload, or of a storage served only to
 signed requests, has the scheme `luk` (section 6).

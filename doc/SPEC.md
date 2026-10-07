@@ -738,7 +738,8 @@ it is true is not):
 - `ttl` - the lifetime asked for, a positive duration or `max` (the
   longest the storage allows: its `ttl.max`, or no expiry without one);
   it counts only in a storage with `ttl.user: true`, clamped to its
-  `ttl.min` and `ttl.max` (see Storage).
+  `ttl.min` and `ttl.max` (see Storage); a policy tag of the upload
+  lowers that highest value to its tag ttl.
 - `ttl` / `once` - combine: a `once` upload is removed after the first
   download or at its expiry, whichever comes first; without `ttl` it
   expires after the storage `ttl.max`.
@@ -853,9 +854,14 @@ content from what it holds for the sender instead of reading the body
 omitted when it never expires). `ttl_note` tells what became of the
 client `ttl`: `capped` (above `ttl.max`), `raised` (below `ttl.min`),
 `ignored` (the storage has no `ttl.user`); omitted when it was applied as
-asked or not given. `ttl_min` and `ttl_max` are the `ttl.min` and
-`ttl.max` of the storage in the same short form; each is omitted when the
-storage has no such bound.
+asked or not given. `ttl_min` and `ttl_max` are the bounds of a client
+`ttl` for this upload in the same short form: the `ttl.min` and `ttl.max`
+of the storage, or, for an upload with a policy tag (see `ttl.tag` in
+Storage), the tag ttl as `ttl_max` when it is the shorter one (and as
+`ttl_min` when `ttl.min` exceeds it); each is omitted when there is no
+such bound. `capped` and `raised` refer to these bounds. Nothing else
+tells a tag ttl applied: an upload without a client `ttl` gets a `ttl`
+equal to `ttl_max`.
 
 A normal upload answers per `respond` (201 or 202); only `dry_run`
 returns the debug JSON (200), without any part. The `200` with the parts
@@ -1345,7 +1351,10 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
   not removed: 409 `link is on hold`.
 - `ttl`: the new expiry is now plus the lifetime the storage `ttl` policy
   gives the requested `ttl` (clamped to `ttl.min` and `ttl.max` as for an
-  upload; `max` gives `ttl.max`, and without one clears the expiry); the
+  upload; `max` gives `ttl.max`, and without one clears the expiry). The
+  tags of the stored upload count as at its upload: a policy tag among
+  them bounds the new lifetime by its tag ttl under the configuration in
+  force now, and `max` gives that bound. The
   sidecar `expires` is replaced atomically under the base lock. 200
   `{"url", "expires", "ttl", "ttl_note", "ttl_min", "ttl_max"}` with the
   `ttl` fields as in an upload answer (`expires` and `ttl` omitted when
@@ -2045,7 +2054,9 @@ Answers (inside the channel; the session ends with them):
   `user` (a client ttl counts), `min` and `max` (`ttl.min`, `ttl.max`) and
   `default` (the lifetime of an upload without a client ttl), each
   duration in the short form and omitted when there is none. Without
-  `respond: url` there is no `ttl` (the storages depend on the tags).
+  `respond: url` there is no `ttl` (the storages depend on the tags). The
+  policy tags are not listed: the answer of an upload carries the bounds
+  that applied to it.
 - `secret_ttl` - the same for the secret storage when it differs from
   `ttl` and `secret` is `true`; omitted otherwise.
 - `quota` - the quota of the signer on the endpoint (see Quota): `mode`
@@ -2338,6 +2349,10 @@ pipeline:
     steps:
       - store: drop
 
+tag:                                  # optional: the lifetime of the uploads carrying a tag
+  ttl-3d: {ttl: 3d}                   # in every local storage (see ttl.tag in Storage)
+  ttl-7d: {ttl: 7d}
+
 storage:
   archive:
     type: local
@@ -2359,6 +2374,8 @@ storage:
       user: true
       min: 1h
       max: 7d
+      tag:
+        ttl-7d: 2d                    # this tag gives 2d here
 
 expose:
   drop:
@@ -2419,6 +2436,12 @@ and `ssh.d/ca/`):
 - `storage.<n>.ttl` and `storage.<n>.cleanup.age` need a local storage;
   `ttl.min`, `ttl.max` and `cleanup.age` are not negative; `ttl.min`
   needs `ttl.user: true` and is at most `ttl.max` when both are set;
+  every `tag.<name>` has a positive `ttl` (`tag <name>: ttl must be
+  positive`) and a name an upload tag may have (`tag "<name>": invalid
+  name (allowed: a-z 0-9 . _ -)`); `storage.<n>.ttl.tag.<name>` likewise
+  (`storage <n>: ttl.tag.<name> must be positive`, `storage <n>: ttl.tag
+  "<name>": invalid name (allowed: a-z 0-9 . _ -)`), it needs a local
+  storage and its tag needs no `tag` entry;
   `ttl` or `cleanup` under an expose is an
   error naming the new place (`expose <n>: ttl moved to
   storage.<storage>.ttl.max`, `cleanup moved to
@@ -2564,9 +2587,10 @@ In-flight work keeps the configuration it started with:
   to the end, its parts and COMPLETE included: identity, endpoint,
   matched pipelines, body limits, the parts size,
   `respond`, the storage and expose of the answered URL and the `ttl`
-  policy of every storage it is stored into (the expiries are fixed at
-  receipt, so a reload of `ttl` applies to new uploads only; stored
-  expiries are never recomputed).
+  policy of every storage it is stored into, the tag ttls included (the
+  expiries are fixed at receipt, so a reload of `ttl` or `tag` applies to
+  new uploads only; stored expiries are never recomputed). A link `ttl`
+  request uses the tag ttls in force when it arrives.
 - `cleanup.age` applies from the next expiry pass of the janitor, to the
   files already stored too; `retention` from the next maintenance pass
   of the process role, to the files already stored too.
@@ -3395,6 +3419,8 @@ purpose.
   - `ttl.max` - the highest client `ttl` (with `ttl.user`) and the
     lifetime of an upload without one; without `ttl.user`, the lifetime
     of every upload (a fixed lifetime).
+  - `ttl.tag.<name>` - the tag ttl of the tag `<name>` in this storage,
+    in place of the global `tag.<name>.ttl` (which it does not need).
 
   The lifetime per storage: with `ttl.user` and a client `ttl`, that
   `ttl` clamped to `[ttl.min, ttl.max]` (a missing bound does not limit;
@@ -3417,6 +3443,35 @@ purpose.
       ttl: {user: true, min: 1h, max: 7d}   # the client picks, within bounds
     archive:
       ttl: {max: 21d}                       # fixed; the client ttl is ignored
+  ```
+
+  Policy tags: the top-level `tag` section gives a tag a ttl, `tag.<name>:
+  {ttl: DURATION}`, valid in every local storage; `ttl.tag.<name>` of a
+  storage replaces it there. The names are ordinary upload tags
+  (`[a-z0-9._-]+`) and nothing is derived from a name. An upload carrying
+  such a tag is bounded by the tag ttl in place of `ttl.max`: the highest
+  lifetime of that upload is the tag ttl, or `ttl.max` when that is
+  shorter (a tag never extends beyond `ttl.max`); of several policy tags
+  the shortest ttl counts. Everything above then holds with that value
+  as `ttl.max`: without `ttl.user`, or without a client `ttl`, it is the
+  lifetime (also in a storage without `ttl.max`); a client `ttl` is
+  clamped to `[ttl.min, it]`, and `max` gives it. A `ttl.min` above the
+  tag ttl gives way: the lifetime is the tag ttl. An upload without a
+  policy tag is not affected. `lukd storage ttl` ignores the tag ttls as
+  it ignores `ttl.max`.
+
+  ```yaml
+  tag:
+    ttl-3d: {ttl: 3d}
+    ttl-7d: {ttl: 7d}
+  storage:
+    archive: {...}            # no ttl: a tagged upload expires, the others never
+    drop:
+      ttl:
+        user: true
+        max: 14d
+        tag:
+          ttl-7d: 2d          # this tag gives 2d here
   ```
 - `cleanup.age` (local only, e.g. `14d`) - the retention of files without
   an expiry: they are removed once their `received` time is older,
@@ -3811,8 +3866,8 @@ symlink is refused (`lukd storage: <base> is a symlink`).
   per file.
 - `lukd storage ttl --storage NAME --name STORED [--name STORED]...
   --expires never|DURATION|TIME`: sets the expiry of each stored file,
-  whatever the `ttl` policy of the storage says (`ttl.user`, `ttl.min`
-  and `ttl.max` bind clients, not the operator). `never` clears the
+  whatever the `ttl` policy of the storage says (`ttl.user`, `ttl.min`,
+  `ttl.max` and the tag ttls bind clients, not the operator). `never` clears the
   expiry (the file is then subject to `cleanup.age`), a duration (`30d`,
   `12h`; positive) means now plus it, and a time must be RFC 3339 and
   not past (`--expires "<value>": in the past`); it is stored in UTC.
