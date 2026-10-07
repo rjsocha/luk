@@ -4795,7 +4795,7 @@ sudo are involved.
   (--uid=<user> | -p DynamicUser=yes -p User=<dynamic user>)
   --working-directory=<workspace> [--gid=<group>]
   [-p SupplementaryGroups=<groups>] [-p NoNewPrivileges=yes]
-  -p PrivateTmp=yes -p ProtectProc=invisible
+  -p PrivateTmp=yes -p ProtectProc=invisible -p PrivatePIDs=yes
   -p InaccessiblePaths=-<config dir> -p InaccessiblePaths=-/run/luk
   [-p InaccessiblePaths=-<path> ...] -p TemporaryFileSystem=<root>:ro
   -p BindPaths=<workspace>:<workspace>:norbind
@@ -5038,6 +5038,11 @@ sudo are involved.
     checked again inside the unit.
   - `ProtectProc=invisible`: the processes of other users (lukd, other
     units) are hidden in `/proc`.
+  - `PrivatePIDs=yes`: the unit has a PID namespace and a `/proc` of its
+    own, the wrapper is its PID 1. Units of the same user (concurrent
+    runs of one step or one job share a dynamic user, jobs share a
+    static `user`) would otherwise reach each other's workspace and
+    `.luk/run.sock` through `/proc/<pid>/root` and `/proc/<pid>/cwd`.
   - `NoNewPrivileges=yes` on every unit (`sudo` and setuid binaries
     fail), except a job with `privileged`.
   - The `-` of `InaccessiblePaths=` skips a missing path; a missing

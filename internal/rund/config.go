@@ -581,7 +581,9 @@ func under(p, d string) bool {
 // empty read-only tmpfs with only the workspace ws bound back, read-write
 // and at the same path, so LUK_WORK, LUK_IN, LUK_OUT, LUK_META and LUK_TMP
 // stay valid. The workspace and its parent are root's, so the unit cannot
-// swap them. The processes of other users are hidden. The credentials are
+// swap them. The processes of other users are hidden, those of other
+// units of the same user too (a PID namespace of its own, so no
+// /proc/<pid>/root of another unit is reachable). The credentials are
 // read by systemd before the namespace is set up. command, the state
 // directory state (none when empty) and box.Lukd must lie outside every
 // hidden path, ws outside every one but the root.
@@ -625,7 +627,7 @@ func sandbox(box *Box, ws, command, state string) ([]string, error) {
 			}
 		}
 	}
-	a := []string{"-p", "ProtectProc=invisible"}
+	a := []string{"-p", "ProtectProc=invisible", "-p", "PrivatePIDs=yes"}
 	for _, h := range append([]string{box.Config, RunDir}, hide...) {
 		a = append(a, "-p", "InaccessiblePaths=-"+h)
 	}

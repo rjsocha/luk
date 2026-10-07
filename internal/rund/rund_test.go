@@ -284,7 +284,7 @@ func TestArgvProgram(t *testing.T) {
 		"--unit=lukd-step-p-2-0123456789ab",
 		"-p", "DynamicUser=yes", "-p", "User=" + StepUser("p", 2),
 		"--working-directory=" + ws,
-		"-p", "NoNewPrivileges=yes", "-p", "PrivateTmp=yes", "-p", "ProtectProc=invisible",
+		"-p", "NoNewPrivileges=yes", "-p", "PrivateTmp=yes", "-p", "ProtectProc=invisible", "-p", "PrivatePIDs=yes",
 		"-p", "InaccessiblePaths=-/etc/site/lukd", "-p", "InaccessiblePaths=-/run/luk",
 		"-p", "TemporaryFileSystem=/var/lib/luk:ro", "-p", "BindPaths=" + ws + ":" + ws + ":norbind",
 		"-p", "ExecStartPre=+/usr/bin/lukd run workspace own lukd-step-p-2-0123456789ab",
@@ -1082,7 +1082,7 @@ storage:
 	ws := workspace.Path(e.root, unitName(a))
 	got := strings.Join(a, " ")
 	hidden := []string{filepath.Join(top, "lukd"), "/run/luk", "/etc/ssl/luk.crt", "/etc/ssl/private/luk.key", "/srv/extra", "/srv/gpg", "/srv/nonces", "/srv/queue", "/storage/backup"}
-	want := "-p ProtectProc=invisible -p InaccessiblePaths=-" + strings.Join(hidden, " -p InaccessiblePaths=-") + " " +
+	want := "-p ProtectProc=invisible -p PrivatePIDs=yes -p InaccessiblePaths=-" + strings.Join(hidden, " -p InaccessiblePaths=-") + " " +
 		"-p TemporaryFileSystem=" + e.root + ":ro -p BindPaths=" + ws + ":" + ws + ":norbind " +
 		"-p ExecStartPre=+/usr/bin/lukd run workspace own " + unitName(a) + " "
 	if !strings.Contains(got, want) {
