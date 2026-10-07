@@ -12,15 +12,30 @@ import (
 	"luk/internal/status"
 )
 
+// none parks no entry.
+func none(string) bool { return false }
+
+func TestQueueStatusSkipsParked(t *testing.T) {
+	e := newRunEnv(t, "    steps:\n      - store: a\n")
+	now := time.Now()
+	e.enqueue(t, "20261006T100000Z-0a1b2c3d", "up", "p")
+	e.enqueue(t, "20261006T100500Z-0a1b2c3e", "up", "p")
+	parked := func(dir string) bool { return filepath.Base(dir) == "20261006T100000Z-0a1b2c3d" }
+	q := QueueStatus(e.cfg, now, parked)
+	if q.Entries != 1 || q.OldestID != "20261006T100500Z-0a1b2c3e" {
+		t.Fatalf("%+v", q)
+	}
+}
+
 func TestQueueStatusOldest(t *testing.T) {
 	e := newRunEnv(t, "    steps:\n      - store: a\n")
 	now := time.Now()
-	if q := QueueStatus(e.cfg, now); q.Entries != 0 || q.OldestID != "" || q.OldestAge != nil {
+	if q := QueueStatus(e.cfg, now, none); q.Entries != 0 || q.OldestID != "" || q.OldestAge != nil {
 		t.Fatalf("%+v", q)
 	}
 	e.enqueue(t, "20261006T100000Z-0a1b2c3d", "up", "p")
 	e.enqueue(t, "20261006T100500Z-0a1b2c3e", "up", "p")
-	q := QueueStatus(e.cfg, now)
+	q := QueueStatus(e.cfg, now, none)
 	if q.Entries != 2 || q.OldestID != "20261006T100000Z-0a1b2c3d" || q.OldestReceived == "" || q.OldestAge == nil || *q.OldestAge < 0 {
 		t.Fatalf("%+v", q)
 	}
@@ -42,7 +57,7 @@ func TestQueueStatusAgeSecondDirAndTie(t *testing.T) {
 	}
 	e.enqueueWith(t, "20261006T100000Z-0000000b", "up", same, "p")
 	e.enqueueWith(t, "20261006T100000Z-0000000a", "up2", same, "p")
-	q := QueueStatus(e.cfg, now)
+	q := QueueStatus(e.cfg, now, none)
 	if q.Entries != 2 || q.OldestID != "20261006T100000Z-0000000a" || q.OldestAge == nil || *q.OldestAge != 90 {
 		t.Fatalf("%+v", q)
 	}
@@ -53,7 +68,7 @@ func TestQueueStatusAgeSecondDirAndTie(t *testing.T) {
 		j.Sidecar.Accepted = 1
 		j.Sidecar.Received = now.Format(time.RFC3339)
 	}, "p")
-	if q := QueueStatus(e.cfg, now); q.Entries != 3 || q.OldestID != "20261006T100100Z-0000000c" || *q.OldestAge != 0 {
+	if q := QueueStatus(e.cfg, now, none); q.Entries != 3 || q.OldestID != "20261006T100100Z-0000000c" || *q.OldestAge != 0 {
 		t.Fatalf("%+v", q)
 	}
 }

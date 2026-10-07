@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"path/filepath"
+	"slices"
 	"time"
 
 	"luk/internal/config"
@@ -11,14 +12,20 @@ import (
 )
 
 // QueueStatus describes the committed queue entries of every queue
-// directory at now: their number and the oldest by acceptance order.
-func QueueStatus(cfg *config.Config, now time.Time) status.Queue {
+// directory at now whose pipelines have not all ended, an entry for which
+// parked (its directory) is true left out: their number and the oldest by
+// acceptance order.
+func QueueStatus(cfg *config.Config, now time.Time, parked func(dir string) bool) status.Queue {
 	var q status.Queue
 	var best queue.Entry
 	var bestAt queue.Acceptance
 	for _, dir := range QueueDirs(cfg) {
 		es, err := queue.Pending(dir)
-		if err != nil || len(es) == 0 {
+		if err != nil {
+			continue
+		}
+		es = slices.DeleteFunc(es, func(e queue.Entry) bool { return parked(e.Dir) })
+		if len(es) == 0 {
 			continue
 		}
 		q.Entries += len(es)
@@ -66,7 +73,14 @@ func (d *Dispatcher) RefreshRuntime(now time.Time) {
 	case c != nil:
 		ws = &status.Workspaces{Leftover: c.Leftover, Updated: c.Updated}
 	}
-	if err := d.status.SetRuntime(d.Units(now), QueueStatus(d.config(), now), ws); err != nil {
+	d.mu.Lock()
+	parked := make(map[string]bool, len(d.parked))
+	for dir := range d.parked {
+		parked[dir] = true
+	}
+	d.mu.Unlock()
+	q := QueueStatus(d.config(), now, func(dir string) bool { return parked[dir] })
+	if err := d.status.SetRuntime(d.Units(now), q, ws); err != nil {
 		d.log.Warn("status not written", "error", err)
 	}
 }
