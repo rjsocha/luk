@@ -1,8 +1,6 @@
 module luk
 
-go 1.26.1
-
-toolchain go1.27.1
+go 1.27.2
 
 require (
 	github.com/ProtonMail/go-crypto v1.5.2
