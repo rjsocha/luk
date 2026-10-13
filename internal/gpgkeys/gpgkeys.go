@@ -130,11 +130,11 @@ func readFile(p string) ([]*openpgp.Entity, error) {
 	if len(b) > MaxBody {
 		return nil, fmt.Errorf("larger than %d bytes", MaxBody)
 	}
-	return parse(b)
+	return Parse(b)
 }
 
-// parse reads a binary key ring, or an armored one.
-func parse(b []byte) ([]*openpgp.Entity, error) {
+// Parse reads a binary key ring, or an armored one.
+func Parse(b []byte) ([]*openpgp.Entity, error) {
 	var el openpgp.EntityList
 	var err error
 	if bytes.HasPrefix(bytes.TrimSpace(b), []byte("-----BEGIN")) {
@@ -257,7 +257,7 @@ func (r *Resolver) WKD(ctx context.Context, addr string) (Recipient, error) {
 	data, err := r.fetch(ctx, addr)
 	var ents []*openpgp.Entity
 	if err == nil {
-		if ents, err = parse(data); err != nil {
+		if ents, err = Parse(data); err != nil {
 			err = fmt.Errorf("WKD key: %w", err)
 		}
 	}

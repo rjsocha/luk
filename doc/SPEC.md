@@ -5512,6 +5512,11 @@ luk send [flags]      (aliases: put, push)
       --type TYPE           Content-Type for downloads (default: with
                             --secret text/plain; charset=utf-8, else by the
                             extension of the name, else octet-stream)
+      --gpg ADDRESS|FPR     repeatable; encrypt the content here, before
+                            it is sent, to the key of this e-mail address
+                            or fingerprint in the gpg keyring of the user
+                            (see below); a usage error with --secret;
+                            hidden without gpg in PATH
       --pretty-url          ask for a pronounceable name in the URL (a
                             proquint, lusab-babad-gutih-tugad); the
                             endpoint must offer it to the signer
@@ -6028,6 +6033,53 @@ the same content reached; <n> of <N> links made` (exit 2), the URLs made
 so far already printed (with `--json` the array of the answers so far).
 `--links` takes `--dry-run` as a usage error and works
 with every other option and through aliases, as any flag.
+
+`luk send --gpg ADDRESS|FPR` (repeatable) encrypts the content on the
+client, before anything is sent, into one binary (not armored) OpenPGP
+message to the keys named, the format of the `encrypt` step (see
+Encryption); lukd receives and stores only the message. The keys come
+from the GnuPG keyring of the user, through the `gpg` program of `PATH`
+(`GNUPGHOME` applies): `gpg --with-colons --list-keys` judges them and
+`gpg --export` hands over the public key; gpg sees neither the content
+nor the message, and no secret key is used.
+
+- A recipient is an e-mail address (compared in lowercase with the
+  address of the user ids, an exact match) or a fingerprint (40 or 64 hex
+  digits, `0x` allowed). Anything else is a usage error.
+- The key must be valid for gpg: validity full or ultimate (`f` or `u` in
+  the colon listing), of the user id with that address, or of the key for
+  a fingerprint. That is a key the user signed (`gpg --sign-key`,
+  `--lsign-key`), one signed by a key with full ownertrust, or an own
+  key. It must not be disabled and must have an encryption-capable
+  (sub)key. Keys that fail this are ignored; when exactly one key is left
+  it is the recipient.
+- Without `gpg` in `PATH` the flag is hidden: the help of `luk send` and
+  the completion of its flags do not show it, and using it is the usage
+  error `--gpg: gpg not found in PATH`.
+- Completion of the value offers what would be accepted: every address
+  with exactly one such key, and for an address with several such keys
+  each fingerprint, described by the address. Keys gpg does not hold valid, disabled keys and keys that
+  cannot encrypt are not offered.
+- No key left (`--gpg: no key of <who> in the gpg keyring`, or `no valid
+  key of <who> in the gpg keyring: <fingerprint>: validity unknown; ...`
+  with the reason per key), more than one (`<n> valid keys of <who> ...:
+  name one by its fingerprint`), or no `gpg` in `PATH` is a usage error
+  (exit 1), before any request: nothing is sent. Every recipient must
+  resolve; the same key named twice counts once.
+- The listing checks the trust database like any gpg command (gpg
+  rebuilds it when it is stale), so a key signed a moment ago is valid
+  at once.
+- The name of the upload is `<name>.gpg` (`--name`, else the base name of
+  a regular `--file`; a stream without `--name` has none). Without
+  `--type` the type is `application/pgp-encrypted`.
+- A regular `--file` is encrypted into an unlinked temporary file in
+  `TMPDIR` (default `/var/tmp`, not a tmpfs) that holds only the message,
+  and is sent like any file: the signed `size` and `sha256` are those of
+  the message, so `--links` resends it when asked. A stream (`--stdin`,
+  `--file` on a pipe) is encrypted while it is sent, with the limits of a
+  stream. `--backup` describes the plain file.
+- Decrypt with the secret key of any recipient: `gpg --output f.txt
+  --decrypt f.txt.gpg`.
 
 `luk` alone prints help, with the aliases of the config in an "Aliases"
 section after the commands. No command takes positional arguments, except

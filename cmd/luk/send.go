@@ -22,6 +22,7 @@ import (
 
 	"luk/internal/channel"
 	"luk/internal/client"
+	"luk/internal/gpgring"
 	"luk/internal/wire"
 )
 
@@ -29,7 +30,7 @@ func newSendCmd(out io.Writer) *cobra.Command {
 	var (
 		endpoint, key, ttl, name, ctype, file, bwlimit string
 		permanent                                      string
-		tags                                           []string
+		tags, gpgTo                                    []string
 		backup, once, portal, secret, quiet, stdin     bool
 		dryRun, progress, asJSON, prettyURL, noOwner   bool
 		mutable, private, anyID                        bool
@@ -111,6 +112,8 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 				return usageError{errors.New("--portal and --secret are mutually exclusive")}
 			case anyID && !private:
 				return usageError{errors.New("--any needs --private")}
+			case len(gpgTo) > 0 && secret:
+				return usageError{errors.New("--gpg takes no --secret")}
 			case private && (secret || portal):
 				return usageError{errors.New("--private takes no --secret or --portal: private files are fetched with luk get")}
 			case links < 1:
@@ -134,6 +137,13 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 			limit, err := parseBWLimit(bwlimit)
 			if err != nil {
 				return err
+			}
+			recipients, err := gpgRecipients(cmd.Context(), gpgTo)
+			if err != nil {
+				return err
+			}
+			if len(recipients) > 0 && ctype == "" {
+				ctype = gpgType
 			}
 			cfg, _, err := client.LoadMerged()
 			if err != nil {
@@ -168,11 +178,14 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 				return usageError{err}
 			}
 			src, closer, err := input(file, name, stdin, prompt, backup, &meta)
-			if err != nil {
-				return err
+			if err == nil && len(recipients) > 0 {
+				src, closer, err = gpgInput(src, closer, recipients, &meta)
 			}
 			if closer != nil {
 				defer closer.Close()
+			}
+			if err != nil {
+				return err
 			}
 			ctx, stop := interruptContext()
 			defer stop()
@@ -243,6 +256,13 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 	f.StringVarP(&endpoint, "endpoint", "e", "", "endpoint name from the config, or a URL (may end with #PIN[,PIN...], the lukd pins)")
 	f.StringVarP(&key, "key", "k", "", "private key file (uses PATH-cert.pub when present), a .pub file of an agent key, or SHA256:... fingerprint of an agent key")
 	f.StringArrayVarP(&tags, "tag", "t", nil, "tag (repeatable)")
+	f.StringArrayVar(&gpgTo, "gpg", nil, "encrypt to the key of this e-mail address or fingerprint in the gpg keyring (repeatable); the key must be valid there")
+	if gpgring.Available() {
+		cmd.Long += gpgLong
+		cmd.Example += gpgExample
+	} else if err := f.MarkHidden("gpg"); err != nil {
+		panic(err)
+	}
 	f.BoolVar(&backup, "backup", false, "add backup meta: hostname, absolute path, mtime; for a stream the hostname and the time of sending")
 	f.StringVar(&ttl, "ttl", "", "lifetime, e.g. 24h or 7d, or max for the longest the storage allows")
 	f.BoolVar(&once, "once", false, "delete after the first download")
@@ -265,7 +285,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 	f.IntVar(&parallel, "parallel", 1, "parts in flight at once (1 to 64), at most what the endpoint offers")
 	f.StringVar(&permanent, "permanent", "", "publish as a new version of this permanent name of the endpoint")
 	completeFlags(cmd, map[string]cobra.CompletionFunc{
-		"file": completeFiles, "endpoint": completeEndpoint, "key": completeKey, "tag": completeNone,
+		"file": completeFiles, "endpoint": completeEndpoint, "key": completeKey, "tag": completeNone, "gpg": completeGPG,
 		"ttl": completeTTL, "name": completeNone, "permanent": completeNone, "type": completeNone, "bwlimit": completeNone, "links": completeNone, "parallel": completeNone,
 	})
 	return cmd

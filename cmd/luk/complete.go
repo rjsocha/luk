@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"luk/internal/client"
+	"luk/internal/gpgring"
 	"luk/internal/wire"
 )
 
@@ -80,6 +81,26 @@ func completeKey(_ *cobra.Command, _ []string, toComplete string) ([]cobra.Compl
 		}
 	}
 	return list, cobra.ShellCompDirectiveDefault
+}
+
+// completeGPG offers the recipients of the gpg keyring that --gpg accepts:
+// the addresses with one valid key.
+func completeGPG(cmd *cobra.Command, _ []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+	rcpts, err := gpgring.Recipients(cmd.Context())
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var list []cobra.Completion
+	for _, r := range rcpts {
+		if strings.HasPrefix(r.Name, toComplete) {
+			if r.Description == "" {
+				list = append(list, r.Name)
+				continue
+			}
+			list = append(list, cobra.CompletionWithDesc(r.Name, r.Description))
+		}
+	}
+	return list, cobra.ShellCompDirectiveNoFileComp
 }
 
 // completeLinkHost offers the link hosts of the merged config, with the
