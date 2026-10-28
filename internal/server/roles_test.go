@@ -46,15 +46,15 @@ func newRoleEnv(t *testing.T) *roleEnv {
 root: %s
 listen: {main: {addr: "%s", public: "http://%s"}}
 auth:
-  keys: [{name: robert.socha, key: "%s"}]
+  keys: {robert.socha: "%s"}
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: drop}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha], respond: url, storage: drop}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:
-  drop: {type: local, base: s/drop, path: "{{ .File }}", expose: drop, catalog: true, ttl: {max: 7d}}
+  drop: {directory: s/drop, path: "{{ .File }}", expose: drop, ttl: {max: 7d}}
 expose:
-  drop: {listen: main, path: /d/}
+  drop: {listen: main, path: /d/, catalog: true}
 `, e.root, e.addr, e.addr, pubLine(e.user.PublicKey()))
 	p := filepath.Join(e.dir, "config.yaml")
 	if err := os.WriteFile(p, []byte(text), 0o640); err != nil {
@@ -172,7 +172,7 @@ func TestReceiveQueuesWithoutRunning(t *testing.T) {
 	var logs syncBuf
 	e.start(t, Receive, &logs)
 	e.upload(t, "a.txt", false, "hello")
-	qdir := filepath.Join(e.root, "data", "q/drop")
+	qdir := filepath.Join(e.root, "data", "queue/drop")
 	ents := entries(t, qdir)
 	if len(ents) != 1 || !exists(filepath.Join(qdir, ents[0], "meta.json")) || !exists(filepath.Join(qdir, ents[0], "payload")) {
 		t.Fatalf("queue %v", ents)
@@ -192,7 +192,7 @@ func TestReceiveQueuesWithoutRunning(t *testing.T) {
 // commit puts an accepted entry for the drop pipeline into the queue.
 func (e *roleEnv) commit(t *testing.T, id, file, body string) {
 	t.Helper()
-	qdir := filepath.Join(e.root, "data", "q/drop")
+	qdir := filepath.Join(e.root, "data", "queue/drop")
 	if err := os.MkdirAll(qdir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func (e *roleEnv) commit(t *testing.T, id, file, body string) {
 func TestProcessPicksUpCommitted(t *testing.T) {
 	fastPickup(t)
 	e := newRoleEnv(t)
-	half := filepath.Join(e.root, "data", "q/drop/half")
+	half := filepath.Join(e.root, "data", "queue/drop/half")
 	if err := os.MkdirAll(half, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestProcessPicksUpCommitted(t *testing.T) {
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("picked up after %s", d)
 	}
-	waitFor(t, "queue entry removed", func() bool { return !exists(filepath.Join(e.root, "data", "q/drop/id-1")) })
+	waitFor(t, "queue entry removed", func() bool { return !exists(filepath.Join(e.root, "data", "queue/drop/id-1")) })
 	if !exists(half) {
 		t.Fatal("process removed an entry being received")
 	}
@@ -373,7 +373,7 @@ func TestProcessReloadsOnHUP(t *testing.T) {
 	done := e.start(t, Process, &logs)
 	snippet := `
 endpoint:
-  extra: {listen: main, endpoint: /extra, path: q/extra, allow: [robert.socha]}
+  extra: {listen: main, endpoint: /extra, allow: [robert.socha]}
 pipeline:
   extra: {endpoint: [extra], steps: [{store: drop}]}
 `
@@ -394,7 +394,7 @@ pipeline:
 	}
 	// The queue directory of the new endpoint is watched: a commit is
 	// picked up long before the poll.
-	qdir := filepath.Join(e.root, "data", "q/extra")
+	qdir := filepath.Join(e.root, "data", "queue/extra")
 	q := queue.New(0, nil)
 	ent, n, sum, err := q.Receive(context.Background(), qdir, "id-x", strings.NewReader("extra"), 0, nil, "", nil)
 	if err != nil {
@@ -426,7 +426,7 @@ func TestProcessResumesQueue(t *testing.T) {
 	slowPickup(t)
 	e := newRoleEnv(t)
 	e.commit(t, "left-over", "kept.txt", "payload")
-	half := filepath.Join(e.root, "data", "q/drop/half")
+	half := filepath.Join(e.root, "data", "queue/drop/half")
 	if err := os.MkdirAll(half, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestProcessResumesQueue(t *testing.T) {
 		b, err := os.ReadFile(filepath.Join(e.root, "data", "s/drop/file/kept.txt"))
 		return err == nil && string(b) == "payload"
 	})
-	waitFor(t, "queue entry removed", func() bool { return !exists(filepath.Join(e.root, "data", "q/drop/left-over")) })
+	waitFor(t, "queue entry removed", func() bool { return !exists(filepath.Join(e.root, "data", "queue/drop/left-over")) })
 	if !exists(half) {
 		t.Fatal("process removed an entry being received")
 	}
@@ -455,11 +455,11 @@ func TestProcessResumesQueue(t *testing.T) {
 func TestReceiveRemovesHalfReceived(t *testing.T) {
 	e := newRoleEnv(t)
 	e.commit(t, "committed", "kept.txt", "payload")
-	half := filepath.Join(e.root, "data", "q/drop/20261004T100000Z-0123abcd")
+	half := filepath.Join(e.root, "data", "queue/drop/20261004T100000Z-0123abcd")
 	if err := os.MkdirAll(half, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	other := filepath.Join(e.root, "data", "q/drop/inner/20261004T100000Z-0123abcd")
+	other := filepath.Join(e.root, "data", "queue/drop/inner/20261004T100000Z-0123abcd")
 	if err := os.MkdirAll(other, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +471,7 @@ func TestReceiveRemovesHalfReceived(t *testing.T) {
 	if !exists(other) {
 		t.Fatal("a directory not named like an entry removed")
 	}
-	if !exists(filepath.Join(e.root, "data", "q/drop/committed/meta.json")) {
+	if !exists(filepath.Join(e.root, "data", "queue/drop/committed/meta.json")) {
 		t.Fatal("committed entry removed")
 	}
 }
@@ -594,7 +594,7 @@ func TestReceiveAcceptedAfterMark(t *testing.T) {
 	var logs syncBuf
 	e.start(t, Receive, &logs)
 	e.upload(t, "a.txt", false, "hello")
-	qdir := filepath.Join(e.root, "data", "q/drop")
+	qdir := filepath.Join(e.root, "data", "queue/drop")
 	ents := entries(t, qdir)
 	if len(ents) != 1 {
 		t.Fatalf("queue %v", ents)

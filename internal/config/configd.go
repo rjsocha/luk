@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -33,12 +32,9 @@ const (
 	maxKeyFile   = 1 << 20
 )
 
-// Sections whose entries are keyed by name: mappings by their key, lists
-// by the `name` of each item. Every other leaf is set in one file only.
-var (
-	namedMaps  = map[string]bool{"listen": true, "endpoint": true, "pipeline": true, "storage": true, "expose": true}
-	namedLists = map[string]bool{"auth.keys": true, "auth.ca": true}
-)
+// Sections whose entries are keyed by name. Every other leaf is set in
+// one file only.
+var namedMaps = map[string]bool{"listen": true, "endpoint": true, "pipeline": true, "storage": true, "expose": true, "auth.keys": true, "auth.ca": true}
 
 // IdentityPath is the identity key file belonging to the main file cfgPath.
 func IdentityPath(cfgPath string) string {
@@ -70,7 +66,6 @@ func Load(p string) (*Config, error) {
 	if len(m.errs) > 0 {
 		return nil, errors.Join(m.errs...)
 	}
-	m.sortLists()
 	var c Config
 	if err := m.root.Decode(&c); err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
@@ -176,14 +171,6 @@ func (m *merger) merge(dst, src *yaml.Node, at, file string) {
 					d.Content = append(d.Content, v.Content[j], v.Content[j+1])
 				}
 			}
-		case namedLists[p]:
-			d := child(dst, k, yaml.SequenceNode)
-			for _, it := range v.Content {
-				it = deref(it)
-				if name := itemName(it); name == "" || m.claim(p+" "+name, file, "defined") {
-					d.Content = append(d.Content, it)
-				}
-			}
 		case v.Kind == yaml.MappingNode:
 			m.merge(child(dst, k, yaml.MappingNode), v, p, file)
 		default:
@@ -208,22 +195,6 @@ func (m *merger) claim(id, file, verb string) bool {
 		m.errs = append(m.errs, fmt.Errorf("%s: %s in %s and %s", id, verb, prev, file))
 	}
 	return false
-}
-
-// sortLists orders the named lists by name, so the result does not depend
-// on the order of the files.
-func (m *merger) sortLists() {
-	for i := 0; i+1 < len(m.root.Content); i += 2 {
-		if m.root.Content[i].Value != "auth" {
-			continue
-		}
-		a := m.root.Content[i+1]
-		for j := 0; j+1 < len(a.Content); j += 2 {
-			if l := a.Content[j+1]; namedLists["auth."+a.Content[j].Value] {
-				sort.SliceStable(l.Content, func(x, y int) bool { return itemName(l.Content[x]) < itemName(l.Content[y]) })
-			}
-		}
-	}
 }
 
 // fileOf returns the file defining the longest origin that starts msg,
@@ -262,15 +233,6 @@ func deref(n *yaml.Node) *yaml.Node {
 		n = n.Alias
 	}
 	return n
-}
-
-func itemName(n *yaml.Node) string {
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if n.Content[i].Value == "name" {
-			return n.Content[i+1].Value
-		}
-	}
-	return ""
 }
 
 // checkDir reports whether dir exists; it must be a directory not

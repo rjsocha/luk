@@ -48,14 +48,13 @@ listen:
   prod:
     addr: 127.0.0.1:18443
     host: [a.example.com, b.example.com]
-    tls: {mode: acme}
+    tls: {mode: acme, acme: {entrypoint: http, server: 'https://acme-v02.api.letsencrypt.org/directory'}}
   stage:
     addr: 127.0.0.1:18444
     host: [s.example.com]
-    tls: {mode: acme, directory: '%s'}
+    tls: {mode: acme, acme: {entrypoint: http, server: '%s'}}
   http:
     addr: 127.0.0.1:18080
-    acme: true
 `, root, stagingDirectory)
 	if err := os.WriteFile(cfgPath, []byte(text), 0o640); err != nil {
 		t.Fatal(err)
@@ -64,7 +63,7 @@ listen:
 	if err != nil {
 		t.Fatal(err)
 	}
-	prod, stage := cfg.ACMECacheDir(config.DefaultACMEDirectory), cfg.ACMECacheDir(stagingDirectory)
+	prod, stage := cfg.ACMECacheDir(config.LetsEncrypt), cfg.ACMECacheDir(stagingDirectory)
 	other := filepath.Join(root, "data", "acme", "ca.example.com_14000_dir")
 	issuer := testIssuer(t)
 	for dir, names := range map[string][]string{prod: {"a.example.com", "gone.example.com"}, stage: {"s.example.com"}, other: {"x.example.com"}} {
@@ -79,7 +78,7 @@ listen:
 		}
 	}
 	retry := time.Date(2026, 10, 2, 13, 0, 0, 0, time.UTC)
-	writeStatus(t, prod, acmecert.Status{Directory: config.DefaultACMEDirectory, Hosts: map[string]*acmecert.HostStatus{
+	writeStatus(t, prod, acmecert.Status{Directory: config.LetsEncrypt, Hosts: map[string]*acmecert.HostStatus{
 		"a.example.com": {LastError: "rate limited", NextRetry: retry},
 	}})
 	writeStatus(t, other, acmecert.Status{Directory: "https://ca.example.com:14000/dir"})
@@ -217,7 +216,7 @@ func TestACMELs(t *testing.T) {
 		byName[r.Name] = r
 	}
 	a, s, g := byName["a.example.com"], byName["s.example.com"], byName["gone.example.com"]
-	if a.Unused || len(a.Listen) != 1 || a.Directory != config.DefaultACMEDirectory || a.Daemon == nil || a.Daemon.LastError != "rate limited" ||
+	if a.Unused || len(a.Listen) != 1 || a.Directory != config.LetsEncrypt || a.Daemon == nil || a.Daemon.LastError != "rate limited" ||
 		a.Issuer != "Test Issuer" || a.DaysLeft != 10 || !a.RenewAt.Equal(a.NotAfter.Add(-a.NotAfter.Sub(a.NotBefore)/3)) {
 		t.Errorf("a: %+v", a)
 	}
@@ -231,7 +230,7 @@ func TestACMELs(t *testing.T) {
 
 func TestACMEPrune(t *testing.T) {
 	cfgPath, cfg := acmeCacheConfig(t)
-	prod, stage := cfg.ACMECacheDir(config.DefaultACMEDirectory), cfg.ACMECacheDir(stagingDirectory)
+	prod, stage := cfg.ACMECacheDir(config.LetsEncrypt), cfg.ACMECacheDir(stagingDirectory)
 	other := filepath.Join(cfg.DataDir(), "acme", "ca.example.com_14000_dir")
 	gone, x := acmecert.CertFile(prod, "gone.example.com"), acmecert.CertFile(other, "x.example.com")
 	out, err := runLukd(t, "tls", "acme", "prune", "--dry-run", "-c", cfgPath)
@@ -358,10 +357,9 @@ listen:
   download:
     addr: %s
     host: [drop.example.com]
-    tls: {mode: acme, directory: '%s'}
+    tls: {mode: acme, acme: {entrypoint: http, server: '%s'}}
   http:
     addr: %s
-    acme: true
 `, root, dl, ca.Directory(), plain)
 	if err := os.WriteFile(cfgPath, []byte(text), 0o640); err != nil {
 		t.Fatal(err)
@@ -480,7 +478,7 @@ func mustLeaf(t *testing.T, dir string) *x509.Certificate {
 // does not load as one, and refuses an acme directory that is a symlink.
 func TestACMEPruneOnlyCertificates(t *testing.T) {
 	cfgPath, cfg := acmeCacheConfig(t)
-	prod := cfg.ACMECacheDir(config.DefaultACMEDirectory)
+	prod := cfg.ACMECacheDir(config.LetsEncrypt)
 	junk := acmecert.CertFile(prod, "junk.example.com")
 	if err := os.WriteFile(junk, []byte("not even a certificate"), 0o600); err != nil {
 		t.Fatal(err)

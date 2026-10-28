@@ -44,6 +44,8 @@ const DefaultRoot = "/var/lib/luk"
 const (
 	DataName = "data"
 	RootName = "root"
+	// QueueName is the directory of the endpoint queues in <root>/data.
+	QueueName = "queue"
 )
 
 // DefaultNonces is the directory of the nonce cache when auth.nonces is
@@ -110,6 +112,8 @@ type Config struct {
 	Root     string               `yaml:"root"`
 	Listen   map[string]*Listen   `yaml:"listen"`
 	Limits   Limits               `yaml:"limits"`
+	Queue    UploadQueue          `yaml:"queue"`
+	Failed   Failed               `yaml:"failed"`
 	Auth     Auth                 `yaml:"auth"`
 	Endpoint map[string]*Endpoint `yaml:"endpoint"`
 	Pipeline map[string]*Pipeline `yaml:"pipeline"`
@@ -133,7 +137,7 @@ type Config struct {
 }
 
 // Tag is the policy of an upload tag: TTL is the lifetime of an upload
-// carrying the tag in every local storage (see Storage.Lifetime).
+// carrying the tag in every storage (see Storage.Lifetime).
 type Tag struct {
 	TTL Duration `yaml:"ttl"`
 }
@@ -176,19 +180,19 @@ const DefaultWKDCache = 24 * time.Hour
 type Limits struct {
 	Conn   ConnLimits   `yaml:"conn"`
 	Header HeaderLimits `yaml:"header"`
-	Queue  QueueLimits  `yaml:"queue"`
-	Failed FailedLimits `yaml:"failed"`
 	// Channel bounds the channel sessions of the receive role.
 	Channel ChannelLimits `yaml:"channel"`
 	// Uploads bounds the uploads in parts open at once.
 	Uploads UploadLimits `yaml:"uploads"`
 }
 
-// UploadLimits: Total is the number of uploads in parts open at once,
-// Identity the number open at once per identity.
+// UploadLimits: Max is the number of uploads in parts open at once,
+// Owner.Max the number open at once per owner (auth.OwnerKey).
 type UploadLimits struct {
-	Total    int `yaml:"total"`
-	Identity int `yaml:"identity"`
+	Max   int `yaml:"max"`
+	Owner struct {
+		Max int `yaml:"max"`
+	} `yaml:"owner"`
 }
 
 // ChannelLimits: Auth is the time from a handshake to its OP, Pending the
@@ -201,22 +205,23 @@ type ChannelLimits struct {
 	Idle    Duration `yaml:"idle"`
 }
 
-// FailedLimits: Age is how long a failure record is kept; 0 keeps it
-// until it is removed.
-type FailedLimits struct {
-	Age *Duration `yaml:"age"`
+// Failed holds the failure records of the uploads (lukd failed): TTL is
+// how long one is kept; 0 keeps it until it is removed.
+type Failed struct {
+	TTL *Duration `yaml:"ttl"`
 }
 
-// MaxAge is Age, or DefaultFailedAge when unset.
-func (l FailedLimits) MaxAge() time.Duration {
-	if l.Age == nil {
-		return DefaultFailedAge
+// Lifetime is TTL, or DefaultFailedTTL when unset.
+func (f Failed) Lifetime() time.Duration {
+	if f.TTL == nil {
+		return DefaultFailedTTL
 	}
-	return time.Duration(*l.Age)
+	return time.Duration(*f.TTL)
 }
 
-// QueueLimits: Reserve is the free space kept on the queue filesystem.
-type QueueLimits struct {
+// UploadQueue holds what every upload queue shares: Reserve is the free
+// space kept on the queue filesystem.
+type UploadQueue struct {
 	Reserve Size `yaml:"reserve"`
 }
 
@@ -264,7 +269,7 @@ const (
 	DefaultHeaderTimeout = 10 * time.Second
 	DefaultBodyIdle      = 2 * time.Minute
 	DefaultQueueReserve  = 1 << 30
-	DefaultFailedAge     = 3 * 24 * time.Hour
+	DefaultFailedTTL     = 3 * 24 * time.Hour
 )
 
 const (
@@ -282,8 +287,8 @@ const (
 	DefaultPartParallel    = 4
 	MaxPartParallel        = 64
 	DefaultBodyRate        = 64 << 10
-	DefaultUploadsTotal    = 256
-	DefaultUploadsIdentity = 8
+	DefaultUploadsMax      = 256
+	DefaultUploadsOwnerMax = 8
 )
 
 // Listen is a named listener. Several listeners may share an address;
@@ -293,9 +298,10 @@ type Listen struct {
 	Addr string     `yaml:"addr" json:"addr"`
 	Host StringList `yaml:"host" json:"host"`
 	TLS  *TLS       `yaml:"tls" json:"tls"`
-	// ACME makes a plain listener answer the HTTP-01 challenges of every
-	// tls mode acme listener and redirect their names to https.
-	ACME bool `yaml:"acme" json:"acme"`
+	// Entrypoint marks a plain listener that a tls mode acme listener names
+	// in tls.acme.entrypoint: it answers the HTTP-01 challenges of those
+	// listeners and redirects their names to https, nothing else. Derived.
+	Entrypoint bool `yaml:"-" json:"entrypoint"`
 	// Public is the base URL of answers, without a trailing slash; derived
 	// from tls, host and port when absent (empty when nothing names a host).
 	Public string `yaml:"public" json:"public"`
@@ -307,36 +313,58 @@ func (l *Listen) Serves(host string) bool {
 	return len(l.Host) == 0 || slices.Contains(l.Host, host)
 }
 
+// CertNames are the names of the self-signed certificate of the listener:
+// its host list, or its name when it answers for any host.
+func (l *Listen) CertNames() []string {
+	if len(l.Host) > 0 {
+		return l.Host
+	}
+	return []string{l.Name}
+}
+
 // TLS is the certificate of a listener: mode self (lukd tls generate
-// creates it), files (an external tool provides it, lukd only reads it) or
-// acme (lukd obtains and renews it for the names of the host list).
+// creates it for the names of the host list), files (an external tool
+// provides it, lukd only reads it) or acme (lukd obtains and renews it for
+// the names of the host list).
 type TLS struct {
 	Mode string `yaml:"mode" json:"mode"`
 	Cert string `yaml:"cert" json:"cert"`
 	Key  string `yaml:"key" json:"key"`
-	Host string `yaml:"host" json:"host"`
 
 	Algorithm string `yaml:"algorithm" json:"algorithm"`
 
-	// Mode acme: the contact address, the ACME directory URL (default Let's
-	// Encrypt production) and the optional external account binding.
-	Email     string `yaml:"email" json:"email"`
-	Directory string `yaml:"directory" json:"directory"`
-	EAB       EAB    `yaml:"eab" json:"eab"`
+	// ACME is the setting of mode acme.
+	ACME ACME `yaml:"acme" json:"acme"`
 }
 
-// DefaultACMEDirectory is tls.directory of an acme listener when absent.
-const DefaultACMEDirectory = "https://acme-v02.api.letsencrypt.org/directory"
+// ACME is how a tls mode acme listener gets its certificate: Entrypoint
+// is the plain listener that answers its HTTP-01 challenges, Server the
+// directory URL of the ACME server (required: no CA is chosen for the
+// admin), Email the contact address and EAB the optional external
+// account binding.
+type ACME struct {
+	Entrypoint string `yaml:"entrypoint" json:"entrypoint"`
+	Server     string `yaml:"server" json:"server"`
+	Email      string `yaml:"email" json:"email"`
+	EAB        EAB    `yaml:"eab" json:"eab"`
+}
+
+// Set reports whether any acme setting is present.
+func (a ACME) Set() bool { return a != ACME{} }
+
+// LetsEncrypt is the directory URL of the production server of Let's
+// Encrypt, named in the error for a missing tls.acme.server.
+const LetsEncrypt = "https://acme-v02.api.letsencrypt.org/directory"
 
 // EAB is an ACME external account binding: the key id and the HMAC key
-// (base64url), inline or in KeyFile. After validation Key holds the key
-// of either source and KeySum its sha256, which the running file keeps
-// instead of the key.
+// (base64url), inline in Key or in File. After validation Key holds the
+// key of either source and KeySum its sha256, which the running file
+// keeps instead of the key.
 type EAB struct {
-	KID     string `yaml:"kid" json:"kid"`
-	Key     string `yaml:"key" json:"-"`
-	KeyFile string `yaml:"key_file" json:"key_file"`
-	KeySum  string `yaml:"-" json:"key_sha256"`
+	KID    string `yaml:"kid" json:"kid"`
+	Key    string `yaml:"key" json:"-"`
+	File   string `yaml:"file" json:"file"`
+	KeySum string `yaml:"-" json:"key_sha256"`
 }
 
 // Set reports whether the binding is configured.
@@ -358,33 +386,54 @@ func (e EAB) MAC() ([]byte, error) {
 // running file does not hold it.
 func sameTLS(a, b *TLS) bool {
 	x, y := *a, *b
-	x.EAB.Key, y.EAB.Key = "", ""
+	x.ACME.EAB.Key, y.ACME.EAB.Key = "", ""
 	return x == y
 }
 
 type Auth struct {
-	ClockSkew Duration `yaml:"clock_skew"`
+	Skew Duration `yaml:"skew"`
 	// Nonces is the directory the receive role keeps its nonce cache in,
 	// on a tmpfs (see DefaultNonces).
 	Nonces string `yaml:"nonces"`
-	Keys   []Key  `yaml:"keys"`
-	CA     []CA   `yaml:"ca"`
+	Keys   Keys   `yaml:"keys"`
+	CA     CAs    `yaml:"ca"`
 }
 
-// Key is an identity of plain keys: an auth.keys entry with its one key,
-// or a ssh.d/<name>.pub file (File) with one key per line.
+// Key is an identity of plain keys: an auth.keys entry (name: key) with
+// its one key, or a ssh.d/<name>.pub file (File) with one key per line.
 type Key struct {
-	Name   string          `yaml:"name"`
-	Key    string          `yaml:"key"`
-	Parsed []ssh.PublicKey `yaml:"-"`
-	File   string          `yaml:"-"`
+	Name   string
+	Key    string
+	Parsed []ssh.PublicKey
+	File   string
+}
+
+// Keys is auth.keys: a mapping of identity names to their key, kept as a
+// list ordered by name.
+type Keys []Key
+
+func (l *Keys) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: auth.keys: a mapping of names to keys", n.Line)}}
+	}
+	out := Keys{}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		if v.Kind != yaml.ScalarNode || v.ShortTag() != "!!str" {
+			return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: auth.keys %s: the key must be a string", v.Line, k.Value)}}
+		}
+		out = append(out, Key{Name: k.Value, Key: v.Value})
+	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].Name < out[b].Name })
+	*l = out
+	return nil
 }
 
 // CA is a certificate authority: an auth.ca entry with its one key, or a
 // ssh.d/ca/<type>/<name>.pub file (File) with one key per line. An auth.ca
 // entry without key holds the revoked list of the file CA of its name.
 type CA struct {
-	Name    string          `yaml:"name"`
+	Name    string          `yaml:"-"`
 	Type    string          `yaml:"type"`
 	Key     string          `yaml:"key"`
 	Revoked Revoked         `yaml:"revoked"`
@@ -392,20 +441,63 @@ type CA struct {
 	File    string          `yaml:"-"`
 }
 
+// CAs is auth.ca: a mapping of CA names to their entry, kept as a list
+// ordered by name.
+type CAs []CA
+
+func (l *CAs) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: auth.ca: a mapping of names to CAs", n.Line)}}
+	}
+	out := CAs{}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		ca := CA{}
+		if err := decodeCapabilities(v, "auth.ca "+k.Value, []string{"type", "key", "revoked"}, nil, &ca); err != nil {
+			return err
+		}
+		ca.Name = k.Value
+		out = append(out, ca)
+	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].Name < out[b].Name })
+	*l = out
+	return nil
+}
+
+// Revoked lists the certified keys a CA no longer vouches for, by their
+// SHA256 fingerprint (ssh-keygen -l): every certificate of such a key is
+// refused, a new key of the same host or user is not.
 type Revoked struct {
-	KeyIDs  []string `yaml:"key_ids"`
-	Serials []uint64 `yaml:"serials"`
+	Key []string `yaml:"key"`
+}
+
+func (r *Revoked) UnmarshalYAML(n *yaml.Node) error {
+	type raw Revoked
+	return decodeCapabilities(n, "revoked", []string{"key"}, nil, (*raw)(r))
+}
+
+// validFingerprint reports whether f is a SHA256 key fingerprint as
+// ssh.FingerprintSHA256 writes it: SHA256: and 43 characters of unpadded
+// standard base64.
+func validFingerprint(f string) bool {
+	b, ok := strings.CutPrefix(f, "SHA256:")
+	if !ok || len(b) != 43 {
+		return false
+	}
+	d, err := base64.RawStdEncoding.DecodeString(b)
+	return err == nil && len(d) == sha256.Size
 }
 
 type Endpoint struct {
-	Name     string         `yaml:"-"`
-	Listen   StringList     `yaml:"listen"`
-	Endpoint string         `yaml:"endpoint"`
-	Path     string         `yaml:"path"`
-	Allow    []string       `yaml:"allow"`
-	Respond  string         `yaml:"respond"`
-	Storage  string         `yaml:"storage"`
-	Limits   EndpointLimits `yaml:"limits"`
+	Name     string     `yaml:"-"`
+	Listen   StringList `yaml:"listen"`
+	Endpoint string     `yaml:"endpoint"`
+	// Path is the queue directory of the endpoint, <root>/data/queue/<name>.
+	Path    string         `yaml:"-"`
+	Allow   []string       `yaml:"allow"`
+	Respond string         `yaml:"respond"`
+	Storage string         `yaml:"storage"`
+	Limits  EndpointLimits `yaml:"limits"`
 	// Parts is how an upload inside the channel is cut.
 	Parts Parts `yaml:"parts"`
 	// Pretty, when present, lets the identities of pretty.allow ask for a
@@ -416,8 +508,8 @@ type Endpoint struct {
 	// Private is who may send which private modes; only with respond url,
 	// and the respond storage needs protect.
 	Private Private `yaml:"private"`
-	// Backup is who may set which backup.hostname (luk send --backup).
-	Backup Backup `yaml:"backup"`
+	// Origin is who may send which origin (luk send --backup).
+	Origin *Origin `yaml:"origin"`
 	// Secret, when set, takes the reveal uploads of the identities of
 	// secret.allow (respond url only): into its own queue directory and
 	// only into its storage, without the pipelines of the endpoint.
@@ -724,36 +816,22 @@ func (p Private) Of(access string) (who Identities, ok bool) {
 	return nil, false
 }
 
-// Backup is the backup capabilities of an endpoint: without Hostname
-// every identity the endpoint admits sends any backup.hostname.
-type Backup struct {
-	Hostname *BackupHostname `yaml:"hostname"`
-}
-
-func (b *Backup) UnmarshalYAML(n *yaml.Node) error {
-	type raw Backup
-	if n.Kind == yaml.MappingNode {
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			if k, v := n.Content[i], n.Content[i+1]; k.Value == "hostname" && v.Kind != yaml.MappingNode {
-				return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: backup.hostname: a mapping of any and principal, e.g. {any: [\"*\"]}", k.Line)}}
-			}
-		}
-	}
-	return decodeCapabilities(n, "backup", []string{"hostname"}, nil, (*raw)(b))
-}
-
-// BackupHostname is who may send which backup.hostname: Any every one,
-// Principal only one of the principals of its own certificate. An
-// identity in neither list sends none.
-type BackupHostname struct {
+// Origin is who may send which origin (luk send --backup HOSTNAME, the
+// series of retention and watch): Any every one, Principal only one of
+// the principals of its own certificate. An identity in neither list
+// sends none; an endpoint without the block takes any from everyone.
+type Origin struct {
 	Any       Identities `yaml:"any"`
 	Principal Identities `yaml:"principal"`
 }
 
-func (h *BackupHostname) UnmarshalYAML(n *yaml.Node) error {
-	type raw BackupHostname
+func (o *Origin) UnmarshalYAML(n *yaml.Node) error {
+	type raw Origin
+	if n.Kind != yaml.MappingNode {
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: origin: a mapping of any and principal, e.g. {any: [\"*\"]}", n.Line)}}
+	}
 	keys := []string{"any", "principal"}
-	return decodeCapabilities(n, "backup.hostname", keys, keys, (*raw)(h))
+	return decodeCapabilities(n, "origin", keys, keys, (*raw)(o))
 }
 
 // Link is who may do what with the links they own on an endpoint: remove
@@ -815,14 +893,11 @@ type Pipeline struct {
 	Name     string   `yaml:"-"`
 	Endpoint []string `yaml:"endpoint"`
 	Tags     []string `yaml:"tags"`
-	// Claim makes a matching pipeline the only one of the upload.
-	Claim   bool     `yaml:"claim"`
-	Timeout Duration `yaml:"timeout"`
-	Queue   Queue    `yaml:"queue"`
-	Steps   []Step   `yaml:"steps"`
-	// MovedConcurrency catches the key moved to queue.concurrency, so the
-	// error names the new place.
-	MovedConcurrency any `yaml:"concurrency"`
+	// Exclusive makes a matching pipeline the only one of the upload.
+	Exclusive bool     `yaml:"exclusive"`
+	Timeout   Duration `yaml:"timeout"`
+	Queue     Queue    `yaml:"queue"`
+	Steps     []Step   `yaml:"steps"`
 }
 
 // Queue schedules the runs of a pipeline. Concurrency bounds its runs
@@ -892,10 +967,17 @@ func (r *RunSpec) UnmarshalYAML(n *yaml.Node) error {
 // Strict fails the step when any recipient is unusable. Addresses are
 // lowercased by validation. Insecure adds password based encryption.
 type Encrypt struct {
-	WKD      StringList `yaml:"wkd"`
-	Key      StringList `yaml:"key"`
-	Strict   bool       `yaml:"strict"`
-	Insecure *Insecure  `yaml:"insecure"`
+	Recipients Recipients `yaml:"recipients"`
+	Strict     bool       `yaml:"strict"`
+	Insecure   *Insecure  `yaml:"insecure"`
+}
+
+// Recipients are the addresses an encrypt step encrypts to, by where
+// their keys come from: Keys from gpg.keys on this server, WKD from the
+// Web Key Directory of their domain.
+type Recipients struct {
+	Keys StringList `yaml:"keys"`
+	WKD  StringList `yaml:"wkd"`
 }
 
 // Insecure is the password based encryption of an encrypt step, weaker
@@ -929,41 +1011,30 @@ func (o *OpenSSL) Match(name string) bool {
 }
 
 type Storage struct {
-	Type   string `yaml:"type"`
-	Base   string `yaml:"base"`
-	Path   string `yaml:"path"`
-	Bucket string `yaml:"bucket"`
-	Prefix string `yaml:"prefix"`
-	// Expose serves the public files of the storage (local only); with
-	// auth.ssh only to signed requests of the identities it allows.
+	// Base is the directory of the storage (key directory).
+	Base string `yaml:"directory"`
+	Path string `yaml:"path"`
+	// Expose serves the public files of the storage; with auth.ssh only to
+	// signed requests of the identities it allows.
 	Expose string `yaml:"expose"`
 	// Protect is the expose with auth.ssh that serves the private files
-	// of the storage (local only).
+	// of the storage.
 	Protect string `yaml:"protect"`
-	// Conflict is version (default), reject or replace.
-	Conflict string `yaml:"conflict"`
-	// Catalog keeps <base>/.db/catalog.json (local only).
-	Catalog bool `yaml:"catalog"`
+	// Conflict is what a store does when the name exists.
+	Conflict Conflict `yaml:"conflict"`
+	// Catalog keeps <base>/.db/catalog.json, for the catalog of its expose
+	// (expose.<n>.catalog). Derived.
+	Catalog bool `yaml:"-"`
 	// Shard places the files under that many levels of sha256 hex pair
-	// directories (local only, 0-4).
+	// directories (0-4).
 	Shard int `yaml:"shard"`
-	// Dedup (default true) keeps the newest version instead of adding an
-	// identical one; conflict version only.
-	Dedup *bool `yaml:"dedup"`
-	// Hardlink (default true) keeps one copy of each content: stored files
-	// with the same sha256 are hardlinks of one object (local only).
-	Hardlink *bool `yaml:"hardlink"`
-	// Links.Max is the most stored names holding one content (sha256)
-	// that one identity (owner key) may have here (local with hardlink
-	// only); 0 is DefaultLinksMax.
-	Links struct {
-		Max int `yaml:"max"`
-	} `yaml:"links"`
+	// Hardlink keeps one copy of each content: stored files with the same
+	// sha256 are hardlinks of one object (on unless hardlink: false).
+	Hardlink Hardlink `yaml:"hardlink"`
 	// Random is the alphabet and length of .Random; empty keeps the
 	// default: DefaultRandomLength characters of RandomAlphabet.
 	Random Random `yaml:"random"`
-	// TTL is the lifetime policy of stored files (local only): see
-	// Lifetime.
+	// TTL is the lifetime policy of stored files: see Lifetime.
 	TTL struct {
 		// User lets the client ttl count, clamped to Min and Max.
 		User bool     `yaml:"user"`
@@ -972,18 +1043,16 @@ type Storage struct {
 		// Tag is the ttl of a tag here, in place of its tag.<name>.ttl.
 		Tag map[string]Duration `yaml:"tag"`
 	} `yaml:"ttl"`
-	// Cleanup.Age removes files without an expiry once they are that old
-	// (local only).
+	// Cleanup.Age removes files without an expiry once they are that old.
 	Cleanup struct {
 		Age Duration `yaml:"age"`
 	} `yaml:"cleanup"`
-	// Retention prunes the stored files of each series (local only): the
-	// first rule whose origin globs match the origin of a file applies
-	// (see RetentionRule).
+	// Retention prunes the stored files of each series: the first rule
+	// whose origin globs match the origin of a file applies (see
+	// RetentionRule).
 	Retention []Retention `yaml:"retention"`
-	// Watch holds the monitoring rules of the series (local only): the
-	// first rule whose origin and file globs match a series applies (see
-	// WatchRule).
+	// Watch holds the monitoring rules of the series: the first rule
+	// whose origin and file globs match a series applies (see WatchRule).
 	Watch []Watch `yaml:"watch"`
 
 	pathTmpl *template.Template
@@ -1179,13 +1248,71 @@ func (r *Random) check() error {
 	return nil
 }
 
-// DefaultLinksMax is links.max of a storage without one.
+// DefaultLinksMax is hardlink.owner.max of a storage without one.
 const DefaultLinksMax = 100
 
-// MaxLinks is links.max, DefaultLinksMax when unset.
-func (s *Storage) MaxLinks() int { return cmp.Or(s.Links.Max, DefaultLinksMax) }
+// MaxLinks is hardlink.owner.max, DefaultLinksMax when unset.
+func (s *Storage) MaxLinks() int { return cmp.Or(s.Hardlink.Owner.Max, DefaultLinksMax) }
 
-// PathTemplate is the parsed Path of a local storage.
+// Conflict is what a store does when the stored name exists: Mode version
+// (the default: keep both, the newest under the name), reject or replace;
+// Identical, with version, what an upload identical to the newest version
+// does: skip (the default: no new version) or store.
+type Conflict struct {
+	Mode      string `yaml:"mode"`
+	Identical string `yaml:"identical"`
+}
+
+func (c *Conflict) UnmarshalYAML(n *yaml.Node) error {
+	type raw Conflict
+	if n.Kind != yaml.MappingNode {
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: conflict: a mapping of mode and identical, e.g. {mode: replace}", n.Line)}}
+	}
+	return decodeCapabilities(n, "conflict", []string{"mode", "identical"}, nil, (*raw)(c))
+}
+
+// Hardlink is hardlink of a storage: false (Off) stores separate files;
+// a mapping keeps it on with Owner.Max, the most stored names holding one
+// content (sha256) that one owner (auth.OwnerKey) may have here (0 is
+// DefaultLinksMax).
+type Hardlink struct {
+	Off   bool
+	Owner struct {
+		Max int `yaml:"max"`
+	} `yaml:"owner"`
+}
+
+func (h *Hardlink) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode && n.ShortTag() == "!!bool" {
+		var on bool
+		if err := n.Decode(&on); err != nil {
+			return err
+		}
+		*h = Hardlink{Off: !on}
+		return nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: hardlink: true, false or a mapping of owner, e.g. {owner: {max: 50}}", n.Line)}}
+	}
+	type raw struct {
+		Owner struct {
+			Max int `yaml:"max"`
+		} `yaml:"owner"`
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if k, v := n.Content[i], n.Content[i+1]; k.Value == "owner" && v.Kind != yaml.MappingNode {
+			return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: hardlink.owner: a mapping of max, e.g. {max: 50}", k.Line)}}
+		}
+	}
+	var r raw
+	if err := decodeCapabilities(n, "hardlink", []string{"owner"}, nil, &r); err != nil {
+		return err
+	}
+	*h = Hardlink{Owner: r.Owner}
+	return nil
+}
+
+// PathTemplate is the parsed Path of a storage.
 func (s *Storage) PathTemplate() *template.Template { return s.pathTmpl }
 
 // Nested is the paths, relative to the expose (or protect) of the storage
@@ -1248,10 +1375,9 @@ type Expose struct {
 	// storage with auth.ssh answers the signed listing instead). With
 	// auth.basic and auth.ssh the unsigned requests get the HTML listing.
 	Index bool `yaml:"index"`
-	// MovedTTL and MovedCleanup catch the keys moved to the storage, so
-	// the error names the new place.
-	MovedTTL     any `yaml:"ttl"`
-	MovedCleanup any `yaml:"cleanup"`
+	// Catalog serves catalog.json of the storage of the expose: every
+	// public file with its meta.
+	Catalog bool `yaml:"catalog"`
 }
 
 // ExposeAuth is the optional authentication of an expose: Basic (htpasswd
@@ -1424,8 +1550,8 @@ func (c *Config) validate() []error {
 		v    *int
 		def  int
 	}{
-		{"limits.uploads.total", &l.Uploads.Total, DefaultUploadsTotal},
-		{"limits.uploads.identity", &l.Uploads.Identity, DefaultUploadsIdentity},
+		{"limits.uploads.max", &l.Uploads.Max, DefaultUploadsMax},
+		{"limits.uploads.owner.max", &l.Uploads.Owner.Max, DefaultUploadsOwnerMax},
 	} {
 		if *n.v < 0 {
 			bad("%s must be at least 1", n.name)
@@ -1435,21 +1561,21 @@ func (c *Config) validate() []error {
 		}
 	}
 
-	if l.Queue.Reserve < 0 {
-		bad("limits.queue.reserve must not be negative")
+	if c.Queue.Reserve < 0 {
+		bad("queue.reserve must not be negative")
 	}
-	if l.Queue.Reserve == 0 {
-		l.Queue.Reserve = DefaultQueueReserve
+	if c.Queue.Reserve == 0 {
+		c.Queue.Reserve = DefaultQueueReserve
 	}
-	if l.Failed.Age != nil && *l.Failed.Age < 0 {
-		bad("limits.failed.age must not be negative")
+	if c.Failed.TTL != nil && *c.Failed.TTL < 0 {
+		bad("failed.ttl must not be negative")
 	}
 
-	if c.Auth.ClockSkew == 0 {
-		c.Auth.ClockSkew = Duration(DefaultClockSkew)
+	if c.Auth.Skew == 0 {
+		c.Auth.Skew = Duration(DefaultClockSkew)
 	}
-	if c.Auth.ClockSkew < 0 || c.Auth.ClockSkew > Duration(time.Hour) {
-		bad("auth.clock_skew must be positive and at most 1h")
+	if c.Auth.Skew < 0 || c.Auth.Skew > Duration(time.Hour) {
+		bad("auth.skew must be positive and at most 1h")
 	}
 	if c.Auth.Nonces == "" {
 		c.Auth.Nonces = DefaultNonces
@@ -1462,7 +1588,7 @@ func (c *Config) validate() []error {
 	for i := range c.Auth.Keys {
 		k := &c.Auth.Keys[i]
 		if k.Name == "" || k.Name == allowAll || strings.ContainsAny(k.Name, ":#") || names[k.Name] {
-			bad("auth.keys[%d]: name %q empty, *, duplicated or contains ':' or '#'", i, k.Name)
+			bad("auth.keys: name %q empty, *, duplicated or contains ':' or '#'", k.Name)
 		}
 		names[k.Name] = true
 		if k.File == "" {
@@ -1492,11 +1618,16 @@ func (c *Config) validate() []error {
 	for i := range c.Auth.CA {
 		ca := &c.Auth.CA[i]
 		if ca.Name == "" || ca.Name == allowAll || strings.ContainsAny(ca.Name, ":#") || names[ca.Name] || cas[ca.Name] {
-			bad("auth.ca[%d]: name %q empty, *, duplicated or contains ':' or '#'", i, ca.Name)
+			bad("auth.ca: name %q empty, *, duplicated or contains ':' or '#'", ca.Name)
 		}
 		cas[ca.Name] = true
 		if ca.Type != "host" && ca.Type != "user" {
 			bad("auth.ca %s: type must be host or user", ca.Name)
+		}
+		for _, f := range ca.Revoked.Key {
+			if !validFingerprint(f) {
+				bad("auth.ca %s: revoked.key %q is not a SHA256 key fingerprint (SHA256:<base64>, as ssh-keygen -l prints it)", ca.Name, f)
+			}
 		}
 		if ca.File == "" {
 			if ca.Key == "" {
@@ -1550,10 +1681,12 @@ func (c *Config) validate() []error {
 			bad("endpoint %s: endpoint %q is under %s, which lukd reserves", name, e.Endpoint, wire.WellKnown)
 		}
 		c.checkListenRefs(bad, "endpoint "+name, e.Listen)
-		if e.Path == "" {
-			bad("endpoint %s: path is required", name)
+		if !ValidPipelineName(name) {
+			bad("endpoint %q: the name names its queue directory: [A-Za-z0-9_.-], not starting with a dot or a dash", name)
 		}
-		e.Path = resolve("endpoint."+name+".path", e.Path)
+		if rootOK {
+			e.Path = filepath.Join(data, QueueName, name)
+		}
 		if len(e.Allow) == 0 {
 			bad("endpoint %s: allow is empty", name)
 		}
@@ -1573,14 +1706,14 @@ func (c *Config) validate() []error {
 		default:
 			bad("endpoint %s: respond must be accept or url", name)
 		}
-		bh := cmp.Or(e.Backup.Hostname, &BackupHostname{})
+		bh := cmp.Or(e.Origin, &Origin{})
 		for _, c := range []struct {
 			key string
 			who Identities
 		}{
 			{"link.remove", e.Link.Remove}, {"link.ttl", e.Link.TTL}, {"link.replace", e.Link.Replace}, {"link.list", e.Link.List},
 			{"private.owner", e.Private.Owner}, {"private.any", e.Private.Any}, {"private.list", e.Private.List},
-			{"backup.hostname.any", bh.Any}, {"backup.hostname.principal", bh.Principal},
+			{"origin.any", bh.Any}, {"origin.principal", bh.Principal},
 		} {
 			checkAllow(bad, "endpoint "+name+": "+c.key, c.who, names, cas)
 		}
@@ -1620,8 +1753,6 @@ func (c *Config) validate() []error {
 			switch {
 			case !ok:
 				bad("endpoint %s: secret.storage %q is not a known storage", name, sc.Storage)
-			case st.Type != "local":
-				bad("endpoint %s: secret storage %s is not a local storage", name, sc.Storage)
 			case st.Expose == "":
 				bad("endpoint %s: secret storage %s is not exposed", name, sc.Storage)
 			case sc.Storage == e.Storage:
@@ -1684,8 +1815,8 @@ func (c *Config) validate() []error {
 		if len(p.Endpoint) == 0 {
 			bad("pipeline %s: endpoint is required", name)
 		}
-		if p.Claim && len(p.Tags) == 0 {
-			bad("pipeline %s: claim needs tags", name)
+		if p.Exclusive && len(p.Tags) == 0 {
+			bad("pipeline %s: exclusive needs tags", name)
 		}
 		for _, e := range p.Endpoint {
 			if _, ok := c.Endpoint[e]; !ok {
@@ -1697,9 +1828,6 @@ func (c *Config) validate() []error {
 			bad("pipeline %s: %v", name, err)
 		} else {
 			p.Tags = m.Tags
-		}
-		if p.MovedConcurrency != nil {
-			bad("pipeline %s: concurrency moved to queue.concurrency", name)
 		}
 		if p.Queue.Concurrency == 0 {
 			p.Queue.Concurrency = 1
@@ -1776,10 +1904,8 @@ func (c *Config) validate() []error {
 				}
 			}
 			for _, st := range s.Store {
-				if sc, ok := c.Storage[st]; !ok {
+				if _, ok := c.Storage[st]; !ok {
 					bad("pipeline %s: step %d: unknown storage %q", name, i+1, st)
-				} else if sc != nil && sc.Type == "s3" {
-					bad("pipeline %s: step %d: storage %s: s3 storage is not implemented yet", name, i+1, st)
 				}
 			}
 		}
@@ -1827,40 +1953,40 @@ func (c *Config) validate() []error {
 			}
 			s.tagTTL[tag] = time.Duration(d)
 		}
-		switch s.Type {
-		case "local":
-			if s.Base == "" {
-				bad("storage %s: base is required", name)
-			}
-			s.Base = resolve("storage."+name+".base", s.Base)
-			if s.Path == "" {
-				bad("storage %s: path is required", name)
-			} else if t, err := template.New(name).Option("missingkey=error").Parse(s.Path); err != nil {
-				bad("storage %s: path: %v", name, err)
-			} else if err := t.Execute(io.Discard, pathVars); err != nil {
-				bad("storage %s: path: %v", name, err)
-			} else {
-				s.pathTmpl = t
-			}
-		case "s3":
-			if s.Bucket == "" {
-				bad("storage %s: bucket is required", name)
-			}
-		default:
-			bad("storage %s: type must be local or s3", name)
+		if s.Base == "" {
+			bad("storage %s: directory is required", name)
 		}
-		switch s.Conflict {
+		s.Base = resolve("storage."+name+".directory", s.Base)
+		if s.Path == "" {
+			bad("storage %s: path is required", name)
+		} else if t, err := template.New(name).Option("missingkey=error").Parse(s.Path); err != nil {
+			bad("storage %s: path: %v", name, err)
+		} else if err := t.Execute(io.Discard, pathVars); err != nil {
+			bad("storage %s: path: %v", name, err)
+		} else {
+			s.pathTmpl = t
+		}
+		switch s.Conflict.Mode {
 		case "":
-			s.Conflict = "version"
+			s.Conflict.Mode = "version"
 		case "version", "reject", "replace":
 		default:
-			bad("storage %s: conflict must be version, reject or replace", name)
+			bad("storage %s: conflict.mode must be version, reject or replace", name)
 		}
-		if _, ok := c.Expose[s.Expose]; s.Expose != "" && !ok {
+		switch s.Conflict.Identical {
+		case "":
+			s.Conflict.Identical = "skip"
+		case "skip", "store":
+			if s.Conflict.Mode != "version" {
+				bad("storage %s: conflict.identical needs conflict.mode version", name)
+			}
+		default:
+			bad("storage %s: conflict.identical must be skip or store", name)
+		}
+		if x, ok := c.Expose[s.Expose]; s.Expose != "" && !ok {
 			bad("storage %s: unknown expose %q", name, s.Expose)
-		}
-		if s.Expose != "" && s.Type != "local" {
-			bad("storage %s: only a local storage can be exposed", name)
+		} else if ok && x != nil {
+			s.Catalog = x.Catalog
 		}
 		if x, ok := c.Expose[s.Expose]; ok && x.Index && s.Shard > 0 {
 			bad("storage %s: shard on expose %s with index; index needs a storage without shard", name, s.Expose)
@@ -1868,8 +1994,6 @@ func (c *Config) validate() []error {
 		if s.Protect != "" {
 			x, ok := c.Expose[s.Protect]
 			switch {
-			case s.Type != "local":
-				bad("storage %s: protect needs a local storage", name)
 			case !ok:
 				bad("storage %s: unknown protect expose %q", name, s.Protect)
 			case x.Auth.SSH == nil:
@@ -1880,21 +2004,11 @@ func (c *Config) validate() []error {
 				bad("storage %s: expose and protect must differ", name)
 			}
 		}
-		if s.Catalog && s.Type != "local" {
-			bad("storage %s: catalog needs a local storage", name)
-		}
-		if s.Hardlink != nil && s.Type != "local" {
-			bad("storage %s: hardlink needs a local storage", name)
-		}
-		if s.Links.Max < 0 {
-			bad("storage %s: links.max must be at least 1", name)
-		} else if s.Links.Max != 0 && s.Type != "local" {
-			bad("storage %s: links.max needs a local storage", name)
+		if s.Hardlink.Owner.Max < 0 {
+			bad("storage %s: hardlink.owner.max must be at least 1", name)
 		}
 		if s.Shard < 0 || s.Shard > 4 {
 			bad("storage %s: shard must be 0 to 4", name)
-		} else if s.Shard != 0 && s.Type != "local" {
-			bad("storage %s: shard needs a local storage", name)
 		}
 		if s.TTL.Max < 0 {
 			bad("storage %s: ttl.max must be positive", name)
@@ -1911,14 +2025,8 @@ func (c *Config) validate() []error {
 		if s.Cleanup.Age < 0 {
 			bad("storage %s: cleanup.age must be positive", name)
 		}
-		if (s.TTL.Max != 0 || s.TTL.Min != 0 || s.TTL.User || len(s.TTL.Tag) > 0 || s.Cleanup.Age != 0) && s.Type != "local" {
-			bad("storage %s: ttl and cleanup.age need a local storage", name)
-		}
-		if len(s.Retention) > 0 && s.Type != "local" {
-			bad("storage %s: retention needs a local storage", name)
-		}
-		if len(s.Retention) > 0 && s.Conflict == "replace" {
-			bad("storage %s: retention needs conflict version or reject, not replace", name)
+		if len(s.Retention) > 0 && s.Conflict.Mode == "replace" {
+			bad("storage %s: retention needs conflict.mode version or reject, not replace", name)
 		}
 		for i, r := range s.Retention {
 			for _, g := range r.Origin {
@@ -1940,9 +2048,6 @@ func (c *Config) validate() []error {
 			if len(r.Origin) == 0 && i < len(s.Retention)-1 {
 				bad("storage %s: retention rule %d matches every origin and must be the last: the rules after it are unreachable", name, i+1)
 			}
-		}
-		if len(s.Watch) > 0 && s.Type != "local" {
-			bad("storage %s: watch needs a local storage", name)
 		}
 		for i, w := range s.Watch {
 			for _, l := range []struct {
@@ -1982,9 +2087,6 @@ func (c *Config) validate() []error {
 			}
 		}
 		if s.Random != (Random{}) {
-			if s.Type != "local" {
-				bad("storage %s: random needs a local storage", name)
-			}
 			if err := s.Random.check(); err != nil {
 				bad("storage %s: random: %v", name, err)
 			}
@@ -2029,14 +2131,14 @@ func (c *Config) validate() []error {
 		}
 	}
 
-	// A local base is owned by one storage; queues live outside every base.
+	// A directory is owned by one storage; queues live outside every one.
 	for i, a := range sortedKeys(c.Storage) {
 		sa := c.Storage[a]
-		if sa.Type != "local" || !filepath.IsAbs(sa.Base) {
+		if !filepath.IsAbs(sa.Base) {
 			continue
 		}
 		for _, b := range sortedKeys(c.Storage)[i+1:] {
-			if sb := c.Storage[b]; sb.Type == "local" && nested(sa.Base, sb.Base) {
+			if sb := c.Storage[b]; nested(sa.Base, sb.Base) {
 				bad("storage %s and %s: bases %s and %s overlap", a, b, sa.Base, sb.Base)
 			}
 		}
@@ -2079,17 +2181,8 @@ func (c *Config) validate() []error {
 		if wellKnown(x.Path) {
 			bad("expose %s: path %q is under %s, which lukd reserves", name, x.Path, wire.WellKnown)
 		}
-		if x.MovedTTL != nil || x.MovedCleanup != nil {
-			n, _, ok := c.StorageOfExpose(name)
-			if !ok {
-				n = "<n>"
-			}
-			if x.MovedTTL != nil {
-				bad("expose %s: ttl moved to storage.%s.ttl.max", name, n)
-			}
-			if x.MovedCleanup != nil {
-				bad("expose %s: cleanup moved to storage.%s.cleanup.age", name, n)
-			}
+		if _, _, ok := c.StorageOfExpose(name); x.Catalog && !ok {
+			bad("expose %s: catalog needs a storage with expose %s", name, name)
 		}
 		if x.Plain && (x.Auth.SSH != nil || len(x.Auth.Basic) > 0) {
 			bad("expose %s: plain excludes auth", name)
@@ -2198,9 +2291,6 @@ func (c *Config) validatePermanent(bad func(string, ...any), names, cas map[stri
 		}
 		x := c.Expose[st.Expose]
 		switch {
-		case st.Type != "local":
-			bad("endpoint %s: permanent needs a local storage, not %s", en, e.Storage)
-			continue
 		case x == nil:
 			bad("endpoint %s: permanent needs storage %s to have an expose", en, e.Storage)
 			continue
@@ -2393,13 +2483,13 @@ func (c *Config) checkRootPart(bad func(string, ...any)) {
 		}
 	}
 	for n, s := range c.Storage {
-		paths["storage."+n+".base"] = s.Base
+		paths["storage."+n+".directory"] = s.Base
 	}
 	for n, l := range c.Listen {
 		if l.TLS != nil {
 			paths["listen."+n+".tls.cert"] = l.TLS.Cert
 			paths["listen."+n+".tls.key"] = l.TLS.Key
-			paths["listen."+n+".tls.eab.key_file"] = l.TLS.EAB.KeyFile
+			paths["listen."+n+".tls.acme.eab.file"] = l.TLS.ACME.EAB.File
 		}
 	}
 	for _, k := range sortedKeys(paths) {
@@ -2423,7 +2513,7 @@ func (c *Config) checkSecretPaths(bad func(string, ...any)) {
 			continue
 		}
 		for _, sn := range sortedKeys(c.Storage) {
-			if st := c.Storage[sn]; st.Type == "local" && filepath.IsAbs(st.Base) && nested(sc.Path, st.Base) {
+			if st := c.Storage[sn]; filepath.IsAbs(st.Base) && nested(sc.Path, st.Base) {
 				bad("endpoint %s: secret.path %s overlaps storage %s base %s", en, sc.Path, sn, st.Base)
 			}
 		}
@@ -2563,17 +2653,18 @@ func (q *Quota) validate(bad func(string, ...any), who string, names, cas map[st
 
 // validateEncrypt checks and lowercases the recipient addresses.
 func (c *Config) validateEncrypt(bad func(string, ...any), who string, e *Encrypt) {
-	if len(e.WKD)+len(e.Key) == 0 {
-		bad("%s: no recipient (wkd or key)", who)
+	r := &e.Recipients
+	if len(r.WKD)+len(r.Keys) == 0 {
+		bad("%s: no recipient (recipients.keys or recipients.wkd)", who)
 	}
-	if len(e.Key) > 0 && c.GPG.Keys == "" {
-		bad("%s: key recipients need gpg.keys", who)
+	if len(r.Keys) > 0 && c.GPG.Keys == "" {
+		bad("%s: recipients.keys need gpg.keys", who)
 	}
 	seen := map[string]string{}
 	for _, l := range []struct {
 		name string
 		list StringList
-	}{{"wkd", e.WKD}, {"key", e.Key}} {
+	}{{"recipients.wkd", r.WKD}, {"recipients.keys", r.Keys}} {
 		for i, a := range l.list {
 			addr := strings.ToLower(a)
 			l.list[i] = addr
@@ -2784,9 +2875,9 @@ func ValidPasswordName(n string) bool { return ValidJobName(n) }
 func (c *Config) Warnings() []string {
 	var w []string
 	for _, n := range sortedKeys(c.Listen) {
-		if l := c.Listen[n]; l.ACME {
+		if l := c.Listen[n]; l.Entrypoint {
 			if _, port, _ := net.SplitHostPort(l.Addr); port != "80" {
-				w = append(w, fmt.Sprintf("listen %s: acme: true on port %s; the CA checks HTTP-01 on port 80, which must reach it", n, port))
+				w = append(w, fmt.Sprintf("listen %s: acme entrypoint on port %s; the CA checks HTTP-01 on port 80, which must reach it", n, port))
 			}
 		}
 	}
@@ -2811,11 +2902,11 @@ func (c *Config) Warnings() []string {
 	}
 	for _, n := range sortedKeys(c.Storage) {
 		s := c.Storage[n]
-		if urlStorage[n] && s.Type == "local" && s.Conflict == "version" && !uniqueName.MatchString(s.Path) {
+		if urlStorage[n] && s.Conflict.Mode == "version" && !uniqueName.MatchString(s.Path) {
 			w = append(w, fmt.Sprintf("storage %s: conflict version with a path using neither .Random nor .Id; the answered URL may not match the stored name", n))
 		}
-		if x, ok := c.Expose[s.Expose]; ok && s.Catalog && len(x.Auth.Basic) == 0 && x.Auth.SSH == nil && !x.Plain {
-			w = append(w, fmt.Sprintf("storage %s: catalog on expose %s without auth publishes every stored name", n, s.Expose))
+		if x, ok := c.Expose[s.Expose]; ok && x.Catalog && len(x.Auth.Basic) == 0 && x.Auth.SSH == nil && !x.Plain {
+			w = append(w, fmt.Sprintf("expose %s: catalog without auth publishes every stored name of storage %s", s.Expose, n))
 		}
 	}
 	for _, n := range sortedKeys(c.Endpoint) {
@@ -2865,7 +2956,7 @@ func (c *Config) Warnings() []string {
 						w = append(w, fmt.Sprintf("endpoint %s: pipeline %s has %s step before storing to %s; the answered URL will not match the produced names", en, pn, renamed, sn))
 					}
 				}
-				if run && s.Type == "local" && !fileName.MatchString(s.Path) {
+				if run && !fileName.MatchString(s.Path) {
 					w = append(w, fmt.Sprintf("pipeline %s: storage %s after a run step with a path without .File; files of one set collide", pn, sn))
 				}
 			}
@@ -2950,23 +3041,16 @@ func (c *Config) validateListen(bad func(string, ...any), resolve func(string, s
 			default:
 				bad("listen %s: tls mode %q must be self, files or acme", name, t.Mode)
 			}
-			if t.Email != "" || t.Directory != "" || t.EAB.Set() {
-				bad("listen %s: tls email, directory and eab apply to mode acme only", name)
+			if t.ACME.Set() {
+				bad("listen %s: tls.acme applies to mode acme only", name)
 			}
 			t.Cert = resolve("listen."+name+".tls.cert", t.Cert)
 			t.Key = resolve("listen."+name+".tls.key", t.Key)
-			if t.Cert == "" || t.Key == "" || (t.Host == "" && t.Mode == "self") {
-				if t.Mode == "files" {
-					bad("listen %s: tls mode files needs cert and key", name)
-				} else {
-					bad("listen %s: tls needs cert, key and host", name)
-				}
+			if t.Cert == "" || t.Key == "" {
+				bad("listen %s: tls mode %s needs cert and key", name, t.Mode)
 			} else if filepath.Clean(t.Cert) == filepath.Clean(t.Key) {
 				bad("listen %s: tls cert and key must be different files", name)
 			}
-		}
-		if l.ACME && l.TLS != nil {
-			bad("listen %s: acme: true is a plain HTTP listener and cannot have tls", name)
 		}
 		if l.Public == "" {
 			l.Public = defaultPublic(l)
@@ -3008,12 +3092,13 @@ func (c *Config) validateListen(bad func(string, ...any), resolve func(string, s
 }
 
 // validateACMEListen checks a tls mode acme listener: names a public CA
-// can issue for, no certificate files, an https directory and a complete
-// external account binding, whose key_file it reads.
+// can issue for, no certificate files, an https server and a complete
+// external account binding, whose file it reads.
 func (c *Config) validateACMEListen(bad func(string, ...any), resolve func(string, string) string, l *Listen) {
 	t, name := l.TLS, l.Name
-	if t.Cert != "" || t.Key != "" || t.Host != "" || t.Algorithm != "" {
-		bad("listen %s: tls cert, key, host and algorithm do not apply to mode acme", name)
+	a := &t.ACME
+	if t.Cert != "" || t.Key != "" || t.Algorithm != "" {
+		bad("listen %s: tls cert, key and algorithm do not apply to mode acme", name)
 	}
 	if len(l.Host) == 0 {
 		bad("listen %s: tls mode acme needs host, the names of the certificates", name)
@@ -3023,84 +3108,90 @@ func (c *Config) validateACMEListen(bad func(string, ...any), resolve func(strin
 			bad("listen %s: host %q: tls mode acme needs plain DNS names (no wildcard, no IP)", name, h)
 		}
 	}
-	if t.Email != "" {
-		if a, err := mail.ParseAddress(t.Email); err != nil || a.Address != t.Email {
-			bad("listen %s: tls.email %q is not a plain address", name, t.Email)
+	if a.Email != "" {
+		if m, err := mail.ParseAddress(a.Email); err != nil || m.Address != a.Email {
+			bad("listen %s: tls.acme.email %q is not a plain address", name, a.Email)
 		}
 	}
-	if t.Directory == "" {
-		t.Directory = DefaultACMEDirectory
-	} else if u, err := url.Parse(t.Directory); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
-		bad("listen %s: tls.directory %q must be an https URL", name, t.Directory)
+	if a.Server == "" {
+		bad("listen %s: tls mode acme needs tls.acme.server, the directory URL of the ACME server (e.g. %s)", name, LetsEncrypt)
+	} else if u, err := url.Parse(a.Server); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		bad("listen %s: tls.acme.server %q must be an https URL", name, a.Server)
 	}
-	e := &t.EAB
+	if a.Entrypoint == "" {
+		bad("listen %s: tls mode acme needs tls.acme.entrypoint, the plain listener of its HTTP-01 challenges", name)
+	}
+	e := &a.EAB
 	if !e.Set() {
 		return
 	}
 	if e.KID == "" {
-		bad("listen %s: tls.eab needs kid", name)
+		bad("listen %s: tls.acme.eab needs kid", name)
 	}
 	switch {
-	case (e.Key == "") == (e.KeyFile == ""):
-		bad("listen %s: tls.eab needs exactly one of key and key_file", name)
+	case (e.Key == "") == (e.File == ""):
+		bad("listen %s: tls.acme.eab needs exactly one of key and file", name)
 		return
-	case e.KeyFile != "":
-		e.KeyFile = resolve("listen."+name+".tls.eab.key_file", e.KeyFile)
-		data, err := os.ReadFile(e.KeyFile)
+	case e.File != "":
+		e.File = resolve("listen."+name+".tls.acme.eab.file", e.File)
+		data, err := os.ReadFile(e.File)
 		if err != nil {
-			bad("listen %s: tls.eab.key_file: %v", name, err)
+			bad("listen %s: tls.acme.eab.file: %v", name, err)
 			return
 		}
 		e.Key = strings.TrimSpace(string(data))
 	}
 	if mac, err := e.MAC(); err != nil || len(mac) == 0 {
-		bad("listen %s: tls.eab key is not base64url (or base64)", name)
+		bad("listen %s: tls.acme.eab key is not base64url (or base64)", name)
 		return
 	}
 	sum := sha256.Sum256([]byte(e.Key))
 	e.KeySum = hex.EncodeToString(sum[:])
 }
 
-// validateACME ties the acme listeners together: HTTP-01 needs a plain
-// acme: true listener, which carries nothing else, and listeners of one
-// directory share its account, so they agree on email and eab.
+// validateACME ties the acme listeners together: each names a plain
+// entrypoint listener for HTTP-01, which carries nothing else, and
+// listeners of one server share its account, so they agree on email and
+// eab.
 func (c *Config) validateACME(bad func(string, ...any)) {
-	var acme, http []string
-	byDir := map[string]*Listen{}
+	var entrypoints []string
+	byServer := map[string]*Listen{}
 	for _, n := range sortedKeys(c.Listen) {
 		l := c.Listen[n]
-		if l.ACME {
-			http = append(http, n)
-		}
 		if l.TLS == nil || l.TLS.Mode != "acme" {
 			continue
 		}
-		acme = append(acme, n)
-		if o, ok := byDir[l.TLS.Directory]; !ok {
-			byDir[l.TLS.Directory] = l
-		} else if o.TLS.Email != l.TLS.Email || o.TLS.EAB.KID != l.TLS.EAB.KID || o.TLS.EAB.Key != l.TLS.EAB.Key {
-			bad("listen %s and %s: acme listeners of %s share an account and need the same email and eab", o.Name, n, l.TLS.Directory)
+		a := l.TLS.ACME
+		if a.Entrypoint != "" {
+			switch ep, ok := c.Listen[a.Entrypoint]; {
+			case !ok || ep == nil:
+				bad("listen %s: tls.acme.entrypoint %q is not a listener", n, a.Entrypoint)
+			case ep.TLS != nil:
+				bad("listen %s: tls.acme.entrypoint %s must be a plain HTTP listener, without tls", n, a.Entrypoint)
+			case !ep.Entrypoint:
+				ep.Entrypoint = true
+				entrypoints = append(entrypoints, a.Entrypoint)
+			}
+		}
+		if a.Server == "" {
+			continue
+		}
+		if o, ok := byServer[a.Server]; !ok {
+			byServer[a.Server] = l
+		} else if oa := o.TLS.ACME; oa.Email != a.Email || oa.EAB.KID != a.EAB.KID || oa.EAB.Key != a.EAB.Key {
+			bad("listen %s and %s: acme listeners of %s share an account and need the same email and eab", o.Name, n, a.Server)
 		}
 	}
-	for _, n := range acme {
-		if len(http) == 0 {
-			bad("listen %s: tls mode acme needs a plain listener with acme: true for HTTP-01 (port 80)", n)
-		}
-	}
-	for _, n := range http {
-		if len(acme) == 0 {
-			bad("listen %s: acme: true without a tls mode acme listener", n)
-		}
-	}
-	for _, n := range http {
+	slices.Sort(entrypoints)
+	for _, n := range entrypoints {
 		for _, en := range sortedKeys(c.Endpoint) {
 			if slices.Contains(c.Endpoint[en].Listen, n) {
-				bad("endpoint %s: listen %s has acme: true and serves only ACME challenges and redirects", en, n)
+				bad("endpoint %s: listen %s is an acme entrypoint and serves only ACME challenges and redirects", en, n)
 			}
 		}
 		for _, xn := range sortedKeys(c.Expose) {
 			if slices.Contains(c.Expose[xn].Listen, n) {
-				bad("expose %s: listen %s has acme: true and serves only ACME challenges and redirects", xn, n)
+				bad("expose %s: listen %s is an acme entrypoint and serves only ACME challenges and redirects", xn, n)
 			}
 		}
 	}
@@ -3139,8 +3230,6 @@ func defaultPublic(l *Listen) string {
 	switch {
 	case len(l.Host) > 0:
 		host = l.Host[0]
-	case l.TLS != nil && l.TLS.Host != "":
-		host = l.TLS.Host
 	case h == "":
 		return ""
 	default:
@@ -3358,8 +3447,8 @@ func (r Restart) Changes(next Restart) []string {
 		if a.Public != b.Public {
 			out = append(out, "listen."+n+".public")
 		}
-		if a.ACME != b.ACME {
-			out = append(out, "listen."+n+".acme")
+		if a.Entrypoint != b.Entrypoint {
+			out = append(out, "listen."+n+".entrypoint")
 		}
 		if (a.TLS == nil) != (b.TLS == nil) || a.TLS != nil && !sameTLS(a.TLS, b.TLS) {
 			out = append(out, "listen."+n+".tls")

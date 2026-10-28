@@ -17,13 +17,13 @@ func statusConfig(t *testing.T) (string, string) {
 	text := `root: ` + root + `
 listen: {main: {addr: "127.0.0.1:0"}}
 auth:
-  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+  keys: {robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}
 endpoint:
-  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [robert.socha]}
+  backup: {listen: main, endpoint: /backup, allow: [robert.socha]}
 pipeline:
   archive: {endpoint: [backup], steps: [{store: archive}]}
 storage:
-  archive: {type: local, base: s/archive, path: "{{ .File }}"}
+  archive: {directory: s/archive, path: "{{ .File }}"}
 `
 	if err := os.WriteFile(cfg, []byte(text), 0o640); err != nil {
 		t.Fatal(err)

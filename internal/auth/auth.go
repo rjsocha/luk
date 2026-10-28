@@ -59,7 +59,7 @@ func (a *Authenticator) resolveCert(c *ssh.Certificate, now time.Time) (*wire.Id
 		checker := &ssh.CertChecker{
 			Clock: func() time.Time { return now },
 			IsRevoked: func(c *ssh.Certificate) bool {
-				return slices.Contains(ca.Revoked.KeyIDs, c.KeyId) || slices.Contains(ca.Revoked.Serials, c.Serial)
+				return slices.Contains(ca.Revoked.Key, ssh.FingerprintSHA256(c.Key))
 			},
 		}
 		// CheckCert verifies the CA signature in any format the key

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"testing"
+
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
 
 	"luk/internal/gpgkeys"
 	"luk/internal/gpgkeys/gpgtest"
@@ -76,11 +79,65 @@ func TestSendGPGNotValid(t *testing.T) {
 	}
 }
 
+// dearmor decodes an armored OpenPGP message.
+func dearmor(t *testing.T, b []byte) []byte {
+	t.Helper()
+	blk, err := armor.Decode(bytes.NewReader(b))
+	if err != nil || blk.Type != "PGP MESSAGE" {
+		t.Fatalf("not an armored message: %v %q", err, b)
+	}
+	var out bytes.Buffer
+	if _, err := out.ReadFrom(blk.Body); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+func TestSendGPGSecret(t *testing.T) {
+	e := newSendEnv(t)
+	to := gpgtest.New(t, "to@example.net")
+	ringtest.Home(t, []*ringtest.Entity{to}, nil)
+	old := askSecret
+	askSecret = func(string) ([]byte, error) { return []byte("s3cret"), nil }
+	defer func() { askSecret = old }()
+	if code, _, errs := e.send(t, "--gpg", "to@example.net", "--secret"); code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	if got := gpgtest.Decrypt(t, dearmor(t, e.body), to); string(got) != "s3cret" {
+		t.Fatalf("decrypted %q", got)
+	}
+	sum := sha256.Sum256(e.body)
+	if e.meta.Type != secretType || e.meta.Portal != wire.PortalReveal || e.meta.Source != wire.SourceTerminal || e.meta.File != "secret.asc" ||
+		e.meta.Size == nil || *e.meta.Size != int64(len(e.body)) || e.meta.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("meta %+v", e.meta)
+	}
+}
+
+func TestSendGPGSecretFile(t *testing.T) {
+	e := newSendEnv(t)
+	to := gpgtest.New(t, "to@example.net")
+	ringtest.Home(t, []*ringtest.Entity{to}, nil)
+	if code, _, errs := e.send(t, "--gpg", "to@example.net", "--secret", "--file", namedFile(t, "key.bin", "\x00\xffbinary")); code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	if got := gpgtest.Decrypt(t, dearmor(t, e.body), to); string(got) != "\x00\xffbinary" {
+		t.Fatalf("decrypted %q", got)
+	}
+	if e.meta.File != "key.bin.asc" || e.meta.Type != secretType || e.meta.Portal != wire.PortalReveal {
+		t.Fatalf("meta %+v", e.meta)
+	}
+	defer stdinFrom(t, "piped")()
+	if code, _, errs := e.send(t, "--gpg", "to@example.net", "--secret", "--stdin"); code != 0 {
+		t.Fatalf("stdin: exit %d: %s", code, errs)
+	}
+	if got := gpgtest.Decrypt(t, dearmor(t, e.body), to); string(got) != "piped" || e.meta.File != "secret.asc" {
+		t.Fatalf("stdin: decrypted %q, meta %+v", got, e.meta)
+	}
+}
+
 func TestSendGPGUsage(t *testing.T) {
 	tempConfig(t)
 	for _, args := range [][]string{
-		{"send", "--gpg", "a@example.net", "--secret"},
-		{"send", "--gpg", "a@example.net", "--secret", "--stdin"},
 		{"send", "--gpg", "", "--stdin"},
 	} {
 		if code, _, _ := runLuk(t, args...); code != 1 {

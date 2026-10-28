@@ -26,13 +26,11 @@ listen:
   main: {addr: 127.0.0.1:8080}
 auth:
   keys:
-    - name: robert.socha
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
+    robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
 endpoint:
   up:
     listen: main
     endpoint: /up
-    path: queue/up
     allow: [robert.socha]
 pipeline:
   first: {endpoint: [up], queue: {group: g, order: 1, concurrency: %[2]d}, steps: [{store: s}]}
@@ -44,7 +42,7 @@ pipeline:
   after: {endpoint: [up], queue: {group: h, order: 2}, steps: [{store: s}]}
   last: {endpoint: [up], queue: {group: h, order: 3}, steps: [{store: s}]}
 storage:
-  s: {type: local, base: s, path: "{{ .Random }}"}
+  s: {directory: s, path: "{{ .Random }}"}
 `
 
 func groupCfg(t *testing.T, root string, concurrency int, edit func(string) string) *config.Config {

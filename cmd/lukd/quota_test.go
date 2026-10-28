@@ -48,25 +48,24 @@ func quotaConfig(t *testing.T) (string, string, string) {
 	text := `root: ` + root + `
 listen: {main: {addr: "127.0.0.1:0"}}
 auth:
-  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n"}]
-  ca: [{name: hosts, type: host, key: "` + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(ca.PublicKey()))) + `"}]
+  keys: {robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n"}
+  ca: {hosts: {type: host, key: "` + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(ca.PublicKey()))) + `"}}
 endpoint:
   backup:
     listen: main
     endpoint: /backup
-    path: q/backup
     allow: ["*"]
     quota:
       class:
         - {name: large, members: ["hosts#db*"], rate: 50G/1d, burst: 100G}
         - {name: small, members: ["hosts:*.example.org"], rate: 20G/1d}
         - {name: others, rate: 5G/1d}
-  logs: {listen: main, endpoint: /logs, path: q/logs, allow: ["*"], quota: {mode: passive, rate: 1G/1d}}
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: ["*"]}
+  logs: {listen: main, endpoint: /logs, allow: ["*"], quota: {mode: passive, rate: 1G/1d}}
+  drop: {listen: main, endpoint: /drop, allow: ["*"]}
 pipeline:
   p: {endpoint: [backup, logs, drop], steps: [{store: s}]}
 storage:
-  s: {type: local, base: s, path: "{{ .Id }}"}
+  s: {directory: s, path: "{{ .Id }}"}
 `
 	p := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(p, []byte(text), 0o640); err != nil {

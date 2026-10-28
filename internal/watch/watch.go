@@ -214,7 +214,7 @@ func All(cfg *config.Config, now time.Time) ([]status.Watch, error) {
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(cfg.Storage)) {
 		st := cfg.Storage[name]
-		if st.Type != "local" || len(st.Watch) == 0 {
+		if len(st.Watch) == 0 {
 			continue
 		}
 		series, err := store.FromConfig(st).SeriesCopies()
@@ -229,7 +229,7 @@ func All(cfg *config.Config, now time.Time) ([]status.Watch, error) {
 // Watched reports whether any of the storages names has watch rules.
 func Watched(cfg *config.Config, names []string) bool {
 	for _, n := range names {
-		if st := cfg.Storage[n]; st != nil && st.Type == "local" && len(st.Watch) > 0 {
+		if st := cfg.Storage[n]; st != nil && len(st.Watch) > 0 {
 			return true
 		}
 	}

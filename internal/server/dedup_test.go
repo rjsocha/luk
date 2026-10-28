@@ -20,8 +20,8 @@ func dedupFixture(t *testing.T, mod func(string) string) (*fixture, ssh.Signer) 
 	t.Helper()
 	anna := newSigner(t)
 	f := newFixtureWith(t, func(s string) string {
-		s = strings.Replace(s, `"}]
-  ca:`, `"}, {name: anna, key: "`+pubLine(anna.PublicKey())+`"}]
+		s = strings.Replace(s, `"}
+  ca:`, `", anna: "`+pubLine(anna.PublicKey())+`"}
   ca:`, 1)
 		s = strings.Replace(s, `allow: [robert.socha], respond: url`, `allow: [robert.socha, anna], respond: url`, 1)
 		if mod != nil {
@@ -97,7 +97,7 @@ func TestDedupSameOwnerReadsNoBody(t *testing.T) {
 	if !shared(t, f.dropFile(t, first.URL), f.dropFile(t, second.URL)) {
 		t.Fatal("the two links do not share the content")
 	}
-	if e := entries(t, filepath.Join(f.root, "data", "q/drop")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "queue/drop")); len(e) != 0 {
 		t.Fatalf("queue left %v", e)
 	}
 	// A stream sent again carries the size and sha256 of the first answer.
@@ -166,7 +166,7 @@ func TestDedupNotWithRunStep(t *testing.T) {
 
 func TestDedupNotWithoutHardlink(t *testing.T) {
 	f, _ := dedupFixture(t, func(s string) string {
-		return strings.Replace(s, `drop: {type: local, base: s/drop,`, `drop: {type: local, hardlink: false, base: s/drop,`, 1)
+		return strings.Replace(s, `drop: {directory: s/drop,`, `drop: {hardlink: false, directory: s/drop,`, 1)
 	})
 	body := []byte("separate")
 	first, _ := f.put(t, f.user, fileMeta(body), body)

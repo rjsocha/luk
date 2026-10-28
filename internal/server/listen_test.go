@@ -53,24 +53,24 @@ listen:
   intake:
     addr: %s
     host: [a.vm]
-    tls: {mode: self, cert: tls/a.crt, key: tls/a.key, host: a.vm}
+    tls: {mode: self, cert: tls/a.crt, key: tls/a.key}
   download:
     addr: %s
     host: [B.vm]
-    tls: {mode: self, algorithm: ecdsa-p256, cert: tls/b.crt, key: tls/b.key, host: b.vm}
+    tls: {mode: self, algorithm: ecdsa-p256, cert: tls/b.crt, key: tls/b.key}
   proxied:
     addr: %s
     host: [drop.example.com]
     public: https://drop.example.com
 limits: {conn: {max: %d}}
 auth:
-  keys: [{name: robert.socha, key: "%s"}]
+  keys: {robert.socha: "%s"}
 endpoint:
-  up: {listen: intake, endpoint: /up, path: q/up, allow: [robert.socha], respond: url, storage: drop}
+  up: {listen: intake, endpoint: /up, allow: [robert.socha], respond: url, storage: drop}
 pipeline:
   drop: {endpoint: [up], steps: [{store: drop}]}
 storage:
-  drop: {type: local, base: s/drop, path: "{{ .Random }}", expose: drop}
+  drop: {directory: s/drop, path: "{{ .Random }}", expose: drop}
 expose:
   drop: {listen: [proxied, download], path: /}
 `, root, e.shared, e.shared, e.plain, connMax, pubLine(e.user.PublicKey()))))
@@ -81,7 +81,7 @@ expose:
 	writeIdentity(t, filepath.Join(root, "config.yaml"))
 	for _, n := range []string{"intake", "download"} {
 		l := cfg.Listen[n]
-		pin, err := tlsself.Generate(l.TLS.Cert, l.TLS.Key, l.TLS.Host, l.TLS.Algorithm)
+		pin, err := tlsself.Generate(l.TLS.Cert, l.TLS.Key, l.CertNames(), l.TLS.Algorithm)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -272,7 +272,7 @@ func TestHostCheckAfterSignature(t *testing.T) {
 func TestPublicURLInCreated(t *testing.T) {
 	f := newFixtureWith(t, func(s string) string {
 		s = strings.Replace(s, `listen: {main: {addr: "127.0.0.1:0", public: "https://lukd.vm:8443"}}`,
-			"listen:\n  main: {addr: \"127.0.0.1:0\"}\n  pub: {addr: \"127.0.0.1:1\", host: [x.vm], tls: {mode: self, cert: c, key: k, host: x.vm}}\n  web: {addr: \"127.0.0.1:2\", public: \"https://files.example.com/\"}", 1)
+			"listen:\n  main: {addr: \"127.0.0.1:0\"}\n  pub: {addr: \"127.0.0.1:1\", host: [x.vm], tls: {mode: self, cert: c, key: k}}\n  web: {addr: \"127.0.0.1:2\", public: \"https://files.example.com/\"}", 1)
 		return strings.Replace(s, "drop: {listen: main, path: /d/}", "drop: {listen: [web, pub], path: /d/}", 1)
 	})
 	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, File: "a b.txt", Source: wire.SourceStdin}, body: []byte("x")})
@@ -290,14 +290,14 @@ func TestHandshakeErrorLogLevel(t *testing.T) {
 		cfg, err := config.Parse([]byte(fmt.Sprintf(`
 root: %s
 listen:
-  main: {addr: %s, tls: {mode: self, cert: tls/a.crt, key: tls/a.key, host: a.vm}}
+  main: {addr: %s, tls: {mode: self, cert: tls/a.crt, key: tls/a.key}}
 log: {level: %s}
 `, t.TempDir(), freePort(t), level)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		l := cfg.Listen["main"]
-		if _, err := tlsself.Generate(l.TLS.Cert, l.TLS.Key, l.TLS.Host, l.TLS.Algorithm); err != nil {
+		if _, err := tlsself.Generate(l.TLS.Cert, l.TLS.Key, l.CertNames(), l.TLS.Algorithm); err != nil {
 			t.Fatal(err)
 		}
 		if err := prepareDirs(cfg, "receive"); err != nil {

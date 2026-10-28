@@ -79,13 +79,13 @@ func newLukdEnvTTL(t *testing.T, ttl string) *lukdEnv {
 root: %s
 listen: {main: {addr: "%s", public: "http://%s"}}
 auth:
-  keys: [{name: robert.socha, key: "%s"}, {name: other, key: "%s"}]
+  keys: {robert.socha: "%s", other: "%s"}
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha, other], respond: url, storage: drop, link: {remove: ['*'], ttl: ['*'], replace: ['*'], list: ['*']}}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha, other], respond: url, storage: drop, link: {remove: ['*'], ttl: ['*'], replace: ['*'], list: ['*']}}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:
-  drop: {type: local, base: s/drop, path: "{{ .Random }}", expose: drop, ttl: %s}
+  drop: {directory: s/drop, path: "{{ .Random }}", expose: drop, ttl: %s}
 expose:
   drop: {listen: main, path: /d/}
 `, t.TempDir(), addr, addr, pub, otherPub, ttl)

@@ -31,7 +31,7 @@ func newSendCmd(out io.Writer) *cobra.Command {
 		endpoint, key, ttl, name, ctype, file, bwlimit string
 		permanent                                      string
 		tags, gpgTo                                    []string
-		backup, once, portal, secret, quiet, stdin     bool
+		backup, once, indirect, secret, quiet, stdin   bool
 		dryRun, progress, asJSON, prettyURL, noOwner   bool
 		mutable, private, anyID                        bool
 		links, parallel                                int
@@ -50,7 +50,7 @@ match), and sends the secret with a
 signed size and hash; --secret with --stdin or --file takes the secret from
 there instead; a typed secret must be valid UTF-8. Without --type a --secret
 upload is text/plain; charset=utf-8. --secret serves a reveal page (a Reveal
-button, then the content with a copy button); --portal serves a download page (metadata and a
+button, then the content with a copy button); --indirect serves a download page (metadata and a
 Download button). Neither page serves the content on the bare URL, so link
 previews do not consume a --once upload. On success it prints the URL of the
 upload (respond: url), or nothing (respond: accept); --json prints the server
@@ -78,7 +78,7 @@ endpoint offers).
 of the endpoint (permanent.names in lukd); the URL printed is the permanent URL,
 which serves the version published last (404 once it is gone), and --json adds
 the URL of the stored version (version_url). It takes no --once, --secret,
---portal, --private, --mutable, --pretty-url or --links above 1.
+--indirect, --private, --mutable, --pretty-url or --links above 1.
 Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 4 hash mismatch, 130 interrupted.`,
 		Example: `  luk send --file report.pdf
@@ -89,8 +89,8 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
   luk send --secret --once
   pwgen 20 1 | luk send --secret --stdin --ttl 1h
   luk send --file report.pdf --ttl max
-  luk send --file report.pdf --portal --once
-  luk send --file report.pdf --portal --no-owner
+  luk send --file report.pdf --indirect --once
+  luk send --file report.pdf --indirect --no-owner
   luk send --file dump.sql.gz --progress --bwlimit 10M
   luk send --file report.pdf --pretty-url
   luk send --file status.html --mutable
@@ -108,14 +108,10 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 				return usageError{errors.New("--file and --stdin are mutually exclusive")}
 			case !hasFile && !stdin && !secret:
 				return usageError{errors.New("one of --file, --stdin or --secret is required")}
-			case portal && secret:
-				return usageError{errors.New("--portal and --secret are mutually exclusive")}
 			case anyID && !private:
 				return usageError{errors.New("--any needs --private")}
-			case len(gpgTo) > 0 && secret:
-				return usageError{errors.New("--gpg takes no --secret")}
-			case private && (secret || portal):
-				return usageError{errors.New("--private takes no --secret or --portal: private files are fetched with luk get")}
+			case private && (secret || indirect):
+				return usageError{errors.New("--private takes no --secret or --indirect: private files are fetched with luk get")}
 			case links < 1:
 				return usageError{errors.New("--links must be at least 1")}
 			case links > maxLinks:
@@ -126,7 +122,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 				return usageError{fmt.Errorf("--parallel must be 1 to %d", maxParallel)}
 			}
 			if cmd.Flags().Changed("permanent") {
-				if err := permanentFlags(permanent, links, once, secret, portal, private, mutable, prettyURL); err != nil {
+				if err := permanentFlags(permanent, links, once, secret, indirect, private, mutable, prettyURL); err != nil {
 					return err
 				}
 			}
@@ -142,7 +138,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 			if err != nil {
 				return err
 			}
-			if len(recipients) > 0 && ctype == "" {
+			if len(recipients) > 0 && !secret && ctype == "" {
 				ctype = gpgType
 			}
 			cfg, _, err := client.LoadMerged()
@@ -164,7 +160,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 				if ctype == "" {
 					ctype = secretType
 				}
-			case portal:
+			case indirect:
 				portalMode = wire.PortalDownload
 			}
 			meta := wire.Meta{Tags: tags, TTL: ttl, Once: once, Portal: portalMode, File: name, Type: ctype, Source: wire.SourceStdin, PrettyURL: prettyURL, NoOwner: noOwner, Mutable: mutable, DryRun: dryRun, Permanent: permanent}
@@ -179,7 +175,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 			}
 			src, closer, err := input(file, name, stdin, prompt, backup, &meta)
 			if err == nil && len(recipients) > 0 {
-				src, closer, err = gpgInput(src, closer, recipients, &meta)
+				src, closer, err = gpgInput(src, closer, recipients, secret, &meta)
 			}
 			if closer != nil {
 				defer closer.Close()
@@ -266,7 +262,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 	f.BoolVar(&backup, "backup", false, "add backup meta: hostname, absolute path, mtime; for a stream the hostname and the time of sending")
 	f.StringVar(&ttl, "ttl", "", "lifetime, e.g. 24h or 7d, or max for the longest the storage allows")
 	f.BoolVar(&once, "once", false, "delete after the first download")
-	f.BoolVar(&portal, "portal", false, "download page with the metadata and a Download button before the content")
+	f.BoolVar(&indirect, "indirect", false, "download page with the metadata and a Download button before the content; --secret is indirect already")
 	f.BoolVar(&stdin, "stdin", false, "stream the content from standard input")
 	f.BoolVar(&secret, "secret", false, "secret with a reveal page; prompts twice on the terminal, masked, unless --stdin or --file is given")
 	f.StringVar(&name, "name", "", "file name in the meta (default: base name of a regular --file; none for a stream)")
@@ -293,7 +289,7 @@ Exit codes: 0 ok, 1 usage/config, 2 rejected, 3 transfer or server error,
 
 // permanentFlags refuses a --permanent name that is not a clean relative
 // name, and --permanent with an option it excludes.
-func permanentFlags(name string, links int, once, secret, portal, private, mutable, prettyURL bool) error {
+func permanentFlags(name string, links int, once, secret, indirect, private, mutable, prettyURL bool) error {
 	if err := wire.CheckPermanentName(name); err != nil {
 		return usageError{fmt.Errorf("--permanent: %w", err)}
 	}
@@ -302,7 +298,7 @@ func permanentFlags(name string, links int, once, secret, portal, private, mutab
 		flag string
 		on   bool
 	}{
-		{"--once", once}, {"--secret", secret}, {"--portal", portal}, {"--private", private},
+		{"--once", once}, {"--secret", secret}, {"--indirect", indirect}, {"--private", private},
 		{"--mutable", mutable}, {"--pretty-url", prettyURL}, {"--links above 1", links > 1},
 	} {
 		if f.on {

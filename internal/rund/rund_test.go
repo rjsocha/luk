@@ -1082,10 +1082,9 @@ listen:
     tls: {mode: files, cert: /etc/ssl/luk.crt, key: /etc/ssl/private/luk.key}
 endpoint:
   up:
-    path: /srv/queue/up
     secret: {path: /run/luk/volatile/queue}
 storage:
-  backup: {type: local, base: /storage/backup, path: x}
+  backup: {directory: /storage/backup, path: x}
 `, 0o640)
 	write(t, e.srv.Config, "root: "+e.root+"\nconfig: "+e.conf+"\nhide: [/srv/extra, /srv/queue]\n", 0o600)
 	if _, err := e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 3, ID: id1}, true); err != nil {
@@ -1111,7 +1110,7 @@ storage:
 	if err == nil || len(fs) != 2 || fs[0] != (frame{runproto.Stderr, "lukd run: job state: unavailable\n"}) || len(e.fr.argvs()) != before {
 		t.Fatalf("%v %q", err, fs)
 	}
-	write(t, e.conf, "pipeline:\n  p:\n    steps: [{run: /storage/backup/p}]\n"+"storage:\n  backup: {type: local, base: /storage/backup, path: x}\n", 0o640)
+	write(t, e.conf, "pipeline:\n  p:\n    steps: [{run: /storage/backup/p}]\n"+"storage:\n  backup: {directory: /storage/backup, path: x}\n", 0o640)
 	fs, err = e.exchange(t, runproto.StepRequest{Pipeline: "p", Step: 1, ID: id1}, true)
 	if err == nil || len(fs) != 2 || fs[0] != (frame{runproto.Stderr, "lukd run: pipeline p step 1: unavailable\n"}) || len(e.fr.argvs()) != before {
 		t.Fatalf("%v %q", err, fs)

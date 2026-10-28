@@ -18,8 +18,7 @@ func dirsConfig(root string) *config.Config {
 		}}},
 		Endpoint: map[string]*config.Endpoint{"b": {Path: filepath.Join(root, "data", "queue", "b")}},
 		Storage: map[string]*config.Storage{
-			"a": {Type: "local", Base: filepath.Join(root, "data", "storage", "a")},
-			"s": {Type: "s3", Bucket: "x"},
+			"a": {Base: filepath.Join(root, "data", "storage", "a")},
 		},
 	}
 }

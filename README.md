@@ -86,7 +86,6 @@ endpoint:
   drop:
     listen: main
     endpoint: /drop
-    path: queue/drop
     allow: [alice]
     respond: url
     storage: drop
@@ -99,8 +98,7 @@ pipeline:
 
 storage:
   drop:
-    type: local
-    base: storage/drop
+    directory: storage/drop
     path: "{{ .Random }}"
     expose: drop
     ttl:

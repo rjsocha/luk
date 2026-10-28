@@ -20,7 +20,7 @@ func maxLinksFixture(t *testing.T) (*fixture, ssh.Signer) {
 	t.Helper()
 	return dedupFixture(t, func(s string) string {
 		s = strings.Replace(s, `respond: url, storage: drop}`, allLinks, 1)
-		return strings.Replace(s, `drop: {type: local, base: s/drop,`, `drop: {type: local, links: {max: 3}, base: s/drop,`, 1)
+		return strings.Replace(s, `drop: {directory: s/drop,`, `drop: {hardlink: {owner: {max: 3}}, directory: s/drop,`, 1)
 	})
 }
 
@@ -149,7 +149,7 @@ func TestLinksMaxStoredAndQueuedCountOnce(t *testing.T) {
 		"one storage": nil,
 		"fan-out": func(s string) string {
 			s = strings.Replace(s, `drop: {endpoint: [drop], steps: [{store: drop}]}`, `drop: {endpoint: [drop], steps: [{store: [drop, copy]}]}`, 1)
-			return strings.Replace(s, "expose:\n", "  copy: {type: local, links: {max: 2}, base: s/copy, path: \"{{ .Random }}\"}\nexpose:\n", 1)
+			return strings.Replace(s, "expose:\n", "  copy: {hardlink: {owner: {max: 2}}, directory: s/copy, path: \"{{ .Random }}\"}\nexpose:\n", 1)
 		},
 		"steps after the store": func(s string) string {
 			return strings.Replace(s, `drop: {endpoint: [drop], steps: [{store: drop}]}`, `drop: {endpoint: [drop], steps: [{store: drop}, {run: /bin/true}]}`, 1)
@@ -157,7 +157,7 @@ func TestLinksMaxStoredAndQueuedCountOnce(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, _ := dedupFixture(t, func(s string) string {
-				s = strings.Replace(s, `drop: {type: local, base: s/drop,`, `drop: {type: local, links: {max: 2}, base: s/drop,`, 1)
+				s = strings.Replace(s, `drop: {directory: s/drop,`, `drop: {hardlink: {owner: {max: 2}}, directory: s/drop,`, 1)
 				if mod != nil {
 					s = mod(s)
 				}

@@ -28,8 +28,6 @@ import (
 
 var ErrClosed = errors.New("pipeline: dispatcher closed")
 
-var errNotSupported = errors.New("not supported yet")
-
 var hookRun = func(Job, string) {}
 
 // hookQueue runs before the dispatcher changes a queue entry whose
@@ -985,9 +983,6 @@ func localStorage(cfg *config.Config, name string) (*config.Storage, error) {
 	st, ok := cfg.Storage[name]
 	if !ok {
 		return nil, errors.New("storage not in the config")
-	}
-	if st.Type != "local" {
-		return nil, fmt.Errorf("%s storage: %w", st.Type, errNotSupported)
 	}
 	return st, nil
 }

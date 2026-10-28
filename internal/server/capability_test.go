@@ -102,7 +102,7 @@ func TestCapabilitiesLinks(t *testing.T) {
 func TestSecretAllow(t *testing.T) {
 	other := newSigner(t)
 	f := newSecretFixture(t, func(s string) string {
-		s = strings.Replace(s, `keys: [{name: robert.socha, key: "`, `keys: [{name: other, key: "`+pubLine(other.PublicKey())+`"}, {name: robert.socha, key: "`, 1)
+		s = strings.Replace(s, `keys: {robert.socha: "`, `keys: {other: "`+pubLine(other.PublicKey())+`", robert.socha: "`, 1)
 		return strings.Replace(s, `allow: [robert.socha], respond: url, storage: drop, secret: {allow: ['*']`,
 			`allow: [robert.socha, other], respond: url, storage: drop, secret: {allow: [robert.socha]`, 1)
 	})
@@ -133,7 +133,7 @@ func TestSecretAllow(t *testing.T) {
 func backupFixture(t *testing.T, hostname string) *privateFixture {
 	t.Helper()
 	return newPrivateFixture(t, func(s string) string {
-		return strings.Replace(s, `link: {remove: ['*'], list: ['*']}}`, `link: {remove: ['*'], list: ['*']}, backup: {hostname: `+hostname+`}}`, 1)
+		return strings.Replace(s, `link: {remove: ['*'], list: ['*']}}`, `link: {remove: ['*'], list: ['*']}, origin: `+hostname+`}`, 1)
 	})
 }
 

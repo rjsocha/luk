@@ -33,8 +33,8 @@ func TestAsOwnerNotOwner(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("runs as root")
 	}
-	err := asOwner("lukd queue", "/")
-	if err == nil || !strings.Contains(err.Error(), "lukd queue must run as root or as root (owner of /)") {
+	err := asOwner("lukd failed", "/")
+	if err == nil || !strings.Contains(err.Error(), "lukd failed must run as root or as root (owner of /)") {
 		t.Fatalf("%v", err)
 	}
 }
@@ -64,7 +64,7 @@ func TestAsServiceUserRefusesSymlinkedData(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{Root: root}
-	err := asServiceUser("lukd queue", cfg)
+	err := asServiceUser("lukd failed", cfg)
 	if err == nil || !strings.Contains(err.Error(), filepath.Join(root, "data")+" is a symlink") {
 		t.Fatalf("got %v", err)
 	}
@@ -75,7 +75,7 @@ func TestAsServiceUserNamesData(t *testing.T) {
 	os.Mkdir(filepath.Join(root, "data"), 0o750)
 	geteuid = func() int { return 4242 }
 	t.Cleanup(func() { geteuid = os.Geteuid })
-	err := asServiceUser("lukd queue", &config.Config{Root: root})
+	err := asServiceUser("lukd failed", &config.Config{Root: root})
 	if err == nil || !strings.Contains(err.Error(), "(owner of "+filepath.Join(root, "data")+")") {
 		t.Fatalf("got %v", err)
 	}

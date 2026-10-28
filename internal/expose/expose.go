@@ -97,7 +97,7 @@ func New(cfg *config.Config, log *slog.Logger, now func() time.Time, listen stri
 	h := &handler{log: log, now: now, verify: verify, idle: cmp.Or(time.Duration(cfg.Limits.Conn.Idle), config.DefaultConnIdle)}
 	for name, x := range cfg.Expose {
 		_, st, ok := cfg.StorageServedBy(name)
-		if !ok || st.Type != "local" || !slices.Contains(x.Listen, listen) {
+		if !ok || !slices.Contains(x.Listen, listen) {
 			continue
 		}
 		if !strings.HasPrefix(x.Path, "/") || !strings.HasSuffix(x.Path, "/") {
@@ -368,6 +368,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveFile(w, r, rt, rel, f, sc)
 	case r.Method == http.MethodPost:
 		methodNotAllowed(w, "GET, HEAD")
+	case action == "" && sc.Client.Portal != wire.PortalDirect && r.Header.Get(wire.HeaderSignature) != "":
+		// A luk client (luk get): its signature headers, not verified on
+		// an expose without auth.ssh, tell it from a link preview; the
+		// content is public through /get anyway.
+		logged()
+		h.serveFile(w, r, rt, rel, f, sc)
 	case sc.Client.Portal == wire.PortalReveal || sc.Client.Portal == wire.PortalDownload:
 		h.landing(w, rel, sc)
 	default:

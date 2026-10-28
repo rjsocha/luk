@@ -84,7 +84,7 @@ func TestAge(t *testing.T) {
 }
 
 func storage(rules ...config.Watch) *config.Storage {
-	return &config.Storage{Type: "local", Watch: rules}
+	return &config.Storage{Watch: rules}
 }
 
 func TestEvaluate(t *testing.T) {
@@ -166,9 +166,8 @@ func TestSuggest(t *testing.T) {
 func TestAll(t *testing.T) {
 	base := t.TempDir()
 	cfg := &config.Config{Storage: map[string]*config.Storage{
-		"archive": {Type: "local", Base: base, Conflict: "version", Watch: []config.Watch{{Origin: config.StringList{"db1-prod"}, Every: dur(26 * time.Hour)}}},
-		"plain":   {Type: "local", Base: t.TempDir()},
-		"cloud":   {Type: "s3", Watch: []config.Watch{{Every: dur(time.Hour)}}},
+		"archive": {Base: base, Conflict: config.Conflict{Mode: "version"}, Watch: []config.Watch{{Origin: config.StringList{"db1-prod"}, Every: dur(26 * time.Hour)}}},
+		"plain":   {Base: t.TempDir()},
 	}}
 	l := store.FromConfig(cfg.Storage["archive"])
 	src := filepath.Join(t.TempDir(), "src")
@@ -185,7 +184,7 @@ func TestAll(t *testing.T) {
 		got[0].Message != "db1-prod/db.sql: last copy 30h ago (every 26h)" {
 		t.Fatalf("%+v %v", got, err)
 	}
-	if !Watched(cfg, []string{"plain", "archive"}) || Watched(cfg, []string{"plain", "cloud", "none"}) {
+	if !Watched(cfg, []string{"plain", "archive"}) || Watched(cfg, []string{"plain", "none"}) {
 		t.Error("Watched")
 	}
 }

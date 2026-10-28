@@ -63,10 +63,14 @@ func newKey(algorithm string) (crypto.PublicKey, crypto.Signer, error) {
 	return nil, nil, fmt.Errorf("unknown tls algorithm %q", algorithm)
 }
 
-// Generate writes a 10-year self-signed certificate with a key of the given
-// algorithm (ed25519 when empty). It never overwrites: a new key means a new
-// pin for every client.
-func Generate(certPath, keyPath, host, algorithm string) (string, error) {
+// Generate writes a 10-year self-signed certificate for the names hosts
+// (DNS names or IP addresses; the first is the common name) with a key of
+// the given algorithm (ed25519 when empty). It never overwrites: a new key
+// means a new pin for every client.
+func Generate(certPath, keyPath string, hosts []string, algorithm string) (string, error) {
+	if len(hosts) == 0 {
+		return "", fmt.Errorf("%s: no name for the certificate", certPath)
+	}
 	if filepath.Clean(certPath) == filepath.Clean(keyPath) {
 		return "", fmt.Errorf("%s: certificate and key must be different files", certPath)
 	}
@@ -80,16 +84,18 @@ func Generate(certPath, keyPath, host, algorithm string) (string, error) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: host},
+		Subject:      pkix.Name{CommonName: hosts[0]},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		tmpl.IPAddresses = []net.IP{ip}
-	} else {
-		tmpl.DNSNames = []string{host}
+	for _, h := range hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
+		} else {
+			tmpl.DNSNames = append(tmpl.DNSNames, h)
+		}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
 	if err != nil {

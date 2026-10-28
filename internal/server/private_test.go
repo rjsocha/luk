@@ -41,14 +41,14 @@ func newPrivateFixture(t *testing.T, mod func(string) string) *privateFixture {
 	other := newSigner(t)
 	dir := t.TempDir()
 	crt, key := filepath.Join(dir, "s.crt"), filepath.Join(dir, "s.key")
-	pin, err := tlsself.Generate(crt, key, "secure.vm", tlsself.ECDSAP256)
+	pin, err := tlsself.Generate(crt, key, []string{"secure.vm"}, tlsself.ECDSAP256)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f := newFixtureWith(t, func(s string) string {
 		s = strings.Replace(s, `public: "https://lukd.vm:8443"}}`,
-			`public: "https://lukd.vm:8443"}, secure: {addr: "127.0.0.1:443", host: [secure.vm], tls: {mode: self, cert: `+crt+`, key: `+key+`, host: secure.vm}}}`, 1)
-		s = strings.Replace(s, `keys: [{name: robert.socha, key: "`, `keys: [{name: other, key: "`+pubLine(other.PublicKey())+`"}, {name: robert.socha, key: "`, 1)
+			`public: "https://lukd.vm:8443"}, secure: {addr: "127.0.0.1:443", host: [secure.vm], tls: {mode: self, cert: `+crt+`, key: `+key+`}}}`, 1)
+		s = strings.Replace(s, `keys: {robert.socha: "`, `keys: {other: "`+pubLine(other.PublicKey())+`", robert.socha: "`, 1)
 		s = strings.Replace(s, `allow: [robert.socha], respond: url, storage: drop}`,
 			`allow: [robert.socha, other, "hosts:*"], respond: url, storage: drop, private: {owner: ['*'], any: ['*']}, link: {remove: ['*'], list: ['*']}}`, 1)
 		s = strings.Replace(s, `expose: drop}`, `expose: drop, protect: secure}`, 1)
@@ -173,7 +173,7 @@ func TestPrivateUploadURL(t *testing.T) {
 func TestPrivateURLWithoutPin(t *testing.T) {
 	for _, c := range []struct{ name, listen string }{
 		{"proxied", `secure: {addr: "127.0.0.1:443", host: [secure.vm], public: "https://secure.vm"}`},
-		{"acme", `secure: {addr: "127.0.0.1:443", host: [secure.example.com], tls: {mode: acme}}, web: {addr: "127.0.0.1:80", acme: true}`},
+		{"acme", `secure: {addr: "127.0.0.1:443", host: [secure.example.com], tls: {mode: acme, acme: {entrypoint: web, server: 'https://acme-v02.api.letsencrypt.org/directory'}}}, web: {addr: "127.0.0.1:80"}`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newPrivateFixture(t, func(s string) string {
@@ -469,7 +469,7 @@ func TestPrivateListSecret(t *testing.T) {
 	f := privateListFixture(t, func(s string) string {
 		return strings.NewReplacer(
 			`storage: drop, private:`, `storage: drop, secret: {allow: ['*'], path: `+vol+`/queue, storage: volatile}, private:`,
-			"storage:\n", "storage:\n  volatile: {type: local, base: "+vol+"/storage, path: \"{{ .Random }}\", expose: volatile, protect: vsecure, ttl: {user: true}}\n",
+			"storage:\n", "storage:\n  volatile: {directory: "+vol+"/storage, path: \"{{ .Random }}\", expose: volatile, protect: vsecure, ttl: {user: true}}\n",
 			"  drop: {listen: main, path: /d/}\n", "  drop: {listen: main, path: /d/}\n  volatile: {listen: main, path: /d/volatile/}\n  vsecure: {listen: secure, path: /v/, auth: {ssh: {allow: [\"*\"]}}}\n",
 		).Replace(s)
 	})

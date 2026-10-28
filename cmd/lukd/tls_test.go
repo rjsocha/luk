@@ -18,16 +18,15 @@ func TestGenerateTLSExistingAndMissing(t *testing.T) {
 listen:
   zeta:
     addr: 127.0.0.1:8443
-    tls: {mode: self, cert: b.crt, key: b.key, host: b.vm, algorithm: ecdsa-p256}
+    tls: {mode: self, cert: b.crt, key: b.key, algorithm: ecdsa-p256}
   alpha:
     addr: 127.0.0.1:8444
-    tls: {mode: self, cert: a.crt, key: a.key, host: a.vm}
+    tls: {mode: self, cert: a.crt, key: a.key}
 auth:
   keys:
-    - name: k
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n k"
+    k: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n k"
 endpoint:
-  e: {listen: zeta, endpoint: /e, path: /queue/e, allow: [k]}
+  e: {listen: zeta, endpoint: /e, allow: [k]}
 pipeline:
   p: {endpoint: [e], steps: [{run: /bin/true}]}
 `, dir)
@@ -68,7 +67,7 @@ pipeline:
 func TestGenerateTLSSkipsFiles(t *testing.T) {
 	dir := t.TempDir()
 	ext := t.TempDir()
-	extPin, err := tlsself.Generate(filepath.Join(ext, "e.crt"), filepath.Join(ext, "e.key"), "e.vm", "")
+	extPin, err := tlsself.Generate(filepath.Join(ext, "e.crt"), filepath.Join(ext, "e.key"), []string{"e.vm"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,16 +79,15 @@ listen:
     tls: {mode: files, cert: %s/e.crt, key: %s/e.key}
   own:
     addr: 127.0.0.1:8444
-    tls: {mode: self, cert: a.crt, key: a.key, host: a.vm}
+    tls: {mode: self, cert: a.crt, key: a.key}
   missing:
     addr: 127.0.0.1:8446
     tls: {mode: files, cert: m/m.crt, key: m/m.key}
 auth:
   keys:
-    - name: k
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n k"
+    k: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n k"
 endpoint:
-  e: {listen: own, endpoint: /e, path: /queue/e, allow: [k]}
+  e: {listen: own, endpoint: /e, allow: [k]}
 pipeline:
   p: {endpoint: [e], steps: [{run: /bin/true}]}
 `, dir, ext, ext)

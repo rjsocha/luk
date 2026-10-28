@@ -131,7 +131,7 @@ class TestRules(Base):
         l = self.one([entry(failed=2, error="boom\nbad|pipe" + "x" * 300)])
         self.assertTrue(l.startswith("2 "), l)
         self.assertIn("failed=2;;1", l)
-        self.assertIn("lukd queue ls / rm", l)
+        self.assertIn("lukd failed ls / rm", l)
         self.assertNotIn("retry", l)
         self.assertNotIn("\n", l)
         self.assertEqual(len(l.splitlines()), 1)

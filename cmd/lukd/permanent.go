@@ -27,7 +27,7 @@ func storagePermanentCmd(cfgPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "permanent",
 		Short: "List the permanent names of a storage, remove orphaned and empty ones",
-		Long: "List the permanent names of a local storage (the directories under\n" +
+		Long: "List the permanent names of a storage (the directories under\n" +
 			".db/permanent): PATH and NAME (as published), CURRENT (the stored name of\n" +
 			"the current version), RECEIVED and EXPIRES (of that version; never without\n" +
 			"an expiry) and ORPHAN when the configuration no longer allocates the name:\n" +
@@ -168,15 +168,12 @@ func (p *pruning) run(storage string, list []store.PermanentInfo, yes bool, in i
 }
 
 // permanentOrphans names, for lukd check, the orphaned permanent names
-// of every local storage whose base can be read (see
+// of every storage whose base can be read (see
 // store.Local.PermanentList); a base that cannot be read is skipped.
 func permanentOrphans(cfg *config.Config) []string {
 	var out []string
 	for _, name := range slices.Sorted(maps.Keys(cfg.Storage)) {
 		st := cfg.Storage[name]
-		if st.Type != "local" {
-			continue
-		}
 		list, err := store.FromConfig(st).PermanentList()
 		if err != nil {
 			continue

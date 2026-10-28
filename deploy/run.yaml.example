@@ -19,7 +19,8 @@
 # config: /etc/site/lukd/config.yaml
 # It also names the paths a unit must not see: its directory, root and,
 # when absolute, auth.nonces, gpg.keys, the TLS and EAB key files, the
-# queues and the storage bases (see the sandbox of a unit in doc/SPEC.md).
+# secret queues and the storage directories (see the sandbox of a unit in
+# doc/SPEC.md).
 
 # Further absolute paths a unit must not see, for data of luk the
 # configuration does not name. Default: none.

@@ -13,7 +13,7 @@ import (
 
 func failureRecord(t *testing.T, root, id string, outcomes ...pipeline.Outcome) string {
 	t.Helper()
-	dir := filepath.Join(root, "data", "q/backup/failed")
+	dir := filepath.Join(root, "data", "queue/backup/failed")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -27,13 +27,13 @@ func failureRecord(t *testing.T, root, id string, outcomes ...pipeline.Outcome) 
 	return p
 }
 
-func TestQueueLs(t *testing.T) {
+func TestFailedLs(t *testing.T) {
 	cfg, root := statusConfig(t)
-	out, err := runLukd(t, "queue", "ls", "-c", cfg)
+	out, err := runLukd(t, "failed", "ls", "-c", cfg)
 	if err != nil || strings.Count(out, "\n") != 1 || !strings.HasPrefix(out, "ID") {
 		t.Fatalf("empty: %q %v", out, err)
 	}
-	if out, err := runLukd(t, "queue", "ls", "--json", "-c", cfg); err != nil || strings.TrimSpace(out) != "[]" {
+	if out, err := runLukd(t, "failed", "ls", "--json", "-c", cfg); err != nil || strings.TrimSpace(out) != "[]" {
 		t.Fatalf("empty json: %q %v", out, err)
 	}
 	at := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
@@ -41,7 +41,7 @@ func TestQueueLs(t *testing.T) {
 		pipeline.Outcome{Pipeline: "archive", State: pipeline.StateFailed, Step: 2, Error: "run /x: exit status 1\x1b[2J\nlast line", At: at, Stored: []string{"archive:a"}},
 		pipeline.Outcome{Pipeline: "copy", State: pipeline.StateOK, At: at, Stored: []string{"archive:copy/db.sql"}},
 		pipeline.Outcome{Pipeline: "extra", State: pipeline.StateNotRun, Error: "not run: archive failed", At: at})
-	out, err = runLukd(t, "queue", "ls", "-c", cfg)
+	out, err = runLukd(t, "failed", "ls", "-c", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestQueueLs(t *testing.T) {
 		!strings.Contains(lines[3], "extra") || !strings.Contains(lines[3], "not_run") || !strings.Contains(lines[3], "not run: archive failed") {
 		t.Fatalf("table:\n%s", out)
 	}
-	out, err = runLukd(t, "queue", "ls", "--json", "-c", cfg)
+	out, err = runLukd(t, "failed", "ls", "--json", "-c", cfg)
 	var got []pipeline.Record
 	if err != nil || json.Unmarshal([]byte(out), &got) != nil || len(got) != 1 || got[0].ID != "id1" ||
 		got[0].Endpoint != "backup" || got[0].Sender != "robert.socha" || len(got[0].Pipelines) != 3 ||
@@ -62,21 +62,21 @@ func TestQueueLs(t *testing.T) {
 		strings.Join(got[0].Pipelines[0].Stored, ",") != "archive:a" || got[0].Pipelines[1].State != "ok" {
 		t.Fatalf("json %q %v", out, err)
 	}
-	if _, err := runLukd(t, "queue", "ls", "extra", "-c", cfg); err == nil {
+	if _, err := runLukd(t, "failed", "ls", "extra", "-c", cfg); err == nil {
 		t.Fatal("positional argument accepted")
 	}
 }
 
-func TestQueueRm(t *testing.T) {
+func TestFailedRm(t *testing.T) {
 	cfg, root := statusConfig(t)
 	p := failureRecord(t, root, "id1", pipeline.Outcome{Pipeline: "archive", State: pipeline.StateFailed, Step: 1, Error: "boom", At: time.Now().UTC().Format(time.RFC3339)})
-	if _, err := runLukd(t, "queue", "rm", "--id", "nope", "-c", cfg); err == nil {
+	if _, err := runLukd(t, "failed", "rm", "--id", "nope", "-c", cfg); err == nil {
 		t.Fatal("unknown id accepted")
 	}
-	if _, err := runLukd(t, "queue", "rm", "-c", cfg); err == nil {
+	if _, err := runLukd(t, "failed", "rm", "-c", cfg); err == nil {
 		t.Fatal("missing --id accepted")
 	}
-	out, err := runLukd(t, "queue", "rm", "--id", "id1", "-c", cfg)
+	out, err := runLukd(t, "failed", "rm", "--id", "id1", "-c", cfg)
 	if err != nil || !strings.Contains(out, "id1") {
 		t.Fatalf("%q %v", out, err)
 	}

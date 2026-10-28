@@ -47,17 +47,15 @@ func completeNames(names []string, toComplete string) ([]cobra.Completion, cobra
 	return out, cobra.ShellCompDirectiveNoFileComp
 }
 
-// completeStorage offers the local storages: lukd storage works on them.
+// completeStorage offers the storages: lukd storage works on them.
 func completeStorage(cmd *cobra.Command, _ []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
 	cfg := completeConfig(cmd)
 	if cfg == nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	var names []string
-	for n, s := range cfg.Storage {
-		if s.Type == "local" {
-			names = append(names, n)
-		}
+	for n := range cfg.Storage {
+		names = append(names, n)
 	}
 	return completeNames(names, toComplete)
 }
@@ -68,7 +66,7 @@ func completeStorage(cmd *cobra.Command, _ []string, toComplete string) ([]cobra
 func completeStored(cmd *cobra.Command, _ []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
 	cfg := completeConfig(cmd)
 	name := cmd.Flag("storage").Value.String()
-	if cfg == nil || cfg.Storage[name] == nil || cfg.Storage[name].Type != "local" {
+	if cfg == nil || cfg.Storage[name] == nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	files, _ := storageFiles(cfg, name, store.FromConfig(cfg.Storage[name]), "", 0, time.Now())

@@ -49,7 +49,7 @@ func (s *syncBuf) String() string {
 func newPair(t *testing.T, cert, key, host string) string {
 	t.Helper()
 	dir := t.TempDir()
-	pin, err := tlsself.Generate(filepath.Join(dir, "c"), filepath.Join(dir, "k"), host, tlsself.ECDSAP256)
+	pin, err := tlsself.Generate(filepath.Join(dir, "c"), filepath.Join(dir, "k"), []string{host}, tlsself.ECDSAP256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,23 +83,23 @@ listen:
   own:
     addr: %s
     host: [a.vm]
-    tls: {mode: self, cert: tls/a.crt, key: tls/a.key, host: a.vm}
+    tls: {mode: self, cert: tls/a.crt, key: tls/a.key}
   ext:
     addr: %s
     host: [f.vm]
     tls: {mode: files, cert: %s, key: %s}
 auth:
-  keys: [{name: robert.socha, key: "%s"}]
+  keys: {robert.socha: "%s"}
 endpoint:
-  up: {listen: [own, ext], endpoint: /up, path: q/up, allow: [robert.socha]}
+  up: {listen: [own, ext], endpoint: /up, allow: [robert.socha]}
 pipeline:
   p: {endpoint: [up], steps: [{run: /bin/true}]}
 `, root, self, files, cert, key, pubLine(newSigner(t).PublicKey()))))
 	if err != nil {
 		t.Fatal(err)
 	}
-	own := cfg.Listen["own"].TLS
-	selfPin, err := tlsself.Generate(own.Cert, own.Key, own.Host, own.Algorithm)
+	own := cfg.Listen["own"]
+	selfPin, err := tlsself.Generate(own.TLS.Cert, own.TLS.Key, own.CertNames(), own.TLS.Algorithm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,11 +162,11 @@ const reloadBase = `
 root: %s
 listen: {main: {addr: "127.0.0.1:0", public: "https://lukd.vm:8443"}}
 endpoint:
-  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [robert.socha], limits: {body: {size: %s}}}
+  backup: {listen: main, endpoint: /backup, allow: [robert.socha], limits: {body: {size: %s}}}
 pipeline:
   archive: {endpoint: [backup], tags: [prod], steps: [{store: archive}]}
 storage:
-  archive: {type: local, base: s/archive, path: "{{ .Id }}"}
+  archive: {directory: s/archive, path: "{{ .Id }}"}
 `
 
 // reloadEnv is a fixture whose configuration comes from files: config.yaml
@@ -300,11 +300,11 @@ func TestReloadAddsEndpoint(t *testing.T) {
 	wantCode(t, "before", e.upload(t, e.user, "/extra", "x"), http.StatusNotFound, "no endpoint")
 	e.write(t, "config.d/extra.yaml", `
 endpoint:
-  extra: {listen: main, endpoint: /extra, path: q/extra, allow: [robert.socha], respond: url, storage: extra}
+  extra: {listen: main, endpoint: /extra, allow: [robert.socha], respond: url, storage: extra}
 pipeline:
   extra: {endpoint: [extra], steps: [{store: extra}]}
 storage:
-  extra: {type: local, base: s/extra, path: "{{ .Random }}", expose: extra}
+  extra: {directory: s/extra, path: "{{ .Random }}", expose: extra}
 expose:
   extra: {listen: main, path: /x/}
 `)
@@ -444,11 +444,11 @@ listen:
     host: [f.vm]
     tls: {mode: files, cert: %s, key: %s}
 endpoint:
-  up: {listen: plain, endpoint: /up, path: q/up, allow: [robert.socha]}
+  up: {listen: plain, endpoint: /up, allow: [robert.socha]}
 pipeline:
   p: {endpoint: [up], steps: [{store: s}]}
 storage:
-  s: {type: local, base: s, path: "{{ .Id }}"}
+  s: {directory: s, path: "{{ .Id }}"}
 `, root, plain, files, cert, key)
 	e := &reloadEnv{dir: dir}
 	e.write(t, "config.yaml", text)
@@ -521,11 +521,11 @@ func TestReloadPrettyBits(t *testing.T) {
 root: %s
 listen: {main: {addr: "127.0.0.1:0", public: "https://lukd.vm:8443"}}
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: drop%s}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha], respond: url, storage: drop%s}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:
-  drop: {type: local, base: s/drop, path: "{{ .Random }}", expose: drop}
+  drop: {directory: s/drop, path: "{{ .Random }}", expose: drop}
 expose:
   drop: {listen: main, path: /d/}
 `
@@ -561,11 +561,11 @@ func TestReloadTTLMax(t *testing.T) {
 root: %s
 listen: {main: {addr: "127.0.0.1:0", public: "https://lukd.vm:8443"}}
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: drop}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha], respond: url, storage: drop}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:
-  drop: {type: local, base: s/drop, path: "{{ .Random }}", expose: drop, ttl: {max: %s}}
+  drop: {directory: s/drop, path: "{{ .Random }}", expose: drop, ttl: {max: %s}}
 expose:
   drop: {listen: main, path: /d/}
 `
@@ -652,7 +652,7 @@ func TestReloadSkewRaiseNoReplay(t *testing.T) {
 	}
 	raise := func(skew time.Duration) {
 		next := *f.srv.config()
-		next.Auth.ClockSkew = config.Duration(skew)
+		next.Auth.Skew = config.Duration(skew)
 		f.srv.apply(&next)
 	}
 	raise(time.Hour)

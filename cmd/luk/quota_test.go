@@ -18,13 +18,13 @@ func TestSendQuota(t *testing.T) {
 	text := fmt.Sprintf(`
 root: %s
 listen: {main: {addr: "%s"}}
-auth: {keys: [{name: robert.socha, key: "%s"}]}
+auth: {keys: {robert.socha: "%s"}}
 endpoint:
-  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [robert.socha], quota: {rate: 1K/1h, burst: 2K}}
+  backup: {listen: main, endpoint: /backup, allow: [robert.socha], quota: {rate: 1K/1h, burst: 2K}}
 pipeline:
   backup: {endpoint: [backup], steps: [{store: s}]}
 storage:
-  s: {type: local, base: s, path: "{{ .Id }}"}
+  s: {directory: s, path: "{{ .Id }}"}
 `, root, addr, pub)
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	startLukd(t, cfgPath, text, addr)

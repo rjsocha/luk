@@ -88,11 +88,11 @@ type listener struct {
 
 func New(cfg *config.Config, log *slog.Logger) *Server {
 	s := &Server{
-		nonces:   auth.NewNonceCache(2 * time.Duration(cfg.Auth.ClockSkew)),
+		nonces:   auth.NewNonceCache(2 * time.Duration(cfg.Auth.Skew)),
 		now:      time.Now,
 		start:    time.Now(),
 		log:      log,
-		queue:    queue.New(int64(cfg.Limits.Queue.Reserve), nil),
+		queue:    queue.New(int64(cfg.Queue.Reserve), nil),
 		accepted: queue.NewAccepted(),
 	}
 	s.queue.SetDirReserves(cfg.SecretReserves())
@@ -132,9 +132,9 @@ func (s *Server) config() *config.Config { return s.cur().cfg }
 // TTL/2 before the reload on are still covered, the older ones are
 // refused.
 func (s *Server) apply(cfg *config.Config) {
-	s.queue.SetReserve(int64(cfg.Limits.Queue.Reserve))
+	s.queue.SetReserve(int64(cfg.Queue.Reserve))
 	s.queue.SetDirReserves(cfg.SecretReserves())
-	ttl := 2 * time.Duration(cfg.Auth.ClockSkew)
+	ttl := 2 * time.Duration(cfg.Auth.Skew)
 	if old := s.nonces.Extend(ttl); ttl > old {
 		if f := s.now().Add(-old / 2).UnixNano(); f > s.floor.Load() {
 			s.floor.Store(f)
@@ -210,7 +210,7 @@ func Match(cfg *config.Config, endpoint string, tags []string) (pipes, skipped [
 		}
 		if all {
 			out = append(out, name)
-			if p.Claim {
+			if p.Exclusive {
 				claim = append(claim, name)
 			}
 		}
@@ -247,12 +247,12 @@ func fail(code int, format string, a ...any) error {
 }
 
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request, sn *snapshot, l *listener) {
-	if l.cfg.ACME {
+	if l.cfg.Entrypoint {
 		if s.acme == nil {
 			http.NotFound(w, r)
 			return
 		}
-		s.acme.serveHTTP(w, r)
+		s.acme.serveHTTP(w, r, l.cfg.Name)
 		return
 	}
 	if isChannel(r) {
@@ -506,8 +506,8 @@ func permanentGate(cfg *config.Config, ep *config.Endpoint, id *wire.Identity, m
 		return fail(http.StatusForbidden, "permanent name %q not allowed for this key", meta.Permanent)
 	}
 	st := cfg.Storage[ep.Storage]
-	if st == nil || st.Type != "local" {
-		return fail(http.StatusUnprocessableEntity, "storage %s of endpoint %s is not a local storage", ep.Storage, ep.Name)
+	if st == nil {
+		return fail(http.StatusUnprocessableEntity, "storage %s of endpoint %s is unknown", ep.Storage, ep.Name)
 	}
 	l := store.FromConfig(st)
 	live, err := l.PermanentNames(ep.Name)
@@ -613,7 +613,7 @@ func directStores(cfg *config.Config, pipes []string, secret string) map[string]
 			}
 			for _, sn := range step.Store {
 				st := cfg.Storage[sn]
-				if st == nil || st.Type != "local" {
+				if st == nil {
 					continue
 				}
 				if l := store.FromConfig(st); l.Hardlink && l.MaxLinks > 0 {
@@ -666,7 +666,7 @@ func storesOnly(cfg *config.Config, pipes []string, secret string) []store.Local
 			}
 			for _, sn := range step.Store {
 				st := cfg.Storage[sn]
-				if st == nil || st.Type != "local" || !store.FromConfig(st).Hardlink {
+				if st == nil || !store.FromConfig(st).Hardlink {
 					return nil
 				}
 				if !seen[sn] {
@@ -816,8 +816,8 @@ func (s *Server) downloadURL(cfg *config.Config, storage string, v store.Vars, a
 	if st == nil {
 		return "", fmt.Errorf("storage %s is not exposed", storage)
 	}
-	if st.Type != "local" || st.PathTemplate() == nil {
-		return "", fmt.Errorf("storage %s is not a local storage", storage)
+	if st.PathTemplate() == nil {
+		return "", fmt.Errorf("storage %s has no path", storage)
 	}
 	rel, err := store.FromConfig(st).Render(st.PathTemplate(), v.For(storage))
 	if err != nil {
@@ -887,7 +887,7 @@ func checkPaths(cfg *config.Config, pipes []string, secret string, v store.Vars,
 		for _, step := range p.Steps {
 			for _, sn := range step.Store {
 				st := cfg.Storage[sn]
-				if seen[sn] || sn == skip || st == nil || st.Type != "local" || st.PathTemplate() == nil {
+				if seen[sn] || sn == skip || st == nil || st.PathTemplate() == nil {
 					continue
 				}
 				seen[sn] = true
@@ -1078,7 +1078,7 @@ func lifetimes(u *upload) map[string]lifetime {
 	}
 	out := make(map[string]lifetime, len(names))
 	for n := range names {
-		if st := u.sn.cfg.Storage[n]; st != nil && st.Type == "local" {
+		if st := u.sn.cfg.Storage[n]; st != nil {
 			out[n] = lifetimeIn(st, u.meta.TTL, u.meta.Tags)
 		}
 	}
@@ -1194,7 +1194,7 @@ func (s *Server) verify(r *http.Request, sn *snapshot, l *listener, now time.Tim
 	if err != nil {
 		return nil, fail(http.StatusUnauthorized, "bad timestamp: %v", err)
 	}
-	if d := now.Sub(t).Abs(); d > time.Duration(sn.cfg.Auth.ClockSkew) {
+	if d := now.Sub(t).Abs(); d > time.Duration(sn.cfg.Auth.Skew) {
 		return nil, fail(http.StatusUnauthorized, "%s", wire.ErrTimestampWindow)
 	}
 	// Without a persisted nonce cache (see auth.nonces) this bounds replay

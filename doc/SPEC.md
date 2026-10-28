@@ -32,9 +32,8 @@ luk --channel--> lukd ingest --> queue --> pipeline(s) --> storage --> expose --
   pipelines inside an endpoint. They never grant access.
 - **pipeline** - a rule (endpoint + tags) and a list of steps. Every
   matching pipeline runs (fan-out).
-- **storage** - where results land (`local`; `s3` is not implemented
-  yet), with the lifetime of
-  the files (TTL, retention). Optionally exposed.
+- **storage** - where results land: a directory of this server, with
+  the lifetime of the files (TTL, retention). Optionally exposed.
 - **expose** - HTTP download of a storage, optional auth, `--once`,
   portal mode; an expose with `auth.ssh` serves the private files of a
   storage to signed requests (see Private files), or, as the `expose` of
@@ -270,7 +269,7 @@ limits:
 - `limits.channel.idle`: a session that has its OP and no upload, without
   a request. The session of an upload follows the time of its upload
   (see Uploads in parts).
-- `limits.uploads.total` and `limits.uploads.identity` (per owner key,
+- `limits.uploads.max` and `limits.uploads.owner.max` (per owner key,
   see Quota): uploads in parts open at once. An upload over either is
   refused at its OP with 429 `too many open uploads` and `Retry-After:
   1`.
@@ -417,10 +416,10 @@ plain key or an OpenSSH certificate (as `ssh-keygen -Y sign` does when a
 lukd takes any part. On the OP of an upload lukd checks, in order:
 
 1. Headers present and well formed; `Luk-Meta` decodes to valid meta.
-2. Timestamp within `auth.clock_skew` (default 1m, max 1h) of the server
+2. Timestamp within `auth.skew` (default 1m, max 1h) of the server
    clock (else 401 `timestamp outside the allowed window`; the answer does
    not name the allowed skew), and not earlier than the server start (to
-   the second). After a reload that raised `auth.clock_skew` beyond what
+   the second). After a reload that raised `auth.skew` beyond what
    the nonce cache remembers (half its TTL, the largest skew in force so
    far), a timestamp is also not earlier than the reload minus that
    half (401 `timestamp before the clock skew was raised`): the older
@@ -447,9 +446,9 @@ lukd takes any part. On the OP of an upload lukd checks, in order:
    refuse the request.
    - Limit: a host reboot empties the tmpfs and with it the cache. A
      request signed with a timestamp in the future (ahead of the server
-     clock, within `auth.clock_skew`) can be replayed after a reboot if
+     clock, within `auth.skew`) can be replayed after a reboot if
      lukd is back before that timestamp: the start-time rule refuses
-     only timestamps before the start. Keeping `auth.clock_skew` short
+     only timestamps before the start. Keeping `auth.skew` short
      keeps that window short. A replay also needs the session of the
      signature (`h`), which a restart drops.
 6. The identity is in the endpoint's `allow`.
@@ -460,7 +459,7 @@ lukd takes any part. On the OP of an upload lukd checks, in order:
 9. The signed `size` fits the quota of the sender on the endpoint, when
    it has one (see Quota).
 10. The queue filesystem has room for the
-   signed `size` plus a reserve (`limits.queue.reserve`, default 1G).
+   signed `size` plus a reserve (`queue.reserve`, default 1G).
    Space is reserved for the upload until it is accepted or dropped, so
    parallel uploads cannot overcommit it.
 
@@ -470,8 +469,8 @@ is taken and the session ends. An upload that passes gets the parts
 offer (see Uploads in parts).
 
 Before step 8, an upload whose signed meta carries `size` and `sha256`
-answers 429 when its sender already holds `links.max` names of that
-content in a storage it goes to (see Storage, `links.max`).
+answers 429 when its sender already holds `hardlink.owner.max` names of
+that content in a storage it goes to (see Storage, `hardlink`).
 
 Authorization is checked once, at the OP, as for a single request: a key
 removed from `allow`, a certificate revoked or expired while its upload
@@ -482,21 +481,22 @@ by the session.
 
 ```yaml
 auth:
-  clock_skew: 1m
+  skew: 1m                       # clock skew of signatures, default 1m, at most 1h
   nonces: /run/luk/nonces        # nonce cache directory (tmpfs), default
-  keys:
-    - name: robert.socha
-      key: "ssh-ed25519 AAAA... Robert Socha"
-  ca:
-    - name: hosts
+  keys:                          # name: key
+    robert.socha: "ssh-ed25519 AAAA... Robert Socha"
+  ca:                            # name: CA
+    hosts:
       type: host                 # host | user
       key: "ssh-rsa AAAA... CA/SSH Number 1"
       revoked:                   # optional
-        key_ids: ["old.host"]
-        serials: [250622104730]
+        key: ["SHA256:3q2+7wMR..."]   # certified keys, as ssh-keygen -l prints them
 ```
 
-Every key (`keys[]`, `ca[]`, `ssh.d/`, `ssh.d/ca/`) must be at least as
+`keys` and `ca` are mappings by name, like `listen` or `storage`: a
+name is defined once, and config.d snippets add entries by name.
+
+Every key (`auth.keys`, `auth.ca`, `ssh.d/`, `ssh.d/ca/`) must be at least as
 strong as OpenSSH accepts by default: a DSA (`ssh-dss`) key or an RSA key
 shorter than 2048 bits is an error (`auth.keys <name>: RSA key of <n>
 bits, at least 2048 required`, `auth.ca <name>: ssh-dss keys are not
@@ -506,19 +506,19 @@ Plain keys can also live in `ssh.d/` next to the main configuration file
 (`/etc/site/lukd/ssh.d/`), one `<name>.pub` file per identity
 (`deploy/ssh.d/robert.socha.pub.example`):
 
-- the file base name is the identity name (same rules as `keys[].name`);
+- the file base name is the identity name (same rules as an `auth.keys` name);
 - each non-empty line not starting with `#` is one public key in
   authorized_keys form, a comment after the key allowed; a line with
   options (`from=`, `cert-authority`, ...) is an error;
 - one identity may hold several keys (one per line), each authenticates
-  as `<name>`; `keys[]` entries keep one `key` each;
+  as `<name>`; `auth.keys` entries keep one key each;
 - certificates and CA keys are an error: CAs are defined in `auth.ca`
   or `ssh.d/ca/` (below);
 - files not ending in `.pub` and dotfiles are ignored; a missing
   directory is fine;
 - the directory and the files must not be writable by group or others
   (like sshd `StrictModes`); otherwise lukd refuses to start;
-- a name defined both in `keys[]` and in `ssh.d/`, or used by a CA, is
+- a name defined both in `auth.keys` and in `ssh.d/`, or used by a CA, is
   an error, as is a key listed under two identities.
 
 CA keys can also live in `ssh.d/ca/`: `ssh.d/ca/host/<name>.pub` is a CA
@@ -526,45 +526,51 @@ of type `host` named `<name>`, `ssh.d/ca/user/<name>.pub` one of type
 `user` (`deploy/ssh.d/ca/host/hosts.pub.example`). `ssh.d/` itself
 is not read recursively: `ca/` never holds plain keys.
 
-- the file base name is the CA name (same rules as `ca[].name`);
+- the file base name is the CA name (same rules as an `auth.ca` name);
 - the file rules of `ssh.d/<name>.pub` apply: one key per line in
   authorized_keys form without options (`cert-authority` included), a
   comment after the key allowed, a certificate is an error, files not
   ending in `.pub` and dotfiles are ignored, a missing directory is fine;
 - several lines are several keys of one CA (rotation): a certificate
-  signed by any of them is a certificate of that CA; `ca[]` entries with
-  `key` keep one key each;
+  signed by any of them is a certificate of that CA; `auth.ca` entries
+  with `key` keep one key each;
 - `ssh.d/ca/` holds only the directories `host/` and `user/`; any other
   entry there is an error;
 - `ssh.d/ca/`, `ssh.d/ca/host/`, `ssh.d/ca/user/` and the files must not
   be writable by group or others;
-- a name used by a `ca[]` entry with `key`, by a file of the other type or
-  by an identity (`keys[]` or `ssh.d/`) is an error naming both sources; a
+- a name used by an `auth.ca` entry with `key`, by a file of the other
+  type or by an identity (`auth.keys` or `ssh.d/`) is an error naming
+  both sources; a
   CA key equal to a key of `ssh.d/` or to another key of a CA of the same
   type is an error.
 
-Revocations stay in YAML: a `ca[]` entry with `name` and `revoked` but
-without `key` applies to the CA file of that name. Its `type` may be left
-out; when given it must match the directory of the file. A `ca[]` entry
+Revocations stay in YAML: an `auth.ca` entry with `revoked` but without
+`key` applies to the CA file of that name. Its `type` may be left out;
+when given it must match the directory of the file. An `auth.ca` entry
 without `key` and without a file of its name is an error.
 
 ```yaml
 auth:
   ca:
-    - name: hosts  # keys in ssh.d/ca/host/hosts.pub
+    hosts:         # keys in ssh.d/ca/host/hosts.pub
       revoked:
-        key_ids: ["old.host"]
-        serials: [250622104730]
+        key: ["SHA256:3q2+7wMR..."]
 ```
+
+`revoked.key` lists certified keys by their SHA256 fingerprint
+(`SHA256:` and 43 characters of base64, as `ssh-keygen -l` prints them):
+every certificate of such a key is refused, whatever its Key ID or
+serial. A compromised host is its key: the host set up again with a new
+key gets a new certificate, under the same Key ID, and is accepted.
 
 `allow`, logs (`server.sender`) and the identity are the same whatever
 the source of the key.
 
-- **Plain key**: must equal a `keys[].key` or a key of `ssh.d/`.
+- **Plain key**: must equal a key of `auth.keys` or of `ssh.d/`.
   Identity: `<name>`.
 - **Certificate**: must be of the CA's `type`, signed by a CA key,
-  within its validity window (`forever` is accepted), not revoked by Key ID
-  or serial. Identity: `<ca name>:<Key ID>`, with the principals kept for
+  within its validity window (`forever` is accepted), its certified key
+  not in `revoked.key`. Identity: `<ca name>:<Key ID>`, with the principals kept for
   matching. A certificate whose key is also listed in `keys` resolves as
   the certificate (the CA path is checked first).
 
@@ -578,7 +584,7 @@ principals will appear with the next distribution cycle (OpenSSH 10
 requires them). A CA signs Key IDs unique per host, as the identity of a
 certificate is its CA and Key ID.
 
-Key names (`keys[].name`, `ssh.d/<name>.pub`) and CA names contain no `:`
+Key names (`auth.keys`, `ssh.d/<name>.pub`) and CA names contain no `:`
 and no `#`, and none is `*`: those mark the forms of an `allow` entry.
 
 ### `allow`
@@ -616,7 +622,7 @@ list of entries in the `allow` syntax (key names, `<ca>:<glob>`,
 | `private.list` | the files of access `any` of others in the link `list` with `any` (`luk link ls --any`), read-only (see Private files) |
 | `secret.allow` | `--secret` uploads into the volatile storage (see Volatile secrets) |
 | `pretty.allow` | `--pretty-url` (see `endpoint.<n>.pretty`) |
-| `backup.hostname.any`, `backup.hostname.principal` | which `backup.hostname` (`--backup`) the signer may send (below) |
+| `origin.any`, `origin.principal` | which origin, the client `backup.hostname` (`--backup`), the signer may send (below) |
 | `permanent.names.<name>.allow` | `--permanent` of the names the entry covers (see Permanent names) |
 
 ```yaml
@@ -654,20 +660,20 @@ endpoint:
 - The lists are evaluated on the configuration current when the request
   arrives; a reload applies to the next request.
 
-`backup.hostname` restricts the client `backup.hostname` (set by
-`--backup`, see Client meta), so `.Hostname` and `.Origin` of a path
-template name the host that sent the upload:
+`origin` restricts the origin an upload claims: the client
+`backup.hostname` (set by `--backup`, see Client meta), which becomes
+`.Hostname` and `.Origin` of a path template and the series of
+`retention` and `watch`, so they name the host that sent the upload:
 
 ```yaml
 endpoint:
   backup:
-    backup:
-      hostname:
-        any: [robert.socha]        # may send any --backup hostname
-        principal: ["hosts:*"]     # only one of the principals of its own certificate
+    origin:
+      any: [robert.socha]        # may send any --backup hostname
+      principal: ["hosts:*"]     # only one of the principals of its own certificate
 ```
 
-- Without `backup.hostname` every identity the endpoint admits sends any
+- Without `origin` every identity the endpoint admits sends any
   hostname.
 - With it, an upload carrying a non-empty `backup.hostname` is accepted
   when the signer matches `any`; else when it matches `principal` and is
@@ -676,12 +682,11 @@ endpoint:
   `backup hostname "<h>" not allowed for this key`. The answer names
   neither list. A signer in both lists is treated as `any`. A plain key
   has no principals, so a plain key matched by `principal` alone never
-  sends a hostname. An empty `backup.hostname: {}` lets no one send one.
+  sends a hostname. An empty `origin: {}` lets no one send one.
 - An upload without `backup.hostname` is not affected.
 - Both lists are checked as `allow` entries, as every capability list;
-  `backup` and `backup.hostname` take no other keys, and a
-  `backup.hostname` that is not a mapping is an error
-  (`backup.hostname: a mapping of any and principal`).
+  `origin` takes no other keys, and an `origin` that is not a mapping is
+  an error (`origin: a mapping of any and principal`).
 
 ## Client meta
 
@@ -745,7 +750,8 @@ it is true is not):
   expires after the storage `ttl.max`.
 - `portal` - always sent: `"direct"` (the default: the bare URL serves the
   content), `"reveal"` (`--secret`: a secret page) or `"download"`
-  (`--portal`: a download page). Any other value, including an empty one,
+  (`--indirect`: a download page; `--secret --indirect` stays
+  `"reveal"`). Any other value, including an empty one,
   is invalid.
 - `pretty_url` - set by `--pretty-url`; asks for a proquint `.Random`
   (see `pretty` under Server configuration). Omitted when false.
@@ -771,7 +777,7 @@ it is true is not):
   For a regular file `path` is its absolute path and `mtime` its
   modification time; for a stream (`--stdin`, `--file` on a pipe) there
   is no `path` and `mtime` is the moment luk starts to send it.
-  An endpoint with `backup.hostname` refuses a hostname the signer may
+  An endpoint with `origin` refuses a hostname the signer may
   not send with 403 before the body (see Capabilities).
 - `permanent` - set by `--permanent`; the upload is a new version of
   that permanent name of the endpoint (see Permanent names). Omitted
@@ -809,11 +815,11 @@ never shown. A replace through the link adds `updated`.
 A pipeline matches an upload when the upload's endpoint is in the
 pipeline's `endpoint` list and the upload carries every tag of the
 pipeline's `tags` (AND; no tags = every upload of that endpoint). All
-matching pipelines run, unless one of them has `claim: true`: then it
-runs alone and no other pipeline gets the upload (for example one that
+matching pipelines run, unless one of them has `exclusive: true`: then
+it runs alone and no other pipeline gets the upload (for example one that
 encrypts, so a catch-all archive never stores the plain file). Two
-matching pipelines with `claim` refuse the upload before the body (422
-`upload claimed by <a> and <b>`). `claim` needs `tags`. The `upload
+matching pipelines with `exclusive` refuse the upload before the body
+(422 `upload claimed by <a> and <b>`). `exclusive` needs `tags`. The `upload
 accepted` and `dry run accepted` log lines of a claimed upload add
 `claimed=<pipeline>` and `skipped=<the other matching pipelines>`. `endpoint` is
 required on every pipeline. A
@@ -1049,7 +1055,7 @@ without its body when the server already holds that content for the
 sender:
 
 - every matched pipeline has only `store` steps (no `run`, not even with
-  `tee`, no `relay`, no `encrypt`), into local storages with `hardlink`
+  `tee`, no `relay`, no `encrypt`), into storages with `hardlink`
   (see Storage);
 - in every storage those steps store into, the object of the sha256
   exists with the signed size and its index lists a stored name whose
@@ -1059,7 +1065,7 @@ sender:
   the content (an upload not stored yet, as the first upload of `luk send
   --links` usually is when the second arrives).
 
-An upload over the `links.max` of a storage is refused with 429 before
+An upload over the `hardlink.owner.max` of a storage is refused with 429 before
 any of this (see Storage).
 
 After every check before the body (verification, matching, limits, the
@@ -1326,7 +1332,7 @@ timestamp, clock skew, server start, nonce cache (shared with uploads),
 3. The link URL is parsed: an URL without a host is 422 (`bad link URL`).
    The scheme (`http`, `https`, `luk`), the port, the query and the
    fragment (a pin) are ignored. Its host and path are matched against
-   the exposes of local storages, the `expose` and the `protect` of each:
+   the exposes of storages, the `expose` and the `protect` of each:
    the host must be served by a listener of the expose (in its `host`
    list, the host of its `public`, or any host for a listener without
    `host`) and the path must start with the expose `path`; the longest
@@ -1524,7 +1530,7 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   covers the name.
 - Upload: `luk send --permanent NAME` sends the client meta `permanent`.
   Before the body the server checks, in order: the upload sets none of
-  `once`, a portal (`--secret`, `--portal`), `access` (`--private`),
+  `once`, a portal (`--secret`, `--indirect`), `access` (`--private`),
   `mutable` and `pretty_url` (422 `permanent excludes <options>`); an
   entry grants the signer (else 422 `endpoint <n> does not offer
   permanent names`, as on an endpoint without `permanent`); the name is
@@ -1537,7 +1543,7 @@ https://drop.example.com/d/permanent/revocation/hosts.krl
   upload of a new name queued meanwhile, a reload): a version the
   endpoint no longer allocates, or one over `max`, fails the store (see
   Failures). `luk send` refuses `--permanent` with
-  `--once`, `--secret`, `--portal`, `--private`, `--mutable`,
+  `--once`, `--secret`, `--indirect`, `--private`, `--mutable`,
   `--pretty-url` or `--links` above 1 itself (usage error).
 - Versions: each upload is an ordinary stored file of the respond
   storage (its path template, a random name, its ttl, its URL); its
@@ -1679,7 +1685,6 @@ endpoint:
 
 storage:
   drop:
-    type: local
     expose: drop                       # the public files
     protect: secure                    # the private files
 
@@ -1709,7 +1714,7 @@ expose:
   It grants no upload; a non-empty list needs `respond: url` and a
   respond storage with `protect` (`endpoint <n>: private.list needs
   respond url`, `... private.list needs storage <s> to have protect`).
-- `storage.<n>.protect` (local storages only): the expose that serves the
+- `storage.<n>.protect`: the expose that serves the
   private files of the storage. That expose must have `auth.ssh` and no
   `auth.basic` (`expose <n>: auth.basic on a protect expose`: a password
   names no owner of private files), must
@@ -1720,8 +1725,12 @@ expose:
   https).
 - `expose.<n>.plain: true`: the expose serves without authentication on
   purpose; it excludes `auth.basic` and `auth.ssh` and silences the
-  `lukd check` warnings for a storage `catalog` and for an `index` on an
-  expose without auth.
+  `lukd check` warnings for a `catalog` and for an `index` on an expose
+  without auth.
+- `expose.<n>.catalog: true`: the expose serves `catalog.json` of its
+  storage (the storage whose `expose` it is; an expose without one is a
+  validation error), every public file with its meta (see Storage and
+  catalog). The storage keeps the catalog only then.
 - `expose.<n>.index: true`: the directory URLs of the expose answer an
   HTML listing (see Expose). It excludes `auth.ssh` alone (that expose
   serves only signed GETs; as a storage `expose` it answers the signed
@@ -1761,7 +1770,8 @@ expose:
   (404), and a protect expose never serves the catalog (the storage
   `expose` with `auth.ssh` does, see Signed expose). Private files are never listed in the
   catalog, never the target of an alias and never deduplicated by
-  `dedup` (their space is shared through `hardlink` like any file's).
+  `conflict.identical` (their space is shared through `hardlink` like any
+  file's).
 - The storage keeps the mode for every copy: a private upload stored into
   other storages too is private there as well (served only by their own
   `protect`, never by their `expose`).
@@ -1855,8 +1865,7 @@ expose is never both.
 ```yaml
 storage:
   backups:
-    type: local
-    base: /storage/backups
+    directory: /storage/backups
     path: "{{ .Sender }}/{{ .Year }}/{{ .File }}"
     expose: vault                      # every file, to signed requests
     # protect: secure                  # private files, as before
@@ -1874,7 +1883,7 @@ expose:
   public URL, as for `protect` (`luk://` URLs mean https); `index`
   without `auth.basic` stays refused (`expose <n>: index excludes
   auth.ssh alone`): the signed listing below is the listing of such an
-  expose. A `catalog` on its storage is served at `<url>catalog.json`
+  expose. Its `catalog` is served at `<url>catalog.json`
   to the identities its `allow` admits (and with `auth.basic` too to
   the unsigned requests it admits), with the answers of a signed file
   request and the headers of the catalog (Phase 4), not logged as a
@@ -1975,7 +1984,7 @@ no-store`), logged as `signed listing` with the sender and the count:
 
 ## Endpoint listing
 
-Every listener (except an `acme: true` one, which redirects it like any
+Every listener (except an acme entrypoint, which redirects it like any
 request) serves `/.well-known/luk/endpoints` through the channel (see
 Channel): a session whose handshake and OP go to that path gets the
 endpoints of that listener the signer may upload to, with what each
@@ -2067,7 +2076,7 @@ Answers (inside the channel; the session ends with them):
 - `permanent` - an entry of `permanent.names` grants the signer: its
   `--permanent` uploads of the names that entry covers are accepted (see
   Permanent names). The names and patterns are never listed.
-- `backup_hostname` - with `backup.hostname` on the endpoint, which
+- `backup_hostname` - with `origin` on the endpoint, which
   `--backup` hostname the signer may send: `any`, `principal` (one of
   the principals of its certificate) or `none`; omitted without the
   block (any hostname).
@@ -2103,8 +2112,7 @@ endpoint:
 
 storage:
   volatile:
-    type: local
-    base: /run/luk/volatile/storage
+    directory: /run/luk/volatile/storage
     path: "{{ .Random }}"
     expose: volatile
     ttl: {user: true}
@@ -2120,15 +2128,14 @@ expose:
 
 - `endpoint.<n>.secret` is optional and needs `respond: url`. `allow`
   (required, see Capabilities) is who may send secret uploads; `path` is
-  the queue directory (relative to `<root>/data` or absolute, like
-  `endpoint.<n>.path`); `storage` a local, exposed storage other than
-  the endpoint `storage`. Without `secret` an endpoint works as before.
+  the queue directory (relative to `<root>/data` or absolute); `storage`
+  an exposed storage other than the endpoint `storage`. Without `secret` an endpoint works as before.
 - A `reveal` upload of a signer `secret.allow` does not grant is refused
   before the body (422 `endpoint <n> does not keep secrets in RAM for
   this key`): a secret meant for RAM never lands on disk by a fallback
   (the endpoint listing shows `secret: false` to that signer).
 - A `reveal` upload of a granted signer is received into `secret.path`,
-  never into the endpoint `path`, and is stored into `secret.storage`
+  never into the endpoint queue, and is stored into `secret.storage`
   only: no pipeline of the endpoint runs for it (no `run`, no `encrypt`,
   no store into other storages) and its tags select nothing; it needs no
   matching pipeline. The answered URL is on the expose of the secret
@@ -2148,19 +2155,19 @@ expose:
   configured pipeline name never starts with a dot): one store step into
   the secret storage. A failed store deletes the secret like any failed
   upload (see Failures): nothing of it stays, the failure record goes to
-  `failed/` of the secret queue, shown by `lukd queue ls` and counted in
+  `failed/` of the secret queue, shown by `lukd failed ls` and counted in
   `status.json` under that name; the sender sends the secret again.
 - Space: the queue reservation works per filesystem as for any queue
   (the tmpfs is a filesystem of its own), but the free space kept on the
   filesystem of `secret.path` is `secret.reserve` (a size, default
-  `16M`), not `limits.queue.reserve`, which still applies to the other
+  `16M`), not `queue.reserve`, which still applies to the other
   queues: a `/run` with less free space than the general reserve takes
   secrets as long as it keeps `secret.reserve` free (507 below it).
   Endpoints sharing a secret queue keep the largest of their reserves.
 - In RAM: the queue entry (payload and `meta.json`) and the stored file
   with its sidecar, the content objects of `hardlink` and the claimed copy
-  of a `once` download. The volatile base has the layout of any local
-  base (`file/` and `.db/`, see Layout under Storage). On disk: nothing of the content. The log line of
+  of a `once` download. The volatile storage directory has the layout of
+  any storage (`file/` and `.db/`, see Layout under Storage). On disk: nothing of the content. The log line of
   a secret upload carries `sha256=-` instead of the hash, and the 422
   for a body that differs from the signed one names only the size, in
   the answer and in the log; the URL is
@@ -2186,10 +2193,10 @@ expose:
   elsewhere need a drop-in like any directory outside `/var/lib/luk`.
 - Validation: `secret` needs `respond: url`; `secret.allow` is required
   and checked as `allow` entries; `secret.path` is required
-  and lies outside every local storage base, every endpoint queue
-  (`path`), every other secret queue (an equal one is shared) and the
-  work directory; `secret.storage` is a known local storage with an
-  `expose`, other than `storage`.
+  and lies outside every storage directory, every endpoint queue, every
+  other secret queue (an equal one is shared) and the work directory;
+  `secret.storage` is a known storage with an `expose`, other than
+  `storage`.
 
 ## Server configuration
 
@@ -2217,12 +2224,10 @@ in `.yaml` and dotfiles are ignored; a missing directory is fine. The
 files are read in lexical order, but the result does not depend on it:
 
 - named entries merge by name: `listen`, `endpoint`, `pipeline`,
-  `storage`, `expose` and the lists `auth.keys` and `auth.ca` (by
-  `name`). An entry is defined whole in one file; the same name in two
+  `storage`, `expose`, `auth.keys` and `auth.ca`. An entry is defined whole in one file; the same name in two
   files (`config.yaml` or snippets) is an error naming both files;
-- every other value (`root`, each `limits.*` leaf, `auth.clock_skew`,
-  `auth.nonces`,
-  `gpg.*`, `log.level`) is set in one file only; a second definition is an error
+- every other value (`root`, each `limits.*` leaf, `queue.reserve`,
+  `failed.ttl`, `auth.skew`, `auth.nonces`, `gpg.*`, `log.level`) is set in one file only; a second definition is an error
   naming both files. Different leaves of one section may come from
   different files (`limits.conn.max` in one, `limits.header.timeout` in
   another);
@@ -2245,10 +2250,9 @@ listen:                               # see Listeners
     addr: 0.0.0.0:8443
     host: [lukd.vm]
     tls:
-      mode: self                      # self, files or acme
+      mode: self                      # self, files or acme; self: the certificate names are host
       cert: tls/tls.crt
       key: tls/tls.key
-      host: lukd.vm                   # CN/SAN of the self-signed cert
   proxied:
     addr: 127.0.0.1:8080              # plain HTTP behind a proxy
     host: [drop.example.com]
@@ -2260,15 +2264,20 @@ limits:                               # connection level, all listeners; optiona
     idle: 60s                         # keep-alive idle time; a response the client stops reading
   header:
     timeout: 10s                      # reading request headers, including the TLS handshake
-  failed:
-    age: 3d                           # failure records are removed after it; 0 keeps them
   channel:                            # the channel sessions (see Sessions and limits)
     auth: 60s                         # from the handshake to the signed operation
     pending: 1024                     # sessions without their operation; the oldest goes first
     idle: 2m                          # a session after its operation, unless it is an upload
   uploads:
-    total: 256                        # uploads in parts open at once
-    identity: 8                       # per identity
+    max: 256                          # uploads in parts open at once
+    owner:
+      max: 8                          # per owner (key, or CA + Key ID)
+
+queue:                                # every upload queue; optional, the default shown
+  reserve: 1G                         # free space kept on the queue filesystem
+
+failed:                               # failure records (lukd failed); optional, the default shown
+  ttl: 3d                             # a record is removed after it; 0 keeps it
 
 log:
   level: info                         # debug, info (the default), warn or error; both roles, live on reload
@@ -2278,14 +2287,12 @@ auth: {...}                           # see Identities
 endpoint:
   backup:
     listen: intake
-    endpoint: /backup
-    path: queue/backup
+    endpoint: /backup                 # the queue is <root>/data/queue/backup, after the name
     allow: [robert.socha, "hosts:*"]
     respond: accept
-    backup:                           # optional: who may send which --backup hostname (see Capabilities)
-      hostname:
-        any: [robert.socha]
-        principal: ["hosts:*"]
+    origin:                           # optional: who may send which origin, --backup HOSTNAME (see Capabilities)
+      any: [robert.socha]
+      principal: ["hosts:*"]
     limits:                           # request level, per endpoint; optional
       body:
         size: 50G                     # max upload size, 413 above it; 0 or absent = unlimited
@@ -2297,7 +2304,6 @@ endpoint:
   drop:
     listen: intake
     endpoint: /drop
-    path: queue/drop
     allow: [robert.socha]
     respond: url
     storage: drop
@@ -2350,24 +2356,21 @@ pipeline:
       - store: drop
 
 tag:                                  # optional: the lifetime of the uploads carrying a tag
-  ttl-3d: {ttl: 3d}                   # in every local storage (see ttl.tag in Storage)
+  ttl-3d: {ttl: 3d}                   # in every storage (see ttl.tag in Storage)
   ttl-7d: {ttl: 7d}
 
 storage:
   archive:
-    type: local
-    base: storage/archive
+    directory: storage/archive
     path: "{{ .Sender }}/{{ .Year }}/{{ .Month }}/{{ .Day }}/{{ .File }}"
   publish:
-    type: local
-    base: storage/publish
+    directory: storage/publish
     path: "{{ .File }}"
     expose: publish
     cleanup:
       age: 14d
   drop:
-    type: local
-    base: storage/drop
+    directory: storage/drop
     path: "{{ .Random }}"
     expose: drop
     ttl:
@@ -2410,9 +2413,11 @@ URLs"). A reload applies to new uploads.
 
 `root` is an absolute path (default `/var/lib/luk`) on btrfs, owned by
 root, with two entries: `<root>/data`, everything lukd writes, and
-`<root>/root`, root's (see Service, State). Relative `tls.cert`,
-`tls.key`, `endpoint.<n>.path` and `storage.<n>.base` are resolved against
-`<root>/data`; absolute values are used as given. A relative value that
+`<root>/root`, root's (see Service, State). The queue of an endpoint is
+`<root>/data/queue/<endpoint>`, after its name (so an endpoint name is
+of `[A-Za-z0-9_.-]`, not starting with a dot or a dash). Relative
+`tls.cert`, `tls.key`, `tls.acme.eab.file`, `secret.path` and
+`storage.<n>.directory` are resolved against `<root>/data`; absolute values are used as given. A relative value that
 leaves `<root>/data` (for example `../x`) is a validation error.
 
 Durations accept Go syntax plus `d` (days). Sizes accept `K`, `M`, `G`,
@@ -2431,31 +2436,30 @@ and `ssh.d/ca/`):
   every class, `members` as `allow` entries, and no plain key in two
   classes with members (see Quota);
 - every pipeline has a non-empty `endpoint` list of known endpoints;
-- every `store` names a known storage that is not an `s3` storage (not
-  implemented yet), every `storage.expose` a known expose;
-- `storage.<n>.ttl` and `storage.<n>.cleanup.age` need a local storage;
-  `ttl.min`, `ttl.max` and `cleanup.age` are not negative; `ttl.min`
+- every `store` names a known storage, every `storage.expose` a known
+  expose;
+- `storage.<n>.directory` and `path` are required; `conflict.mode` is
+  `version`, `reject` or `replace`, `conflict.identical` `skip` or
+  `store` and only with mode `version`; `hardlink` is `true`, `false` or
+  a mapping of `owner.max` (at least 1);
+- `ttl.min`, `ttl.max` and `cleanup.age` are not negative; `ttl.min`
   needs `ttl.user: true` and is at most `ttl.max` when both are set;
   every `tag.<name>` has a positive `ttl` (`tag <name>: ttl must be
   positive`) and a name an upload tag may have (`tag "<name>": invalid
   name (allowed: a-z 0-9 . _ -)`); `storage.<n>.ttl.tag.<name>` likewise
   (`storage <n>: ttl.tag.<name> must be positive`, `storage <n>: ttl.tag
-  "<name>": invalid name (allowed: a-z 0-9 . _ -)`), it needs a local
-  storage and its tag needs no `tag` entry;
-  `ttl` or `cleanup` under an expose is an
-  error naming the new place (`expose <n>: ttl moved to
-  storage.<storage>.ttl.max`, `cleanup moved to
-  storage.<storage>.cleanup.age`);
-- `storage.<n>.retention` needs a local storage and `conflict` `version`
-  or `reject` (`storage <n>: retention needs conflict version or reject,
-  not replace`: a replace overwrites a stored path at once and bypasses
+  "<name>": invalid name (allowed: a-z 0-9 . _ -)`), and its tag needs no
+  `tag` entry;
+- `storage.<n>.retention` needs `conflict.mode` `version` or `reject`
+  (`storage <n>: retention needs conflict.mode version or reject, not
+  replace`: a replace overwrites a stored path at once and bypasses
   retention); every `origin` glob is
   non-empty and valid for path.Match; the `keep` counts and `keep.within`
   are not negative and at least one count or `within` is above 0; a rule
   without `origin` (every origin) is
   the last (`storage <n>: retention rule <i> matches every origin and
   must be the last: the rules after it are unreachable`);
-- `storage.<n>.watch` needs a local storage; every `origin` and `file`
+- in `storage.<n>.watch` every `origin` and `file`
   glob is non-empty and valid for path.Match; `every` is above 0,
   `size.min`, `size.max` and `size.step` are above 0, `size.min` is at
   most `size.max`, `same` is at least 2, and a rule has at least one
@@ -2466,33 +2470,32 @@ and `ssh.d/ca/`):
 - a storage with `shard` is not the `expose` of an expose with `index`;
 - the capability lists (`link.remove`, `link.ttl`, `link.replace`,
   `link.list`, `private.owner`, `private.any`, `private.list`, `secret.allow`,
-  `pretty.allow`, `backup.hostname.any`, `backup.hostname.principal`) are lists whose entries are those of an endpoint
+  `pretty.allow`, `origin.any`, `origin.principal`) are lists whose entries are those of an endpoint
   `allow` (known key names and CAs, valid globs); a boolean or other
   scalar is an error naming the key; `secret.allow` and `pretty.allow`
   are required in their blocks (see Capabilities);
 - a non-empty `link.*` list requires `respond: url`;
-- `secret` requires `respond: url` and a local exposed `secret.storage`
+- `secret` requires `respond: url` and an exposed `secret.storage`
   other than `storage`; `secret.path` overlaps no base, queue or the
   work directory; `secret.reserve` is not negative (see Volatile
   secrets);
-- an endpoint `path` is equal to or apart from every other endpoint
-  `path` (never nested in it), and no queue directory (`path`,
-  `secret.path`) overlaps `<root>/data/acme`, `<root>/data/gpg-cache`,
+- no queue directory (an endpoint queue, `secret.path`) overlaps a
+  storage directory, `<root>/data/acme`, `<root>/data/gpg-cache`,
   `auth.nonces` or the work directory, or holds a `tls.cert` or
   `tls.key`;
 - a non-empty `private.*` list requires `respond: url` and a respond
   storage with `protect`;
   `protect` names an expose with `auth.ssh` other than the storage
-  `expose`, on a local storage; every expose with `auth.ssh` that serves
+  `expose`; every expose with `auth.ssh` that serves
   a storage (as `protect` or as `expose`) has a first listener with an
   `https` public URL;
   a `protect` expose has no `auth.basic`; `index` needs `auth.basic`
   beside `auth.ssh`; `auth.ssh.allow` entries are those of an endpoint
   `allow`;
-- `permanent` requires `respond: url` and a local respond storage with
+- `permanent` requires `respond: url` and a respond storage with
   an `expose` without `auth.ssh`; `permanent.path` (default `permanent`)
   is a permanent name without wildcards, does not overlap a nested
-  expose of that expose nor, with `catalog`, `catalog.json`, and differs
+  expose of that expose nor, with its `catalog`, `catalog.json`, and differs
   from the `permanent.path` of every other endpoint storing into the
   same storage without nesting in it; `names` is not empty; every key
   is a valid name or pattern; every entry has `allow` (an identity list,
@@ -2519,15 +2522,15 @@ and `ssh.d/ca/`):
   reserved`);
 - `root` lies on btrfs (`statfs`, `BTRFS_SUPER_MAGIC`; `root <root>: not
   a btrfs filesystem`), and no path of the configuration (a queue, a
-  storage base, a TLS file, `auth.nonces`, `gpg.keys`) lies in
+  storage directory, a TLS file, `auth.nonces`, `gpg.keys`) lies in
   `<root>/root`, root's part of the root with the workspaces of lukd run
   (`<key>: <path> lies in <root>/root`); see Service, State;
 - `queue.concurrency` and `timeout` are not negative, `queue.order` is
   not negative and needs `queue.group`, `queue.group` does not start
-  with a dot or contain a slash; the pipeline key `concurrency` is an
-  error (`concurrency moved to queue.concurrency`);
-- a step is exactly one of `run`, `store`, `encrypt`, `relay`; encrypt recipients
-  are valid, unique addresses and `key` recipients need `gpg.keys`;
+  with a dot or contain a slash; `exclusive` needs `tags`;
+- a step is exactly one of `run`, `store`, `encrypt`, `relay`; encrypt
+  recipients are valid, unique addresses and `recipients.keys` need
+  `gpg.keys`;
   `encrypt.insecure` sets `symmetric` or `openssl` (or both), password
   names follow the rule of a job name (`[a-z0-9][a-z0-9._-]*`, at most
   64 bytes) and appear once in `symmetric`, `openssl` needs `key` and a
@@ -2549,13 +2552,13 @@ is kept and reloads once the role runs, never ends the process.
 - Invalid configuration: the errors are logged (`reload failed, keeping
   the current configuration`) and lukd keeps running on the current one.
 - Restart-only settings: `root`, everything under `listen` (`addr`,
-  `host`, `tls`, `public`, `acme`), `limits.conn.max`, `limits.conn.idle` and
+  `host`, `tls`, `public`, being an acme entrypoint), `limits.conn.max`, `limits.conn.idle` and
   `limits.header.timeout` (they belong to the open sockets and their HTTP
   server), and `auth.nonces` (the open nonce cache file). When one of them differs, the whole reload is refused (`reload
   refused: <setting> changed, restart required`) and nothing else of the
   new configuration is applied either; a restart applies it. The process
   role refuses the same changes, as both roles share the configuration.
-- New queue and local storage directories are created as at start; one
+- New queue and storage directories are created as at start; one
   that cannot be prepared fails the reload like an invalid configuration.
 - The passwords of the encrypt steps are read on every run of the step
   (see Encryption), so a changed password file needs no reload; a reload
@@ -2603,7 +2606,7 @@ In-flight work keeps the configuration it started with:
   the same way.
 - Queue entries of an endpoint removed by a reload are still picked up
   by the running process (its queue directory stays watched until the
-  next restart). Their failure records are listed by `lukd queue`,
+  next restart). Their failure records are listed by `lukd failed`,
   counted in the status and expired only while an endpoint uses that
   queue directory.
 - `queue.concurrency` of a pipeline: a new limit applies to the
@@ -2617,9 +2620,9 @@ In-flight work keeps the configuration it started with:
   are not part of the configuration (see Quota).
 - State survives a reload: the channel sessions and the open uploads in
   parts, the quota buckets, the nonce cache (its window only grows when
-  `auth.clock_skew` changes, so a nonce seen under the longer skew is
+  `auth.skew` changes, so a nonce seen under the longer skew is
   still refused; a raised skew does not reach back past what the cache
-  remembers, see Server verification), queue space reservations (`limits.queue.reserve`
+  remembers, see Server verification), queue space reservations (`queue.reserve`
   applies to new reservations), failed counts and `status.json`, running
   pipelines and their claims, once claims and the locks of the storages
   and catalogs.
@@ -2670,7 +2673,7 @@ check` also checks that the service user (`--user`, default `luk`) can
 read every configuration input: `config.yaml`, `config.d/` and its
 `*.yaml`, `ssh.d/` with `ssh.d/ca/{,host/,user/}` and their files,
 `identity.key` (unless `--no-identity`), the
-`cert` and `key` of `self` and `files` listeners, the `eab.key_file` of
+`cert` and `key` of `self` and `files` listeners, the `acme.eab.file` of
 acme listeners, `gpg.keys` with its key files, and the password files of
 the encrypt steps (unless `--no-passwords`). Each file needs read
 permission, each listed directory read and search, and every directory
@@ -2684,9 +2687,9 @@ as any other user the check is skipped: the role units run `lukd check` as
 Run as root, `lukd check` never opens a file of the service user, which
 could put a FIFO, a symlink or an endless file there: the part that
 reads them (the running files and locks of the roles, the layouts of the
-local storage bases and their orphaned permanent names) runs again as
+storage directories and their orphaned permanent names) runs again as
 the owner of `<root>/data` (the service user; `<root>` itself is
-root's) with its groups (as `lukd queue` and `lukd storage` do; neither
+root's) with its groups (as `lukd failed` and `lukd storage` do; neither
 `root` nor `<root>/data` may be a symlink), with the same flags, and
 its output and failure join root's own. A missing `root` or
 `<root>/data` holds none of them: root then does that part itself. `lukd.service` bounds its reload with
@@ -2831,7 +2834,7 @@ the upload again, a new upload with its own id and acceptance order.
 - An interrupted pipeline (shutdown) is no result: the entry stays in
   the queue with the results so far and the pipeline runs again from its
   first step at the next start.
-- `lukd queue ls / rm`, `limits.failed.age`, the `failed` counts of
+- `lukd failed ls / rm`, `failed.ttl`, the `failed` counts of
   `status.json` and monitoring work on the records (see Phase 5).
 
 ### Acceptance order
@@ -2899,7 +2902,7 @@ store step, however late it finishes:
   at the store step.
 - A store run again for the upload that holds the name (the same id, after
   an interruption) is never older.
-- A deduplicated store (`dedup`, see Storage and catalog) of an upload
+- A deduplicated store (`conflict.identical`, see Storage and catalog) of an upload
   newer than the kept file gives the kept file (`<name>`) the acceptance
   order of that upload: it holds the content of the newest upload, so an
   upload accepted in between that finishes later goes to the versions.
@@ -3247,7 +3250,7 @@ read. A step is exactly one of `run`, `store`, `encrypt` or `relay`.
 
 ```yaml
 gpg:
-  keys: /etc/site/lukd/gpg.d           # the default (gpg.d next to config.yaml); *.asc, *.gpg, *.pgp, *.key public keys of `key` recipients
+  keys: /etc/site/lukd/gpg.d           # the default (gpg.d next to config.yaml); *.asc, *.gpg, *.pgp, *.key public keys of `recipients.keys`
   wkd:
     cache: 1d                         # WKD keys are refetched after it (default 1d)
 
@@ -3256,17 +3259,20 @@ pipeline:
     endpoint: [backup]
     steps:
       - encrypt:
-          wkd: [robert@example.net, marek@example.net]
-          key: [matt@example.com]
+          recipients:
+            keys: [matt@example.com]                       # keys from gpg.keys
+            wkd: [robert@example.net, marek@example.net]   # keys from the Web Key Directory
           strict: false               # optional, default false
       - store: archive
 ```
 
-- Recipients: `encrypt.wkd` and `encrypt.key` are lists (or one value) of
-  bare e-mail addresses, compared in lowercase. At least one recipient;
-  an address may appear once, in one list only. `key` needs `gpg.keys`,
-  an absolute path.
-- `key` recipients: every `*.asc`, `*.gpg`, `*.pgp` and `*.key` file of
+- Recipients: `encrypt.recipients.keys` and `encrypt.recipients.wkd`
+  are lists (or one value) of bare e-mail addresses, compared in
+  lowercase; the list says where the key comes from, so a missing local
+  key never falls back to the network. At least one recipient; an
+  address may appear once, in one list only. `keys` needs `gpg.keys`, an
+  absolute path.
+- `keys` recipients: every `*.asc`, `*.gpg`, `*.pgp` and `*.key` file of
   `gpg.keys` (by default `gpg.d/` next to the main file, like `ssh.d/`;
   a missing directory holds no keys) is parsed (armored or binary whatever the extension, one or
   more keys per file; other files are ignored; an unreadable file is logged and skipped)
@@ -3319,7 +3325,7 @@ purpose.
 
 ```yaml
       - encrypt:
-          key: [backup@example.com]
+          recipients: {keys: [backup@example.com]}
           insecure:
             symmetric: [receiver-a]          # passwords that also decrypt the .gpg files
             openssl:
@@ -3376,7 +3382,9 @@ purpose.
 
 ## Storage and catalog
 
-- `local` - files under `base`, path from the required `path` template
+- `directory` (required) - the directory of the storage, its base in
+  what follows (a relative one lies under `<root>/data`). The stored
+  files lie under it, at the path of the required `path` template
   (Go text/template): `.Sender`, `.Endpoint`, `.Year`, `.Month`, `.Day`, `.Hour`,
   `.Minute`, `.Seconds` (the receive time in UTC, zero-padded: `2026`,
   `10`, `03`, `14`, `05`, `09`; one moment for every store of an upload),
@@ -3384,7 +3392,7 @@ purpose.
   `.File` (the client `file`, or the id when empty), `.Tags` (joined with `-`),
   `.Hostname` (the client `backup.hostname`, set by `--backup`; empty
   without it) and `.Origin` (`.Hostname` when set, else `.Sender`).
-  Without `backup.hostname` on the endpoint the hostname is only what
+  Without `origin` on the endpoint the hostname is only what
   the signer asserts. With it (see Capabilities) a signer of `principal`
   sends only a principal of its own certificate, so `.Hostname` and
   `.Origin` are trustworthy: the host the CA certified, or the sender.
@@ -3446,7 +3454,7 @@ purpose.
   ```
 
   Policy tags: the top-level `tag` section gives a tag a ttl, `tag.<name>:
-  {ttl: DURATION}`, valid in every local storage; `ttl.tag.<name>` of a
+  {ttl: DURATION}`, valid in every storage; `ttl.tag.<name>` of a
   storage replaces it there. The names are ordinary upload tags
   (`[a-z0-9._-]+`) and nothing is derived from a name. An upload carrying
   such a tag is bounded by the tag ttl in place of `ttl.max`: the highest
@@ -3484,8 +3492,7 @@ purpose.
   ```yaml
   storage:
     archive:
-      type: local
-      base: storage/archive
+      directory: storage/archive
       path: "{{ .Origin }}/{{ .Year }}/{{ .Month }}/{{ .Day }}/{{ .File }}"
       retention:
         - origin: ["db1-prod", "*-prod"]          # globs (path.Match) on the origin
@@ -3523,7 +3530,7 @@ purpose.
     or more and a rule has at least one count or `within` above 0.
     Without `within` the selection depends on the files and the rules
     only, not on the current time.
-  - A storage with `retention` stores with `conflict: version` (the
+  - A storage with `retention` stores with `conflict: {mode: version}` (the
     default) or `reject`; `replace` is refused, since it overwrites a
     stored path at once and so bypasses retention.
   - Retention works next to `ttl` and `cleanup.age`: a file goes when any
@@ -3555,7 +3562,7 @@ purpose.
   - `retention` keeps it without counting it (see `retention`);
   - `lukd storage rm` and the link actions `remove` and `replace` refuse
     it;
-  - a store with `conflict: replace` over its name fails (`<name>: on
+  - a store with `conflict: {mode: replace}` over its name fails (`<name>: on
     hold`, the upload fails as any failed store); with `conflict:
     version` the file becomes a version as usual and stays on hold under
     the version name;
@@ -3616,25 +3623,21 @@ purpose.
     a file into a storage with `watch`, and writes the result to the
     `watch` section of `status.json` (see Status); `lukd status` shows
     it, the checkmk check makes a service of each record.
-  - With `dedup` (see below) an upload identical to the newest version
+  - With `conflict.identical: skip` (see below) an upload identical to the newest version
     of its path places no new copy, so `every` keeps counting from the
     stored one and `same` sees no repeat; with a path per upload (a
     date or `.Id` in `path`) every upload is a copy of its own.
   - `lukd storage watch` shows the evaluation and, with `--suggest`,
     values observed on recent copies as hints for the thresholds.
-- The janitor covers every local storage, exposed or not: the expiry
+- The janitor covers every storage, exposed or not: the expiry
   pass (expired files, `cleanup.age`, stale claimed files, every minute)
   runs in the receive role, the maintenance (retention, aliases, catalog,
   content objects, crash leftovers, empty directories) in the process
   role (see Service).
-- `protect` (local only) - the expose with `auth.ssh` that serves the
+- `protect` - the expose with `auth.ssh` that serves the
   private files of the storage (see Private files). The `expose` itself
   may have `auth.ssh` too (see Signed expose).
-- `s3` - bucket + prefix template. Not implemented yet: the type is
-  accepted, but a `store` step to an s3 storage is a config error
-  (`pipeline <p>: step <n>: storage <s>: s3 storage is not implemented
-  yet`).
-- Layout: a local `base` holds two directories and nothing else:
+- Layout: a base holds two directories and nothing else:
 
   ```
   <base>/file/            the stored files, under their stored names (and nothing else)
@@ -3672,11 +3675,11 @@ purpose.
   empty real directories go (rmdir, never a symlink). The periodic
   maintenance prunes any other empty directory of both trees bottom-up,
   dot names included; the other directories of `.db/` stay.
-- A local `base` is one filesystem (no mount points inside, `file/` and
+- A base is one filesystem (no mount points inside, `file/` and
   `.db/` included) and one lukd process owns it. Bases never overlap each other, an endpoint queue or
   a secret queue
   path; the config check refuses that.
-- `shard: N` (0-4, default 0) spreads a local storage over N levels of
+- `shard: N` (0-4, default 0) spreads a storage over N levels of
   directories named by the first hex pairs of sha256 of the stored name
   (`ab/cd/<name>` for N = 2). It is transparent: names in URLs, the
   catalog and aliases stay the stored names; only the files on disk are
@@ -3695,7 +3698,8 @@ purpose.
   and expose never serves anything under `.db/`. A drop stores the blob
   as `<base>/file/<random>`; two uploads with the same `--name` get two
   independent random names.
-- `conflict` - what a write does when the target path exists:
+- `conflict` - a mapping, `{mode: replace}`, of what a write does when
+  the target path exists. `conflict.mode`:
   `version` (default; keep both: `<name>` holds the content of the
   newest upload by acceptance order, and the previous content is renamed
   to `<name>.<unix ts>`,
@@ -3720,8 +3724,8 @@ purpose.
   filesystem. An alias on the old version is re-evaluated (the newest
   declarer by acceptance order keeps it, as always), and the catalog, rebuilt
   once per store, lists every version.
-- `dedup` (default `true`, only with `conflict: version`) - when the
-  target path exists, it (the bare name, always the newest version) is
+- `conflict.identical` (only with mode `version`): `skip` (default) or
+  `store`. With `skip`, when the target path exists, it (the bare name, always the newest version) is
   compared by size and sha256 from its sidecar with the incoming file (no
   re-hashing).
   When they match nothing is placed: the store keeps the existing file,
@@ -3732,9 +3736,10 @@ purpose.
   counts as a success. Only the newest version is compared, so A, B, A
   keeps three files (`<name>` is A, with two dated versions). Once, portal and expiring files are never shared.
   Dedup happens only at store time: the upload is received and the
-  pipeline runs as usual. `dedup: false` always adds a version.
-- `hardlink` (default `true`, local only) - one copy of each content on
-  disk. The storage keeps content objects in `<base>/.db/objects/`,
+  pipeline runs as usual. `identical: store` always adds a version.
+- `hardlink` (default on) - one copy of each content on disk: `false`
+  turns it off, a mapping (`{owner: {max: 50}}`) keeps it on and sets
+  `owner.max` (below). The storage keeps content objects in `<base>/.db/objects/`,
   outside the data tree (no stored name can collide with it):
   `ab/cd/<sha256>` is a hardlink of the stored
   files with that content (`ab` and `cd` the first hex pairs of the
@@ -3742,14 +3747,14 @@ purpose.
   holding it, each with its `owner_key` and the id of its upload
   (`{"size", "names": {"<stored name>": "<owner_key>"}, "ids": {"<stored
   name>": "<upload id>"}}`, for the transfer dedup, see Transfer dedup,
-  and `links.max`).
+  and `hardlink.owner.max`).
   - Store: when the object of the file's sha256 exists (a regular file of
     the file's size), the new name is a hardlink of it (linked to a
     temporary name, then placed by the rules of `conflict` like any store)
     instead of the data; otherwise the data is stored as before and then
     linked as the object. Sidecars stay per name: expiry, `once`, owner,
     `access`, portal and file name of each upload are its own. Unlike
-    `dedup`, every upload keeps its own name and sidecar: the space is
+    `conflict.identical`, every upload keeps its own name and sidecar: the space is
     shared, the names are not.
   - Removal of a name (expiry, `cleanup.age`, `retention`, `lukd storage rm`, `luk link
     --rm`, the end of a `once` claim) only unlinks that name and drops it
@@ -3777,9 +3782,11 @@ purpose.
     a shared inode is invisible to downloads.
   - `hardlink: false` stores separate files; the maintenance removes
     `.db/objects/` of that storage.
-- `links.max` (default 100, `0` is the default, at least 1; local only) -
-  the most stored names holding one content (sha256) that one identity
-  (`owner_key`) may have in the storage. The count is the names of that
+- `hardlink.owner.max` (default 100, `0` is the default, at least 1) -
+  the most stored names holding one content (sha256) that one owner
+  (`owner_key`) may have in the storage. It bounds names that cost the
+  sender nothing: with the transfer dedup a name of known content is
+  stored without its body. The count is the names of that
   owner in the index of the object (see `hardlink`) plus the committed
   queue entries of that owner with that content in the queue the upload
   goes to whose upload id the index does not list yet, so a burst of
@@ -3798,7 +3805,7 @@ purpose.
   - At store, for content whose hash was not known up front (a stream):
     a store step that would add one name more fails for that storage with
     the same message, like any store failure (see Failures). A replace through the link into that content counts too; a
-    store over the same name without versions (`conflict: replace`) does
+    store over the same name without versions (`conflict: {mode: replace}`) does
     not add one.
   - Only storages with `hardlink` keep the index and enforce the limit;
     with `hardlink: false` it is not enforced.
@@ -3815,14 +3822,13 @@ purpose.
 
 ### `lukd storage`
 
-Admin commands on the files of a local storage, read from their sidecars
-(an `s3` storage is refused: `storage <n> is not a local storage (s3)`).
+Admin commands on the files of a storage, read from their sidecars.
 They read the config given by `-c` and work on files, without the daemon
 or while it runs. The files must stay owned by the service user, so they
-run as the owner of the storage `base`: as root they run again as that
-owner, as `lukd queue` does for `root`; any other user gets `lukd storage
-must run as root or as <owner> (owner of <base>)`. A `base` that is a
-symlink is refused (`lukd storage: <base> is a symlink`).
+run as the owner of the storage `directory`: as root they run again as that
+owner, as `lukd failed` does for `root`; any other user gets `lukd storage
+must run as root or as <owner> (owner of <base>)`. A `directory` that is
+a symlink is refused (`lukd storage: <base> is a symlink`).
 
 - `lukd storage ls --storage NAME [--owner IDENTITY] [--older DURATION]
   [-H|--human-readable] [--json]`: the stored files, newest first (by acceptance order), as aligned
@@ -3996,12 +4002,18 @@ symlink is refused (`lukd storage: <base> is a symlink`).
     a copy-to-clipboard button. Its metadata shows the type as `secret`
     and no sha256: a short secret could be found from its hash by anyone
     who sees the landing page, without opening it.
-  - `download` (`--portal`): the landing page shows the metadata (name,
+  - `download` (`--indirect`): the landing page shows the metadata (name,
     content type, size, sha256, published, expiry) and a "download" button;
     `<url><name>/download` answers the content with the download headers
     below.
   - `<url><name>/get` answers the raw content of either portal for
     scripts and terminals (Phase 6).
+  - A `GET` or `HEAD` of `<url><name>` carrying the `Luk-Signature`
+    header (`luk get`) answers the content as `/download` does, with the
+    file name; on an expose without `auth.ssh` the signature is not
+    verified, it only tells the luk client from a link preview (the
+    content is public through `/get` anyway). A `once` upload is claimed
+    by the `GET`.
   What the content is (plain or encrypted by kufer) is not lukd's concern.
 - TTL and retention belong to the storage (`storage.<n>.ttl`,
   `storage.<n>.cleanup.age`, see Storage); an expose only serves the
@@ -4094,9 +4106,9 @@ expose:
   (optional), `public` (optional base URL for answers when the listener
   sits behind a proxy; an `http(s)` URL without a path; default
   `https://<first host>[:port]`, or `http://` without `tls`, without the
-  default port of the scheme; without `host` the name is `tls.host`,
-  else the address host unless it is unspecified, when an endpoint
-  answering URLs through it needs `public` or `host`).
+  default port of the scheme; without `host` the address host unless it
+  is unspecified, when an endpoint answering URLs through it needs
+  `public` or `host`).
 - Several listeners may share one address: TLS listeners on it are
   chosen by SNI (each has its own certificate; a client without SNI or
   with an unknown name gets the certificate of the first listener of the
@@ -4155,8 +4167,8 @@ expose:
   trust `X-Forwarded-*` headers.
 - `tls.mode: acme` listeners get certificates from an ACME CA for the
   names of their `host` list and route by SNI and `Host` like the other
-  TLS listeners. HTTP-01 needs a plain listener with `acme: true` (see
-  TLS, ACME).
+  TLS listeners. HTTP-01 comes through the plain listener each names in
+  `tls.acme.entrypoint` (see TLS, ACME).
 
 Intake on a self-signed certificate (clients pin the lukd key), downloads for
 browsers on a Let's Encrypt certificate:
@@ -4166,14 +4178,18 @@ listen:
   intake:
     addr: 0.0.0.0:8443
     host: [lukd.example.com]
-    tls: {mode: self, cert: tls/tls.crt, key: tls/tls.key, host: lukd.example.com}
+    tls: {mode: self, cert: tls/tls.crt, key: tls/tls.key}
   download:
     addr: 0.0.0.0:443
     host: [drop.example.com]
-    tls: {mode: acme, email: ops@example.com}
+    tls:
+      mode: acme
+      acme:
+        entrypoint: http
+        server: https://acme-v02.api.letsencrypt.org/directory
+        email: ops@example.com
   http:
     addr: 0.0.0.0:80
-    acme: true
 
 endpoint:
   drop: {listen: intake, endpoint: /drop, ...}
@@ -4333,7 +4349,8 @@ configuration of the storages.
 
 ## TLS
 
-`listen.<n>.tls.mode: self` - a self-signed certificate with a stable key;
+`listen.<n>.tls.mode: self` - a self-signed certificate with a stable key,
+for the names of the listener's `host` list (its name without one);
 downloads (`luk get`) trust it by SPKI pin, not by a CA. Pin format (as in
 DLG): `sha256//<base64 of sha256 over the DER SubjectPublicKeyInfo>`.
 Endpoints do not use TLS for trust: luk authenticates lukd by the
@@ -4368,7 +4385,7 @@ in name order: `<name> <addr> <pin>[ (exists)]` (`lukd tls pin`:
 `listen.<n>.tls.mode: files` - the certificate (with its chain) and key
 come from an external tool (acme.sh, certbot, host-policy); lukd only
 reads them. `cert` and `key` are required (relative paths resolve against
-`root`), `host` is optional and `algorithm` does not apply. The files
+`root`) and `algorithm` does not apply. The files
 must be readable by `luk` (the unit hides `/home`, `ProtectHome`; `/etc`
 stays readable). lukd never creates, writes or generates them: `lukd tls
 generate` skips files listeners, `lukd tls pin` prints their pin too.
@@ -4390,8 +4407,7 @@ pair to new connections. A listener whose new pair fails to load keeps
 its current certificate and the error is logged; a successful load logs
 the new pin and expiry. The certificates are re-read even when the
 configuration reload of the same `SIGHUP` fails or is refused (see
-Reload); the `tls` settings themselves (mode, paths, host) need a
-restart. After a renewal the external tool runs the reload, for
+Reload); the `tls` settings themselves (mode, paths) need a restart. After a renewal the external tool runs the reload, for
 example:
 
 ```sh
@@ -4404,9 +4420,9 @@ acme.sh --install-cert -d drop.example.com \
 ### ACME
 
 `listen.<n>.tls.mode: acme` - lukd obtains and renews the certificates
-itself, from an ACME CA (Let's Encrypt by default) with the HTTP-01
+itself, from the ACME server of `tls.acme.server` with the HTTP-01
 challenge, one certificate (ECDSA P-256) per name of the listener's
-`host` list.
+`host` list. Every setting of the mode is under `tls.acme`.
 
 ```yaml
 listen:
@@ -4415,31 +4431,34 @@ listen:
     host: [drop.example.com, get.example.com]
     tls:
       mode: acme
-      email: ops@example.com                  # optional: the CA's notices (expiry, problems)
-      directory: https://acme-v02.api.letsencrypt.org/directory   # the default
-      eab: {kid: KEY_ID, key: B64URL_HMAC_KEY} # optional external account binding
+      acme:
+        entrypoint: http                      # the plain listener of the HTTP-01 challenges
+        server: https://acme-v02.api.letsencrypt.org/directory   # required
+        email: ops@example.com                # optional: the CA's notices (expiry, problems)
+        eab: {kid: KEY_ID, key: B64URL_HMAC_KEY}   # optional external account binding
   http:
     addr: 0.0.0.0:80
-    acme: true
 ```
 
 - `host` is required and lists the certificate names: plain DNS names,
-  no wildcard, no IP address. `cert`, `key`, `tls.host` and `algorithm`
-  do not apply. `email`, `directory` and `eab` apply to mode acme only.
-- `directory` is an `https` URL. For tests use the Let's Encrypt staging
-  directory `https://acme-staging-v02.api.letsencrypt.org/directory`
-  (untrusted certificates, much higher rate limits) and switch to
-  production when it works.
+  no wildcard, no IP address. `cert`, `key` and `algorithm` do not
+  apply; `tls.acme` applies to mode acme only.
+- `server` is required: the directory URL of the ACME server, an
+  `https` URL (Let's Encrypt, ZeroSSL, a CA of one's own); lukd chooses
+  no CA. For tests use the Let's Encrypt staging server
+  `https://acme-staging-v02.api.letsencrypt.org/directory` (untrusted
+  certificates, much higher rate limits) and switch to production when
+  it works.
 - `eab` (CAs that require an external account binding, for example
   ZeroSSL, Google): `kid` and the HMAC key, base64url as the CA prints
   it (standard base64 is accepted), either inline as `key` or in
-  `key_file` (one line; a relative path resolves against `<root>/data`; read
+  `file` (one line; a relative path resolves against `<root>/data`; read
   at load, so it must be readable by `luk`, like the configuration).
   The running file keeps the key's sha256, never the key.
-- One account per directory: the account key is created on first use
-  and shared by every acme listener with that `directory`, which must
-  therefore agree on `email` and `eab` (a validation error otherwise).
-  Different directories (staging next to production) are independent.
+- One account per server: the account key is created on first use and
+  shared by every acme listener with that `server`, which must therefore
+  agree on `email` and `eab` (a validation error otherwise). Different
+  servers (staging next to production) are independent.
 - Cache: `<root>/data/acme/<directory host and path>/` (for example
   `/var/lib/luk/data/acme/acme-v02.api.letsencrypt.org_directory/`), created
   by the receive role with mode 0700: `account.key` and `<name>.pem`
@@ -4449,16 +4468,20 @@ listen:
 - A plain listener (no `tls`) speaks HTTP/1.1 and HTTP/2 with prior
   knowledge (h2c): a proxy that ends TLS on a TCP route (Traefik `tcp`
   router with `tls`) passes on the HTTP/2 the client chose by ALPN.
-- `acme: true` makes a plain listener (no `tls`) the HTTP-01 responder:
-  it answers `/.well-known/acme-challenge/<token>` for the names of
-  every acme listener and redirects any other request for them with 308
+- `entrypoint` (required) names the plain listener (no `tls`) that is
+  the HTTP-01 responder of the acme listener: it answers
+  `/.well-known/acme-challenge/<token>` for the names of the acme
+  listeners naming it and redirects any other request for them with 308
   to `https://<name>[:port]<path>` (the port of the acme listener's
-  `public`, none for 443). A request for any other host is 421. It
-  carries no endpoints and no exposes (a validation error). Acme
-  listeners without an `acme: true` listener, or one without acme
-  listeners, are a validation error. The CA connects to port 80: an
-  `acme: true` listener on another port is a warning and needs a port
-  forward from 80.
+  `public`, none for 443). A request for any other host, the names of
+  acme listeners of another entrypoint included, is 421. Each acme
+  listener names its own: on several addresses each acme listener gets
+  the entrypoint on its address, and several acme listeners may share
+  one. An entrypoint carries no endpoints and no exposes (a validation
+  error); a name that is no listener or a listener with `tls` is a
+  validation error. The CA connects to port 80: an entrypoint on another
+  port is a warning and needs a port forward from 80. The DNS-01
+  challenge (`tls.acme.provider`) is not implemented.
 - At start, once the listeners are open, the receive role obtains every
   missing certificate in the background and logs each name (`acme
   certificate` with pin and expiry, `acme certificate obtained`, or
@@ -4481,10 +4504,11 @@ listen:
   system CAs and need no pin: the key changes with every renewal. `luk
   scan` prints no download pin for a chain that verifies; `lukd tls pin`
   and `lukd tls generate` skip acme listeners.
-- All `tls` settings and `acme` are restart-only (see Reload).
+- All `tls` settings, and a listener becoming or ceasing to be an
+  entrypoint, are restart-only (see Reload).
 - `status.json` in each cache directory, written by the receive role
   (atomically, 0600) at start and after every issuance attempt and
-  renewal request: `directory` (URL), `written`, `hosts` with per name
+  renewal request: `directory` (the server URL), `written`, `hosts` with per name
   `last_attempt`, `last_success`, `last_error`, `next_retry` (the next
   hourly check after a failure) and the `serial` (hex) and `not_after` of
   the certificate in memory, and `requests`: the results of the last 32
@@ -4498,7 +4522,7 @@ listen:
   regardless of its expiry, serves the new certificate from the next
   handshake and records the result under the nonce in `status.json`. A
   file without a valid body renews all the same, without a result; a name
-  the directory does not manage gets an error result.
+  the server does not manage gets an error result.
 - Network: ports 80 and 443 (or the acme listener's port) open from the
   internet, and the receive role reaches the directory over outbound
   HTTPS. The receive unit restricts neither (no `IPAddressDeny`, no
@@ -4510,7 +4534,7 @@ listen:
 The commands work on the cache directories under `<root>/data/acme/` and talk
 to the running receive role only through files there (no socket, no
 signal). Run as root they run again as the owner of `<root>/data/acme` (the
-service user), as `lukd queue` does for root; any other user gets `lukd
+service user), as `lukd failed` does for root; any other user gets `lukd
 tls acme must run as root or as <owner> (owner of <root>/data/acme)`. Both
 `lukd tls acme ...` as root and `runuser -u luk -- lukd tls acme ...` work.
 `<root>/data/acme` is a directory of the service user (see Service, State),
@@ -4573,7 +4597,7 @@ systemctl enable --now lukd
   channel sessions (it reads the identity key), verification, queue
   writes (reserve, 507), downloads, portals, once
   claims, the catalog read, and the expiry part of the janitor on every
-  local storage (ttl, `cleanup.age`, stale claimed files). It removes half-received queue
+  storage (ttl, `cleanup.age`, stale claimed files). It removes half-received queue
   entries at start, before the listeners open: directories of a queue
   directory named like an upload id (`YYYYMMDDTHHMMSSZ-<8 hex digits>`)
   without `meta.json`; anything else there is left alone. `SIGHUP` reloads the
@@ -4639,7 +4663,7 @@ at 0 and every catalog is rebuilt). A base must be on a local filesystem
   ```
 
   The service user is the owner of `<root>/data`: lukd run, the commands
-  that run again as the service user (`lukd queue`, `lukd check` as
+  that run again as the service user (`lukd failed`, `lukd check` as
   root, `lukd tls acme`) and the checks of the configuration take it
   from there. `<root>` is root's, so the service user can neither rename
   nor replace `<root>/root`. A `root` other than the default needs the
@@ -5163,9 +5187,9 @@ sudo are involved.
     secrets is inaccessible as well, read per connection with the
     pipelines (`config` and its `config.d`, see What a step runs): its
     `root` (default `/var/lib/luk`) and, when absolute, `auth.nonces`,
-    `gpg.keys`, the `tls.cert`, `tls.key` and `tls.eab.key_file` of
+    `gpg.keys`, the `tls.cert`, `tls.key` and `tls.acme.eab.file` of
     every listener, the `path` and `secret.path` of every endpoint and
-    the `base` of every storage (a relative one lies under `<root>/data`).
+    the `directory` of every storage (a relative one lies under `<root>/data`).
     So are the paths of `hide` in `run.yaml` (absolute, for anything
     the configuration does not name). A path under `<root>`, `<config
     dir>`, `/run/luk` or another hidden path adds nothing.
@@ -5429,7 +5453,7 @@ pipeline:
   lukd close the connection, so `lukd run` stops the job; the step fails
   or is interrupted as a `run` step is.
 - For the rules about steps a relay step is a `tee` run step: it passes
-  the upload on (a store after it still counts for `links.max`, and the
+  the upload on (a store after it still counts for `hardlink.owner.max`, and the
   names stay those of the steps before it), but a link replace and the
   transfer dedup (store steps only) exclude it, since a delivery cannot
   be undone.
@@ -5504,9 +5528,9 @@ luk send [flags]      (aliases: put, push)
                             error); with --stdin or --file the secret comes
                             from there, unchecked; without --type the type
                             is text/plain; charset=utf-8
-      --portal              download page with the metadata and a Download
-                            button (portal "download"); exclusive with
-                            --secret
+      --indirect            download page with the metadata and a Download
+                            button (portal "download"); with --secret the
+                            reveal page stays
       --name NAME           file name in the meta (default: base name of a
                             regular --file; none for a stream)
       --type TYPE           Content-Type for downloads (default: with
@@ -5532,7 +5556,7 @@ luk send [flags]      (aliases: put, push)
                             access private); the endpoint must accept it
                             from the signer (private.owner), else 422;
                             exclusive with
-                            --secret and --portal
+                            --secret and --indirect
       --any                 with --private: every identity lukd knows (and
                             the protect expose allows) downloads it (meta
                             access any; private.any); a usage error
@@ -5546,7 +5570,7 @@ luk send [flags]      (aliases: put, push)
                             name NAME of the endpoint (meta permanent, see
                             Permanent names); the URL printed is the
                             permanent URL, --json adds version_url; a
-                            usage error with --once, --secret, --portal,
+                            usage error with --once, --secret, --indirect,
                             --private, --mutable, --pretty-url, --links
                             above 1, or an invalid NAME
       --progress            progress on stderr (only when it is a terminal)
@@ -6027,7 +6051,7 @@ link <i>, and a stream cannot be sent twice; <n> of <N> links made` (exit
 answers so far). `--ttl` notes are written once, for the first answer;
 `--progress` shows each upload that sends a body; a deduplicated one
 prints nothing (`--json` carries `"deduplicated": true`). When the
-server refuses one with 429 (the `links.max` of a storage, see Storage)
+server refuses one with 429 (the `hardlink.owner.max` of a storage, see Storage)
 luk stops with `rejected (429 Too Many Requests): limit of <N> links to
 the same content reached; <n> of <N> links made` (exit 2), the URLs made
 so far already printed (with `--json` the array of the answers so far).
@@ -6078,8 +6102,16 @@ nor the message, and no secret key is used.
   the message, so `--links` resends it when asked. A stream (`--stdin`,
   `--file` on a pipe) is encrypted while it is sent, with the limits of a
   stream. `--backup` describes the plain file.
+- With `--secret` the message is armored (`-----BEGIN PGP MESSAGE-----`),
+  named `<name>.asc` (`secret.asc` without a name, so the reveal page
+  offers it for download), and keeps the secret type `text/plain;
+  charset=utf-8`: the reveal page shows it as text with its copy button,
+  and lukd stores and serves only the message. Any `--secret` source
+  works (the prompt, `--stdin`, `--file`); the content inside the message
+  need not be UTF-8.
 - Decrypt with the secret key of any recipient: `gpg --output f.txt
-  --decrypt f.txt.gpg`.
+  --decrypt f.txt.gpg`. An armored secret: copy it from the
+  reveal page into `gpg --decrypt`.
 
 `luk` alone prints help, with the aliases of the config in an "Aliases"
 section after the commands. No command takes positional arguments, except
@@ -6253,7 +6285,7 @@ the scan of either part stops at `--`. A bool flag of the expansion is
 turned off with `--flag=false`. User values of a repeatable flag (`--tag`)
 replace all of its values in the expansion. A single-valued flag repeated
 within the user arguments is a repeated flag (usage error, exit 1), and
-mutually exclusive flags (`--secret` in the expansion, `--portal` on the
+mutually exclusive flags (`--secret` in the expansion, `--private` on the
 call) still fail as usual. Rules, checked by `luk alias add`, `luk config
 check` (also with `--file`) and when an alias is run:
 
@@ -6370,11 +6402,11 @@ Goal: a usable drop (upload, get a URL, download) and archived backups on
 disk. Test on lukd.vm / luk.vm.
 
 - Queue as in "Pipelines" (streaming, atomic accept, free-space check
-  with 507 and `limits.queue.reserve`); pipelines run asynchronously
+  with 507 and `queue.reserve`); pipelines run asynchronously
   after the answer, `queue.concurrency` per pipeline; queue entries left from a
   previous run are processed at start, temporary files removed.
-- Steps: `store` to `local` storage (path template, sidecars,
-  `conflict`). A `run` step or an `s3` storage fails the pipeline with
+- Steps: `store` to a storage (path template, sidecars,
+  `conflict`). A `run` step fails the pipeline with
   "not supported yet" (the steps before it stay done); failures are
   logged (status.json comes later).
 - Answers 201/202 per `respond`; `dry_run` keeps the debug JSON but is
@@ -6433,7 +6465,8 @@ disk. Test on lukd.vm / luk.vm.
 
 ### Phase 4 - catalog and aliases
 
-- `storage.<n>.catalog: true` enables `catalog.json` for a local storage:
+- `expose.<n>.catalog: true` enables `catalog.json` for the storage of
+  the expose:
   kept in `<base>/.db/catalog.json`, rebuilt atomically after every
   store and every removal, served by expose at `<url>catalog.json` (a
   reserved top-level name: a path template rendering to it fails).
@@ -6535,7 +6568,7 @@ disk. Test on lukd.vm / luk.vm.
   record; an interrupted one (shutdown) stays in the queue as before,
   keeping the results seen so far. Resume and the pickup ignore
   `failed/`.
-- `limits.failed.age` (default `3d`, `0` never expires): the janitor
+- `failed.ttl` (default `3d`, `0` never expires): the janitor
   removes a record written longer ago (`failed_at`), logged as `failure
   record expired`.
 - `failed` in status.json is the number of records with that pipeline
@@ -6544,25 +6577,25 @@ disk. Test on lukd.vm / luk.vm.
   minute), so the commands below show up in status.json within a minute.
   `last_failure`, `failed_step` and `error` stay as history.
 - Monitoring: `failed` > 0 is CRIT (the checkmk check shows the last error
-  and points to `lukd queue ls / rm`). Only `rm` or expiry clears it.
+  and points to `lukd failed ls / rm`). Only `rm` or expiry clears it.
 - Commands (read the config given by `-c` for `root` and the queue
   directories, work on files and may run while lukd runs). The files must
   stay owned by the service user, so they run as the owner of
   `<root>/data` (the service user; `<root>` itself is root's): run as
-  root, `lukd queue` runs itself again with the uid, the gid of
+  root, `lukd failed` runs itself again with the uid, the gid of
   `<root>/data` and the groups of that user (environment
   `LUKD_REEXEC=1` prevents a loop) and exits with its status; run as the
-  owner it proceeds; any other user gets `lukd queue must run as root or
+  owner it proceeds; any other user gets `lukd failed must run as root or
   as <owner> (owner of <root>/data)` and exit status 1; a `root` or
   `<root>/data` that is a symlink is refused. `lukd status` and `lukd check`
   only read and run as anyone who can read the files.
-  - `lukd queue ls [--json]`: the records, oldest first, one row per
+  - `lukd failed ls [--json]`: the records, oldest first, one row per
     pipeline: id, endpoint, sender, pipeline, state (`ok`, `failed`,
     `not_run`), step (of a failure, `-` otherwise), the time it ended
     and its age, and the detail: the error of a failure (first line,
     control characters escaped, as `lukd status`), the stored outputs of
     a pipeline that succeeded. `--json` prints the records as stored.
-  - `lukd queue rm --id ID`: removes the record.
+  - `lukd failed rm --id ID`: removes the record.
   - An unknown id exits with status 1.
 
 ### Phase 6 - portals
@@ -6633,10 +6666,12 @@ disk. Test on lukd.vm / luk.vm.
   header, so the browser's `Sec-Fetch-Site: same-origin` passes the
   cross-origin check) and reads the raw answer as bytes. Content that is
   text (below) is shown on the same page as on the reveal page: a
-  read-only text field, the copy button and the `once` notice. Other
-  content shows a "Save binary" button and the
+  read-only text field, the copy button and the `once` notice; text of
+  an upload with a file name (`--name`, a regular `--file`, the
+  `secret.asc` of `--gpg --secret`) also gets a "Download" button. Other
+  content shows a "Save binary" button ("Download" when named) and the
   base64 of the content in the read-only field (labeled "Base64") with
-  the copy button. "Save binary" saves the bytes already fetched (a `Blob`,
+  the copy button. Either button saves the bytes already fetched (a `Blob`,
   an object URL and an `<a download>`), never a second request, so it
   works for a `once` upload; the file name is the upload's file name,
   else the link name with `.bin`. The `blob:` URL is a download, not a

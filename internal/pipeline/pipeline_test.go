@@ -30,18 +30,15 @@ listen:
   main: {addr: 127.0.0.1:8080}
 auth:
   keys:
-    - name: robert.socha
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
+    robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
 endpoint:
   up:
     listen: main
     endpoint: /up
-    path: queue/up
     allow: [robert.socha]
   other:
     listen: main
     endpoint: /other
-    path: queue/other
     allow: [robert.socha]
 pipeline:
   tee:
@@ -65,9 +62,9 @@ pipeline:
     steps:
       - store: b
 storage:
-  a: {type: local, base: a, path: "{{ .Sender }}/{{ .File }}"}
-  b: {type: local, base: b, path: "{{ .Random }}"}
-  s3: {type: s3, bucket: x}
+  a: {directory: a, path: "{{ .Sender }}/{{ .File }}"}
+  b: {directory: b, path: "{{ .Random }}"}
+  broken: {directory: broken, path: x}
 `
 
 type syncBuf struct {
@@ -127,17 +124,20 @@ func newEnv(t *testing.T, concurrency int) *env {
 	return e
 }
 
-// parseCfg parses a config of cfgTmpl. The second step of pipeline cloud
-// then stores to the s3 storage, which validation refuses and which fails
-// at run time.
+// parseCfg parses a config of cfgTmpl. The storage broken lies under
+// /dev/null, so every store into it fails; the second step of pipeline
+// cloud stores there.
 func parseCfg(t *testing.T, text string) *config.Config {
 	t.Helper()
 	cfg, err := config.Parse([]byte(text))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if st := cfg.Storage["broken"]; st != nil {
+		st.Base = "/dev/null/broken"
+	}
 	if p := cfg.Pipeline["cloud"]; p != nil {
-		p.Steps[1].Store = []string{"s3"}
+		p.Steps[1].Store = []string{"broken"}
 	}
 	return cfg
 }
@@ -257,7 +257,7 @@ func TestRunStepFailsAfterStore(t *testing.T) {
 	}
 }
 
-func TestS3StorageFails(t *testing.T) {
+func TestStoreFailureFailsPipeline(t *testing.T) {
 	e := newEnv(t, 1)
 	d := e.dispatcher()
 	j := e.enqueue(t, "id3", "up", "cloud", "tee")
@@ -265,7 +265,7 @@ func TestS3StorageFails(t *testing.T) {
 	d.Wait()
 	recs := e.logs.records(t)
 	r := find(recs, "pipeline failed", "cloud")
-	if r == nil || r["step"] != float64(2) || !strings.Contains(fmt.Sprint(r["error"]), "not supported yet") {
+	if r == nil || r["step"] != float64(2) || !strings.Contains(fmt.Sprint(r["error"]), "store broken") {
 		t.Fatalf("cloud log %v", recs)
 	}
 	if find(recs, "pipeline done", "tee") == nil {
@@ -697,7 +697,7 @@ func TestStoreRefreshesWatch(t *testing.T) {
 // skipped under conflict replace with a warning, and the status counts it.
 func TestStoreOlderWarned(t *testing.T) {
 	e := newEnv(t, 1)
-	e.cfg.Storage["a"].Conflict = "replace"
+	e.cfg.Storage["a"].Conflict.Mode = "replace"
 	st, _, err := status.Open(status.Path(e.cfg.DataDir()))
 	if err != nil {
 		t.Fatal(err)

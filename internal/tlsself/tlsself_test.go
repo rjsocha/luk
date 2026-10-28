@@ -15,7 +15,7 @@ import (
 func TestGenerateAndPin(t *testing.T) {
 	dir := t.TempDir()
 	c, k := filepath.Join(dir, "sub", "tls.crt"), filepath.Join(dir, "sub", "tls.key")
-	pin, err := Generate(c, k, "lukd.vm", "")
+	pin, err := Generate(c, k, []string{"lukd.vm"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestGenerateAndPin(t *testing.T) {
 	if _, err := tls.LoadX509KeyPair(c, k); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Generate(c, k, "lukd.vm", ""); err == nil {
+	if _, err := Generate(c, k, []string{"lukd.vm"}, ""); err == nil {
 		t.Fatal("overwrote an existing certificate")
 	}
 }
@@ -40,7 +40,7 @@ func TestGenerateSamePath(t *testing.T) {
 		{filepath.Join(dir, "a"), filepath.Join(dir, "a")},
 		{filepath.Join(dir, "a"), dir + "/./a"},
 	} {
-		if _, err := Generate(pair[0], pair[1], "lukd.vm", ""); err == nil {
+		if _, err := Generate(pair[0], pair[1], []string{"lukd.vm"}, ""); err == nil {
 			t.Errorf("%s %s: accepted", pair[0], pair[1])
 		}
 		if _, err := os.Stat(pair[0]); !errors.Is(err, os.ErrNotExist) {
@@ -55,7 +55,7 @@ func TestGenerateKeepsExistingKey(t *testing.T) {
 	if err := os.WriteFile(k, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Generate(c, k, "lukd.vm", ""); err == nil {
+	if _, err := Generate(c, k, []string{"lukd.vm"}, ""); err == nil {
 		t.Fatal("overwrote an existing key")
 	}
 	if b, _ := os.ReadFile(k); string(b) != "old" {
@@ -72,7 +72,7 @@ func TestGenerateCertExistsRemovesNewKey(t *testing.T) {
 	if err := os.WriteFile(c, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Generate(c, k, "lukd.vm", ""); err == nil {
+	if _, err := Generate(c, k, []string{"lukd.vm"}, ""); err == nil {
 		t.Fatal("overwrote an existing certificate")
 	}
 	if _, err := os.Stat(k); !errors.Is(err, os.ErrNotExist) {
@@ -88,7 +88,7 @@ func TestGenerateAlgorithms(t *testing.T) {
 	} {
 		dir := t.TempDir()
 		c, k := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
-		pin, err := Generate(c, k, "127.0.0.1", algo)
+		pin, err := Generate(c, k, []string{"127.0.0.1"}, algo)
 		if err != nil {
 			t.Fatalf("%q: %v", algo, err)
 		}
@@ -117,7 +117,7 @@ func TestGenerateAlgorithms(t *testing.T) {
 func TestGenerateUnknownAlgorithm(t *testing.T) {
 	dir := t.TempDir()
 	c, k := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
-	if _, err := Generate(c, k, "lukd.vm", "rsa"); err == nil {
+	if _, err := Generate(c, k, []string{"lukd.vm"}, "rsa"); err == nil {
 		t.Fatal("accepted rsa")
 	}
 	if _, err := os.Stat(k); !errors.Is(err, os.ErrNotExist) {
@@ -128,7 +128,7 @@ func TestGenerateUnknownAlgorithm(t *testing.T) {
 func TestECDSAHandshakeBrowserSchemes(t *testing.T) {
 	dir := t.TempDir()
 	c, k := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
-	if _, err := Generate(c, k, "lukd.vm", ECDSAP256); err != nil {
+	if _, err := Generate(c, k, []string{"lukd.vm"}, ECDSAP256); err != nil {
 		t.Fatal(err)
 	}
 	pair, err := tls.LoadX509KeyPair(c, k)

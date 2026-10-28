@@ -312,7 +312,7 @@ func TestLinkReplace(t *testing.T) {
 	if rec.Code != 200 || rec.Body.String() != "new content" {
 		t.Fatalf("download %d %q", rec.Code, rec.Body)
 	}
-	if e := entries(t, filepath.Join(f.root, "data", "q/drop")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "queue/drop")); len(e) != 0 {
 		t.Fatalf("queue left %v", e)
 	}
 }
@@ -350,7 +350,7 @@ func copyFixture(t *testing.T, path, pipes string) *fixture {
 	t.Helper()
 	return linkFixture(t, func(s string) string {
 		s = strings.Replace(s, "  drop: {endpoint: [drop], steps: [{store: drop}]}\n", pipes, 1)
-		return strings.Replace(s, "expose:\n", "  copy: {type: local, base: s/copy, path: \""+path+"\", conflict: reject}\nexpose:\n", 1)
+		return strings.Replace(s, "expose:\n", "  copy: {directory: s/copy, path: \""+path+"\", conflict: {mode: reject}}\nexpose:\n", 1)
 	})
 }
 
@@ -511,7 +511,7 @@ func TestLinkActionDisabled(t *testing.T) {
 func TestLinkNotOwner(t *testing.T) {
 	other := newSigner(t)
 	f := linkFixture(t, func(s string) string {
-		s = strings.Replace(s, `keys: [{name: robert.socha, key: "`, `keys: [{name: other, key: "`+pubLine(other.PublicKey())+`"}, {name: robert.socha, key: "`, 1)
+		s = strings.Replace(s, `keys: {robert.socha: "`, `keys: {other: "`+pubLine(other.PublicKey())+`", robert.socha: "`, 1)
 		return strings.Replace(s, `allow: [robert.socha], respond: url`, `allow: [robert.socha, other], respond: url`, 1)
 	})
 	link := f.drop(t, f.user, wire.Meta{Mutable: true}, "x")
@@ -537,7 +537,7 @@ func TestLinkOwnerKeyDir(t *testing.T) {
 	f := newFixtureDir(t, func(s string) string {
 		s = strings.Replace(s, `respond: url, storage: drop}`, allLinks, 1)
 		// robert.socha moves to ssh.d, with a second key.
-		i := strings.Index(s, "  keys: [")
+		i := strings.Index(s, "  keys: {")
 		j := strings.Index(s[i:], "\n")
 		return s[:i] + s[i+j+1:]
 	}, func(dir string, user ssh.Signer) {
@@ -593,7 +593,7 @@ func TestLinkOtherEndpoint(t *testing.T) {
   drop2: {endpoint: [drop2], steps: [{store: drop}]}`, 1)
 		return strings.Replace(s, `endpoint:
   backup:`, `endpoint:
-  drop2: {listen: main, endpoint: /drop2, path: q/drop2, allow: [robert.socha], `+allLinks+`
+  drop2: {listen: main, endpoint: /drop2, allow: [robert.socha], `+allLinks+`
   backup:`, 1)
 	})
 	link := f.drop(t, f.user, wire.Meta{Mutable: true}, "x")
@@ -697,13 +697,13 @@ const listLinks = `respond: url, storage: drop, link: {remove: ['*'], ttl: ['*']
 func listFixture(t *testing.T, other ssh.Signer) *fixture {
 	t.Helper()
 	return newFixtureWith(t, func(s string) string {
-		s = strings.Replace(s, `keys: [{name: robert.socha, key: "`, `keys: [{name: other, key: "`+pubLine(other.PublicKey())+`"}, {name: robert.socha, key: "`, 1)
+		s = strings.Replace(s, `keys: {robert.socha: "`, `keys: {other: "`+pubLine(other.PublicKey())+`", robert.socha: "`, 1)
 		s = strings.Replace(s, `allow: [robert.socha], respond: url, storage: drop}`, `allow: [robert.socha, other], `+listLinks, 1)
 		s = strings.Replace(s, `pipeline:`, `pipeline:
   drop2: {endpoint: [drop2], steps: [{store: drop}]}`, 1)
 		return strings.Replace(s, `endpoint:
   backup:`, `endpoint:
-  drop2: {listen: main, endpoint: /drop2, path: q/drop2, allow: [robert.socha], `+listLinks+`
+  drop2: {listen: main, endpoint: /drop2, allow: [robert.socha], `+listLinks+`
   backup:`, 1)
 	})
 }

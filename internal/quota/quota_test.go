@@ -20,14 +20,14 @@ func parseQuota(t *testing.T, text string) *config.Quota {
 	cfg, err := config.Parse([]byte(`
 listen: {main: {addr: "127.0.0.1:0"}}
 auth:
-  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGl5ZNGdDDrFOD9hUIo3uI0OBOutD7fZ0J9wlhQ0vvB0"}]
-  ca: [{name: hosts, type: host, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBWNH4m3n1bMpJ6GU0yDxWVd5ixzwSJqGqv0MNEOh0Yo"}]
+  keys: {robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGl5ZNGdDDrFOD9hUIo3uI0OBOutD7fZ0J9wlhQ0vvB0"}
+  ca: {hosts: {type: host, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBWNH4m3n1bMpJ6GU0yDxWVd5ixzwSJqGqv0MNEOh0Yo"}}
 endpoint:
-  backup: {listen: main, endpoint: /backup, path: q, allow: ["*"], quota: ` + text + `}
+  backup: {listen: main, endpoint: /backup, allow: ["*"], quota: ` + text + `}
 pipeline:
   p: {endpoint: [backup], steps: [{store: s}]}
 storage:
-  s: {type: local, base: s, path: "{{ .Id }}"}
+  s: {directory: s, path: "{{ .Id }}"}
 `))
 	if err != nil {
 		t.Fatal(err)

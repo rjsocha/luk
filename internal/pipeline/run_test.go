@@ -28,22 +28,20 @@ listen:
   main: {addr: 127.0.0.1:8080}
 auth:
   keys:
-    - name: robert.socha
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
+    robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
 endpoint:
   up:
     listen: main
     endpoint: /up
-    path: queue/up
     allow: [robert.socha]
 pipeline:
   p:
     endpoint: [up]
 %s
 storage:
-  a: {type: local, base: a, path: "{{ .Sender }}/{{ .File }}"}
-  b: {type: local, base: b, path: "{{ .Sender }}/{{ .File }}"}
-  c: {type: local, base: c, path: "{{ .Id }}"}
+  a: {directory: a, path: "{{ .Sender }}/{{ .File }}"}
+  b: {directory: b, path: "{{ .Sender }}/{{ .File }}"}
+  c: {directory: c, path: "{{ .Id }}"}
 `
 
 func script(t *testing.T, body string) string {

@@ -104,7 +104,8 @@ func TestEncryptSymmetricPasswords(t *testing.T) {
 	k := gpgtest.New(t, "matt@example.com")
 	g := newGPGEnv(t, `    steps:
       - encrypt:
-          key: [matt@example.com]
+          recipients:
+            keys: [matt@example.com]
           insecure:
             symmetric: [pw-a, pw-b]
       - store: a
@@ -141,7 +142,7 @@ func TestEncryptSymmetricPasswords(t *testing.T) {
 
 func TestEncryptWithoutPasswordsHasNoPasswordMeta(t *testing.T) {
 	k := gpgtest.New(t, "matt@example.com")
-	g := newGPGEnv(t, "    steps:\n      - encrypt: {key: [matt@example.com]}\n      - store: a\n",
+	g := newGPGEnv(t, "    steps:\n      - encrypt: {recipients: {keys: [matt@example.com]}}\n      - store: a\n",
 		map[string][]byte{"k.asc": gpgtest.Armored(t, k)}, nil)
 	g.run(t, "id1")
 	var m map[string]any
@@ -156,8 +157,8 @@ func TestEncryptWithoutPasswordsHasNoPasswordMeta(t *testing.T) {
 func TestEncryptMissingPassword(t *testing.T) {
 	k := gpgtest.New(t, "matt@example.com")
 	for name, step := range map[string]string{
-		"symmetric": "{key: [matt@example.com], insecure: {symmetric: [gone]}}",
-		"openssl":   "{key: [matt@example.com], insecure: {openssl: {key: gone, files: ['*']}}}",
+		"symmetric": "{recipients: {keys: [matt@example.com]}, insecure: {symmetric: [gone]}}",
+		"openssl":   "{recipients: {keys: [matt@example.com]}, insecure: {openssl: {key: gone, files: ['*']}}}",
 	} {
 		g := newGPGEnv(t, "    steps:\n      - encrypt: "+step+"\n      - store: a\n",
 			map[string][]byte{"k.asc": gpgtest.Armored(t, k)}, nil)
@@ -231,7 +232,8 @@ printf other > "$LUK_OUT/db-2026.sql.zst"
 	g := newGPGEnv(t, fmt.Sprintf(`    steps:
       - run: %s
       - encrypt:
-          key: [matt@example.com]
+          recipients:
+            keys: [matt@example.com]
           insecure:
             symmetric: [pw-a]
             openssl:
@@ -298,7 +300,7 @@ printf other > "$LUK_OUT/db-2026.sql.zst"
 // TestEncryptOpenSSLOnlyNeedsNoRecipient: a set that goes to the openssl
 // format alone does not look up the recipients.
 func TestEncryptOpenSSLOnlyNeedsNoRecipient(t *testing.T) {
-	g := newGPGEnv(t, "    steps:\n      - encrypt: {wkd: [nobody@example.net], insecure: {openssl: {key: pw, files: ['*.txt']}}}\n      - store: a\n", nil, nil)
+	g := newGPGEnv(t, "    steps:\n      - encrypt: {recipients: {wkd: [nobody@example.net]}, insecure: {openssl: {key: pw, files: ['*.txt']}}}\n      - store: a\n", nil, nil)
 	g.passwords(t, map[string]string{"pw": "secret"})
 	g.run(t, "id1")
 	if find(g.logs.records(t), "pipeline done", "p") == nil {

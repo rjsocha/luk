@@ -64,8 +64,8 @@ func inputs(cfg *config.Config) (files, dirs []string) {
 		case "self", "files":
 			files = append(files, t.Cert, t.Key)
 		case "acme":
-			if t.EAB.KeyFile != "" {
-				files = append(files, t.EAB.KeyFile)
+			if t.ACME.EAB.File != "" {
+				files = append(files, t.ACME.EAB.File)
 			}
 		}
 	}

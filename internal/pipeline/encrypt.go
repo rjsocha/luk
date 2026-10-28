@@ -41,10 +41,10 @@ func (d *Dispatcher) recipients(j Job, keys *gpgkeys.Resolver, name string, step
 		wkd  bool
 	}
 	var all []lookup
-	for _, a := range e.WKD {
+	for _, a := range e.Recipients.WKD {
 		all = append(all, lookup{a, true})
 	}
-	for _, a := range e.Key {
+	for _, a := range e.Recipients.Keys {
 		all = append(all, lookup{a, false})
 	}
 	var ents []*openpgp.Entity

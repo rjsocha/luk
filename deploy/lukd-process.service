@@ -22,6 +22,14 @@ ExecStart=/usr/bin/lukd process
 # host does not exist.
 ExecReload=/usr/bin/lukd check --no-identity
 ExecReload=+/bin/kill -HUP $MAINPID
+# The stop sends SIGTERM itself and waits for lukd to exit. systemd before
+# 258 (Debian 13) races with PrivatePIDs=: a start may take lukd for a
+# process that is not its child ("Supervising process ... which is not our
+# child"), and the stop then kills the whole unit with SIGKILL without
+# waiting after SIGTERM. Fixed by systemd 698ac172aa (v258); harmless on
+# newer versions, which stop it the same way. Outside the sandbox ("+") for
+# the host $MAINPID, as the reload.
+ExecStop=+/bin/sh -c 'kill -TERM $MAINPID; while kill -0 $MAINPID 2>/dev/null; do sleep 0.1; done'
 Restart=on-failure
 # SIGTERM to lukd only: it closes the connections of the running steps,
 # so lukd run stops their units, and leaves their uploads queued; systemd
@@ -51,7 +59,7 @@ PrivatePIDs=yes
 # Drop-ins (systemctl edit lukd-process); examples in
 # /usr/share/doc/lukd/examples/lukd-process.service.d:
 #
-#   # storage.conf: a storage base (also in lukd-receive) outside
+#   # storage.conf: a storage directory (also in lukd-receive) outside
 #   # /var/lib/luk
 #   [Service]
 #   ReadWritePaths=/storage

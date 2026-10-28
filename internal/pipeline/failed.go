@@ -313,7 +313,7 @@ func (d *Dispatcher) running(dir string) bool {
 // failed counts and pickup of committed entries.
 func (d *Dispatcher) Maintain(now time.Time) {
 	cfg := d.config()
-	ExpireFailed(cfg, cfg.Limits.Failed.MaxAge(), now, d.log)
+	ExpireFailed(cfg, cfg.Failed.Lifetime(), now, d.log)
 	d.RefreshFailed()
 	d.Pickup()
 }

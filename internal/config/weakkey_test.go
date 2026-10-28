@@ -42,11 +42,11 @@ func weakLines(t *testing.T) map[string]string {
 // keys, inline and in ssh.d.
 func TestWeakKeys(t *testing.T) {
 	for want, line := range weakLines(t) {
-		inline := strings.Replace(good, "  ca:\n", "    - name: weak\n      key: \""+line+"\"\n  ca:\n", 1)
+		inline := strings.Replace(good, "  ca:\n", "    weak: \""+line+"\"\n  ca:\n", 1)
 		if _, err := Parse([]byte(inline)); err == nil || !strings.Contains(err.Error(), "auth.keys weak: "+want) {
 			t.Errorf("inline key: %v", err)
 		}
-		ca := strings.Replace(good, "  ca:\n", "  ca:\n    - name: weakca\n      type: user\n      key: \""+line+"\"\n", 1)
+		ca := strings.Replace(good, "  ca:\n", "  ca:\n    weakca:\n      type: user\n      key: \""+line+"\"\n", 1)
 		if _, err := Parse([]byte(ca)); err == nil || !strings.Contains(err.Error(), "auth.ca weakca: "+want) {
 			t.Errorf("inline ca: %v", err)
 		}

@@ -39,10 +39,10 @@ type storageFile struct {
 func storageCmd(cfgPath *string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "storage",
-		Short: "Files of a local storage",
-		Long: "Files of a local storage, read from their sidecars. The commands work on files\n" +
+		Short: "Files of a storage",
+		Long: "Files of a storage, read from their sidecars. The commands work on files\n" +
 			"and may run while lukd runs (rm, ttl, hold and release take the base lock). Run\n" +
-			"as root they run again as the owner of the storage base (the service user).",
+			"as root they run again as the owner of the storage directory (the service user).",
 	}
 
 	var lsStorage, owner, older string
@@ -50,7 +50,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	ls := &cobra.Command{
 		Use:   "ls",
 		Short: "List the stored files",
-		Long: "List the stored files of a local storage, newest first: name, size, received,\n" +
+		Long: "List the stored files of a storage, newest first: name, size, received,\n" +
 			"expiry, owner (the name the portal shows, and the owner key), endpoint, flags\n" +
 			"(once, mutable, reveal or download, private or any, shared when other names\n" +
 			"hold the same content as hardlinks, hold for a file on hold) and the URL when the\n" +
@@ -120,7 +120,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	ret := &cobra.Command{
 		Use:   "retention",
 		Short: "Show what the retention rules keep and prune",
-		Long: "Show the retention plan of a local storage without changing anything: per\n" +
+		Long: "Show the retention plan of a storage without changing anything: per\n" +
 			"series (pipeline, origin, file name) the rule that applies and every file,\n" +
 			"newest first, with KEEP and the reasons (last, within, daily 2026-10-04,\n" +
 			"weekly 2026-W40, monthly 2026-10, yearly 2026) or PRUNE. Files of a series no rule\n" +
@@ -149,7 +149,7 @@ func storageCmd(cfgPath *string) *cobra.Command {
 	wat := &cobra.Command{
 		Use:   "watch",
 		Short: "Evaluate the watch rules of a storage",
-		Long: "Evaluate the watch rules of a local storage now, read only: its rules, then per\n" +
+		Long: "Evaluate the watch rules of a storage now, read only: its rules, then per\n" +
 			"series (pipeline, origin, file name) the rule that applies, the state (OK,\n" +
 			"WARN, CRIT), the newest copy, its size, the number of copies and the message\n" +
 			"naming every failed check. A series no rule matches is listed as not watched;\n" +
@@ -484,7 +484,7 @@ func keepText(k config.Keep) string {
 	return strings.Join(out, ", ")
 }
 
-// openStorage loads the configuration and the local storage name, and runs
+// openStorage loads the configuration and the storage name, and runs
 // as the owner of its base (see asOwner).
 func openStorage(cfgPath, name string) (*config.Config, *config.Storage, store.Local, error) {
 	cfg, err := config.Load(cfgPath)
@@ -495,8 +495,6 @@ func openStorage(cfgPath, name string) (*config.Config, *config.Storage, store.L
 	switch {
 	case st == nil:
 		return nil, nil, store.Local{}, fmt.Errorf("unknown storage %q", name)
-	case st.Type != "local":
-		return nil, nil, store.Local{}, fmt.Errorf("storage %s is not a local storage (%s)", name, st.Type)
 	}
 	if err := asOwner("lukd storage", st.Base); err != nil {
 		return nil, nil, store.Local{}, err
@@ -507,15 +505,13 @@ func openStorage(cfgPath, name string) (*config.Config, *config.Storage, store.L
 	return cfg, st, store.FromConfig(st), nil
 }
 
-// storageLayouts checks the base of every local storage (see
+// storageLayouts checks the base of every storage (see
 // store.CheckLayout), in name order.
 func storageLayouts(cfg *config.Config) []error {
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(cfg.Storage)) {
-		if st := cfg.Storage[name]; st.Type == "local" {
-			if err := store.CheckLayout(st.Base); err != nil {
-				errs = append(errs, fmt.Errorf("storage %s: %w", name, err))
-			}
+		if err := store.CheckLayout(cfg.Storage[name].Base); err != nil {
+			errs = append(errs, fmt.Errorf("storage %s: %w", name, err))
 		}
 	}
 	return errs

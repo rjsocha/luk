@@ -100,8 +100,9 @@ func TestEncryptRoundTrip(t *testing.T) {
 	matt := gpgtest.New(t, "Matt@Example.com")
 	g := newGPGEnv(t, `    steps:
       - encrypt:
-          wkd: [robert@example.net]
-          key: [matt@example.com]
+          recipients:
+            wkd: [robert@example.net]
+            keys: [matt@example.com]
       - store: a
 `, map[string][]byte{"matt.asc": gpgtest.Armored(t, matt)}, map[string][]byte{"robert": gpgtest.Public(t, robert)})
 	g.run(t, "id1")
@@ -215,7 +216,7 @@ for f in one two; do ln "$LUK_IN/$f.txt.gpg" "$LUK_OUT/$f.txt.gpg"; done
 	k := gpgtest.New(t, "matt@example.com")
 	g := newGPGEnv(t, fmt.Sprintf(`    steps:
       - run: %s
-      - encrypt: {key: matt@example.com}
+      - encrypt: {recipients: {keys: matt@example.com}}
       - run: %s
       - store: b
 `, s1, s2), map[string][]byte{"k.asc": gpgtest.Armored(t, k)}, nil)
@@ -241,7 +242,7 @@ printf one > "$LUK_OUT/one.txt"
 printf '{"kind": "dump"}' > "$LUK_OUT/one.txt.meta.json"
 `)
 	k := gpgtest.New(t, "matt@example.com")
-	g := newGPGEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - encrypt: {key: matt@example.com}\n      - store: a\n", s1),
+	g := newGPGEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - encrypt: {recipients: {keys: matt@example.com}}\n      - store: a\n", s1),
 		map[string][]byte{"k.asc": gpgtest.Armored(t, k)}, nil)
 	g.run(t, "id1")
 	var m encMeta
@@ -272,8 +273,9 @@ func TestEncryptUnusableRecipient(t *testing.T) {
 	steps := func(strict bool) string {
 		return fmt.Sprintf(`    steps:
       - encrypt:
-          wkd: [nobody@example.net]
-          key: [matt@example.com, old@example.com, gone@example.com, missing@example.com]
+          recipients:
+            wkd: [nobody@example.net]
+            keys: [matt@example.com, old@example.com, gone@example.com, missing@example.com]
           strict: %v
       - store: a
 `, strict)
@@ -312,7 +314,7 @@ func TestEncryptUnusableRecipient(t *testing.T) {
 }
 
 func TestEncryptNoUsableRecipient(t *testing.T) {
-	g := newGPGEnv(t, "    steps:\n      - encrypt: {key: [old@example.com], wkd: [nobody@example.net]}\n      - store: a\n",
+	g := newGPGEnv(t, "    steps:\n      - encrypt: {recipients: {keys: [old@example.com], wkd: [nobody@example.net]}}\n      - store: a\n",
 		map[string][]byte{"old.asc": gpgtest.Armored(t, gpgtest.Expired(t, "old@example.com"))}, nil)
 	g.run(t, "id1")
 	r := find(g.logs.records(t), "pipeline failed", "p")
@@ -326,7 +328,7 @@ func TestEncryptNoUsableRecipient(t *testing.T) {
 
 func TestEncryptKeyNeverUsesWKD(t *testing.T) {
 	k := gpgtest.New(t, "matt@example.com")
-	g := newGPGEnv(t, "    steps:\n      - encrypt: {key: [matt@example.com]}\n      - store: a\n", nil,
+	g := newGPGEnv(t, "    steps:\n      - encrypt: {recipients: {keys: [matt@example.com]}}\n      - store: a\n", nil,
 		map[string][]byte{"matt": gpgtest.Public(t, k)})
 	g.run(t, "id1")
 	if r := find(g.logs.records(t), "pipeline failed", "p"); r == nil || !strings.Contains(fmt.Sprint(r["error"]), "no key with user id matt@example.com in") {
@@ -336,7 +338,7 @@ func TestEncryptKeyNeverUsesWKD(t *testing.T) {
 
 func TestEncryptWKDNeverUsesKeyDir(t *testing.T) {
 	k := gpgtest.New(t, "matt@example.com")
-	g := newGPGEnv(t, "    steps:\n      - encrypt: {wkd: [matt@example.com]}\n      - store: a\n",
+	g := newGPGEnv(t, "    steps:\n      - encrypt: {recipients: {wkd: [matt@example.com]}}\n      - store: a\n",
 		map[string][]byte{"k.asc": gpgtest.Armored(t, k)}, nil)
 	g.run(t, "id1")
 	if r := find(g.logs.records(t), "pipeline failed", "p"); r == nil || !strings.Contains(fmt.Sprint(r["error"]), "404") {
@@ -351,7 +353,7 @@ printf '{"kind": "dump"}' > "$LUK_OUT/one.txt.meta.json"
 `)
 	tee := script(t, "test -f \"$LUK_IN/one.txt.meta.json\"\n")
 	k := gpgtest.New(t, "matt@example.com")
-	g := newGPGEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - run: %s\n        tee: true\n      - encrypt: {key: matt@example.com}\n      - store: a\n", s1, tee),
+	g := newGPGEnv(t, fmt.Sprintf("    steps:\n      - run: %s\n      - run: %s\n        tee: true\n      - encrypt: {recipients: {keys: matt@example.com}}\n      - store: a\n", s1, tee),
 		map[string][]byte{"k.asc": gpgtest.Armored(t, k)}, nil)
 	g.run(t, "id1")
 	var m encMeta

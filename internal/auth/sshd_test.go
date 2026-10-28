@@ -18,7 +18,7 @@ func TestKeyDIdentity(t *testing.T) {
 	line := func(s ssh.Signer) string { return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.PublicKey()))) }
 	dir := t.TempDir()
 	cfg := "listen:\n  main: {addr: 127.0.0.1:8080}\n" +
-		"endpoint:\n  backup: {listen: main, endpoint: /backup, path: /queue/backup, allow: [jan.kowalski]}\n"
+		"endpoint:\n  backup: {listen: main, endpoint: /backup, allow: [jan.kowalski]}\n"
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +58,8 @@ func TestKeyDCA(t *testing.T) {
 	line := func(s ssh.Signer) string { return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.PublicKey()))) }
 	dir := t.TempDir()
 	cfg := "listen:\n  main: {addr: 127.0.0.1:8080}\n" +
-		"auth:\n  ca:\n    - {name: hosts, revoked: {key_ids: [old.host], serials: [13]}}\n" +
-		"endpoint:\n  backup: {listen: main, endpoint: /backup, path: /queue/backup, allow: [\"hosts:*\", \"people:*\"]}\n"
+		"auth:\n  ca:\n    hosts: {revoked: {key: [\"" + ssh.FingerprintSHA256(goneKey) + "\"]}}\n" +
+		"endpoint:\n  backup: {listen: main, endpoint: /backup, allow: [\"hosts:*\", \"people:*\"]}\n"
 	files := map[string]string{
 		"config.yaml":              cfg,
 		"ssh.d/ca/host/hosts.pub":  "# CA/SSH rotation\n" + line(hostOld) + " 2025\n" + line(hostNew) + " 2026\n",
@@ -96,8 +96,8 @@ func TestKeyDCA(t *testing.T) {
 	bad := map[string]*ssh.Certificate{
 		"user cert of host CA": cert(t, hostNew, ssh.UserCert, "ping.example", 5, nil, ssh.CertTimeInfinity),
 		"host cert of user CA": cert(t, userCA, ssh.HostCert, "ping.example", 5, nil, ssh.CertTimeInfinity),
-		"revoked key id":       cert(t, hostOld, ssh.HostCert, "old.host", 5, nil, ssh.CertTimeInfinity),
-		"revoked serial":       cert(t, hostNew, ssh.HostCert, "ping.example", 13, nil, ssh.CertTimeInfinity),
+		"revoked key, old CA":  certOf(t, hostOld, goneKey, ssh.HostCert, "old.host", 5, nil, ssh.CertTimeInfinity),
+		"revoked key, new CA":  certOf(t, hostNew, goneKey, ssh.HostCert, "ping.example", 13, nil, ssh.CertTimeInfinity),
 		"unknown CA":           cert(t, signer(t), ssh.HostCert, "ping.example", 5, nil, ssh.CertTimeInfinity),
 	}
 	for name, crt := range bad {

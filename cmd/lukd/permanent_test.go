@@ -14,12 +14,11 @@ import (
 
 const permanentText = `listen: {main: {addr: "127.0.0.1:0", public: "https://drop.example.com"}}
 auth:
-  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+  keys: {robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}
 endpoint:
   drop:
     listen: main
     endpoint: /drop
-    path: q/drop
     allow: [robert.socha]
     respond: url
     storage: drop
@@ -27,7 +26,7 @@ endpoint:
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:
-  drop: {type: local, base: s/drop, path: "{{ .Random }}", expose: drop}
+  drop: {directory: s/drop, path: "{{ .Random }}", expose: drop}
 expose:
   drop: {listen: main, path: /d/}
 `

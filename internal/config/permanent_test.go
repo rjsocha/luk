@@ -116,7 +116,7 @@ func TestPermanentConfigErrors(t *testing.T) {
 	}
 	// a nested expose under the path
 	src = withPermanent(permanentNames) + "  nested:\n    listen: main\n    path: /d/permanent/x/\n"
-	src = strings.Replace(src, "storage:\n", "storage:\n  nested: {type: local, base: /storage/nested, path: \"{{ .Random }}\", expose: nested}\n", 1)
+	src = strings.Replace(src, "storage:\n", "storage:\n  nested: {directory: /storage/nested, path: \"{{ .Random }}\", expose: nested}\n", 1)
 	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "permanent.path permanent overlaps the nested expose under permanent/x/") {
 		t.Errorf("nested: %v", err)
 	}
@@ -128,7 +128,6 @@ func TestPermanentPathPerStorage(t *testing.T) {
 	second := `  drop2:
     listen: [main]
     endpoint: /drop2
-    path: /queue/drop
     allow: [robert.socha]
     respond: url
     storage: drop

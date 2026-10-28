@@ -278,7 +278,7 @@ func TestUploadDryRun(t *testing.T) {
 }
 
 func TestUploadLimits(t *testing.T) {
-	f, srvURL, pin := partsFixture(t, "4", func(s string) string { return s + "limits: {uploads: {identity: 1}}\n" })
+	f, srvURL, pin := partsFixture(t, "4", func(s string) string { return s + "limits: {uploads: {owner: {max: 1}}}\n" })
 	data := content(100)
 	first, _ := create(t, f, srvURL, pin, fileMeta(data))
 	c := chanOpen(t, srvURL, "/drop", pin)
@@ -380,7 +380,7 @@ func TestSecretUploadStagesInSecretQueue(t *testing.T) {
 	f, srvURL, pin := partsFixture(t, "4", func(s string) string {
 		return strings.NewReplacer(
 			`storage: drop, parts:`, `storage: drop, secret: {allow: ['*'], path: `+vol+`/queue, storage: volatile}, parts:`,
-			"storage:\n", "storage:\n  volatile: {type: local, base: "+vol+"/storage, path: \"{{ .Random }}\", expose: volatile, ttl: {user: true}}\n",
+			"storage:\n", "storage:\n  volatile: {directory: "+vol+"/storage, path: \"{{ .Random }}\", expose: volatile, ttl: {user: true}}\n",
 			"  drop: {listen: main, path: /d/}\n", "  drop: {listen: main, path: /d/}\n  volatile: {listen: main, path: /d/volatile/}\n",
 		).Replace(s)
 	})
@@ -389,7 +389,7 @@ func TestSecretUploadStagesInSecretQueue(t *testing.T) {
 	if filepath.Dir(pu.stage.Entry.Dir) != filepath.Join(vol, "queue") {
 		t.Fatalf("staged in %s", pu.stage.Entry.Dir)
 	}
-	if v := visible(t, filepath.Join(f.root, "data", "q/drop")); len(v) != 0 {
+	if v := visible(t, filepath.Join(f.root, "data", "queue/drop")); len(v) != 0 {
 		t.Fatalf("endpoint queue holds %v", v)
 	}
 	head, body := sendAll(t, c, []byte("s3cr3t"))
@@ -663,7 +663,7 @@ func TestUploadSessionGoneBeforeAttach(t *testing.T) {
 	c := chanOpen(t, srvURL, "/drop", pin)
 	head, body := c.op(t, c.putReq(t, f.user, fileMeta(content(100))), nil)
 	wantInner(t, "create in a dropped session", head, body, http.StatusNotFound)
-	if v := visible(t, filepath.Join(f.root, "data", "q/drop")); len(v) != 0 {
+	if v := visible(t, filepath.Join(f.root, "data", "queue/drop")); len(v) != 0 {
 		t.Fatalf("queue holds %v", v)
 	}
 	if n := openUploads(f); n != 0 {

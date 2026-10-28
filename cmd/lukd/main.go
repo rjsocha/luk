@@ -95,7 +95,7 @@ func rootCmd() *cobra.Command {
 		Long: "Validate the configuration. When a lukd role runs on its root, compare the\n" +
 			"restart-only settings (root, listen, limits.conn, limits.header.timeout,\n" +
 			"auth.nonces) with the ones it runs with and fail on a change its reload\n" +
-			"would refuse. A local storage base holding anything but .db/ and file/ (an\n" +
+			"would refuse. A storage directory holding anything but .db/ and file/ (an\n" +
 			"older layout) fails the check; an orphaned permanent name in a readable\n" +
 			"base (see lukd storage permanent) is a warning.\n" +
 			"The identity key (see lukd key) must exist and be loadable; --no-identity\n" +
@@ -272,7 +272,7 @@ func rootCmd() *cobra.Command {
 	}
 	statusCmd.Flags().BoolVar(&asJSON, "json", false, "print the raw status.json")
 	root.AddCommand(statusCmd)
-	root.AddCommand(queueCmd(&cfgPath))
+	root.AddCommand(failedCmd(&cfgPath))
 	root.AddCommand(storageCmd(&cfgPath))
 	root.AddCommand(quotaCmd(&cfgPath))
 	root.AddCommand(runCmd())
@@ -322,7 +322,7 @@ func generateTLS(cfgPath string, w io.Writer) error {
 			}
 			return nil
 		}
-		pin, err := tlsself.Generate(t.Cert, t.Key, t.Host, t.Algorithm)
+		pin, err := tlsself.Generate(t.Cert, t.Key, l.CertNames(), t.Algorithm)
 		if err == nil {
 			fmt.Fprintf(w, "%s %s\n", id, pin)
 		} else {

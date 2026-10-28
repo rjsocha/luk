@@ -7,10 +7,9 @@ listen:
     addr: 0.0.0.0:8443
     host: [lukd.vm]
     tls:
-      mode: self
+      mode: self                # lukd tls generate: a certificate for the names of host
       cert: tls/tls.crt
       key: tls/tls.key
-      host: lukd.vm
       algorithm: ed25519        # the default
   download:                     # browsers: ecdsa-p256
     addr: 0.0.0.0:443
@@ -20,7 +19,6 @@ listen:
       algorithm: ecdsa-p256
       cert: tls/download.crt
       key: tls/download.key
-      host: drop.lukd.vm
   # secure:                     # private files (luk send --private), fetched by luk get
   #   addr: 0.0.0.0:8444
   #   host: [secure.lukd.vm]
@@ -28,7 +26,6 @@ listen:
   #     mode: self
   #     cert: tls/secure.crt
   #     key: tls/secure.key
-  #     host: secure.lukd.vm
   # proxied:                    # plain HTTP behind a reverse proxy
   #   addr: 127.0.0.1:8081
   #   host: [drop.example.com]
@@ -38,13 +35,14 @@ listen:
   #   host: [drop.example.com]    # the certificate names; no wildcard, no IP
   #   tls:
   #     mode: acme
-  #     email: ops@example.com    # optional
-  #     # Tests: https://acme-staging-v02.api.letsencrypt.org/directory
-  #     directory: https://acme-v02.api.letsencrypt.org/directory   # the default
-  #     # eab: {kid: KEY_ID, key_file: /etc/site/lukd/eab.key}       # CAs that need it; or key: inline
-  # http:                         # needed by acme: challenges, 308 to https
+  #     acme:
+  #       entrypoint: http        # the plain listener of the HTTP-01 challenges of these names
+  #       # Tests: https://acme-staging-v02.api.letsencrypt.org/directory
+  #       server: https://acme-v02.api.letsencrypt.org/directory      # required
+  #       email: ops@example.com  # optional
+  #       # eab: {kid: KEY_ID, file: /etc/site/lukd/eab.key}         # CAs that need it; or key: inline
+  # http:                         # entrypoint of web: its challenges, 308 to https, nothing else
   #   addr: 0.0.0.0:80
-  #   acme: true
 
 # Defaults, shown for reference.
 limits:
@@ -53,17 +51,20 @@ limits:
     idle: 60s
   header:
     timeout: 10s
-  queue:
-    reserve: 1G
-  failed:
-    age: 3d
   channel:                      # the channel sessions of luk (handshake, then one operation)
     auth: 60s                   # from the handshake to its signed operation (a hardware key touch)
     pending: 1024               # sessions without their operation; the oldest goes for a new one
     idle: 2m                    # a session that is no upload, after its operation
   uploads:                      # uploads in parts open at once
-    total: 256
-    identity: 8                 # per identity
+    max: 256
+    owner:
+      max: 8                    # per owner (key, or CA + Key ID)
+
+queue:
+  reserve: 1G                   # free space kept on the queue filesystem
+
+failed:
+  ttl: 3d                       # failure records (lukd failed); 0 keeps them
 
 log:
   level: info                   # debug, info, warn, error; SIGHUP applies a change
@@ -77,23 +78,23 @@ log:
 # here or in ssh.d. CA keys can live in ssh.d/ca/host/<name>.pub and
 # ssh.d/ca/user/<name>.pub, one key per line (rotation)
 # (deploy/ssh.d/ca/host/hosts.pub.example); an auth.ca entry with
-# name and revoked but no key holds the revocations of such a CA.
+# revoked but no key holds the revocations of such a CA.
 auth:
-  clock_skew: 1m                 # default 1m, at most 1h
+  skew: 1m                       # clock skew of signatures: default 1m, at most 1h
   nonces: /run/luk/nonces        # nonce cache directory on a tmpfs (default)
   keys:
-    - name: robert.socha
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
+    robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
   ca:
-    - name: hosts
+    hosts:
       type: host
       key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n example-ca"
+      # revoked:                # certified keys the CA no longer vouches for:
+      #   key: ["SHA256:..."]   # every certificate of the key (ssh-keygen -l), not a new key of the host
 
 endpoint:
   backup:
     listen: intake
     endpoint: /backup
-    path: queue/backup
     allow: [robert.socha, "hosts:*"]
     respond: accept
     limits:
@@ -120,7 +121,6 @@ endpoint:
   drop:
     listen: intake
     endpoint: /drop
-    path: queue/drop
     allow: [robert.socha]
     respond: url
     storage: drop
@@ -210,8 +210,9 @@ pipeline:
   #   endpoint: [backup]
   #   steps:
   #     - encrypt:
-  #         wkd: [robert@example.net]     # keys from the Web Key Directory
-  #         key: [matt@example.com]       # keys from gpg.keys
+  #         recipients:
+  #           keys: [matt@example.com]    # keys from gpg.keys
+  #           wkd: [robert@example.net]   # keys from the Web Key Directory
   #         strict: false                 # true: any unusable recipient fails
   #         # Very insecure, legacy receivers only (doc/encryption.md): the passwords
   #         # sit in /etc/site/lukd/password.d/<name> (root:luk 0640) on this server.
@@ -232,15 +233,18 @@ pipeline:
 
 storage:
   archive:
-    type: local
-    base: storage/archive
+    directory: storage/archive  # relative: under <root>/data
     path: "{{ .Sender }}/{{ .Year }}/{{ .Month }}/{{ .Day }}/{{ .File }}"
+    # conflict:                 # the stored name exists; the defaults
+    #   mode: version           # version (keep both, the newest under the name), reject or replace
+    #   identical: skip         # mode version: an upload identical to the newest version
+    #                           # makes no new version (skip) or one (store)
     ttl:
       max: 21d                  # fixed lifetime: the client ttl is ignored
     # retention:                # files kept per series (pipeline, origin, file name);
     #                           # the first rule whose origin globs match applies,
     #                           # the rest of the series is pruned (UTC buckets);
-    #                           # needs conflict version (default) or reject
+    #                           # needs conflict.mode version (default) or reject
     #   - origin: ["db1-prod", "*-prod"]
     #     keep: {last: 3, daily: 14, weekly: 8, monthly: 12, yearly: 2}
     #   - origin: ["*-stage"]
@@ -259,25 +263,22 @@ storage:
     #     every: 50h
     #     size: {min: 100M}
   publish:
-    type: local
-    base: storage/publish
+    directory: storage/publish
     path: "{{ .File }}"
     expose: publish
     cleanup:
       age: 14d                  # files without an expiry go after 14 days
   drop:
-    type: local
-    base: storage/drop
+    directory: storage/drop
     path: "{{ .Random }}"
     expose: drop
     # protect: secure           # the expose (auth.ssh) of the private files
     shard: 2
-    # hardlink: true            # one copy per content: uploads with the same sha256
+    # hardlink:                 # one copy per content: uploads with the same sha256
     #                           # are hardlinks of one object (default); false
     #                           # stores separate files
-    # links:
-    #   max: 100                # most names with one content per identity
-    #                           # (default 100; with hardlink only), 429 above it
+    #   owner:
+    #     max: 100              # most names with one content per owner (default 100), 429 above it
     ttl:
       user: true                # the client ttl counts, clamped to min and max
       min: 1h
@@ -288,14 +289,12 @@ storage:
     #   alphabet: "abcdefghjkmnpqrstuvwxyz23456789"
     #   length: 26              # default: the shortest with 128 bits
   # vault:                      # backups downloaded with luk get (files and directories),
-  #   type: local               # signed by the identities vault allows
-  #   base: storage/vault
+  #   directory: storage/vault
   #   path: "{{ .Sender }}/{{ .Year }}/{{ .File }}"
   #   expose: vault             # an expose with auth.ssh: every file, signed requests only
   #   # protect: secure-vault   # private files keep their own auth.ssh expose
   # volatile:                   # the secrets of endpoint drop, on the tmpfs /run
-  #   type: local
-  #   base: /run/luk/volatile/storage
+  #   directory: /run/luk/volatile/storage
   #   path: "{{ .Random }}"
   #   expose: volatile
   #   ttl: {user: true, min: 1h, max: 7d}
@@ -307,6 +306,7 @@ expose:
     # plain: true               # no auth on purpose: silences the catalog and index warnings
     # index: true               # HTML listing of the directory URLs (public files only;
     #                           # not with shard on the storage)
+    # catalog: true             # catalog.json: every public file of the storage with its meta
   publish:
     listen: download
     path: /magento/

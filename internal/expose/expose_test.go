@@ -47,7 +47,7 @@ func newEnv(t *testing.T, mod func(x *config.Expose)) *env {
 		mod(x)
 	}
 	cfg := &config.Config{
-		Storage: map[string]*config.Storage{"drop": {Type: "local", Base: base, Expose: "pub", Conflict: "version"}},
+		Storage: map[string]*config.Storage{"drop": {Base: base, Expose: "pub", Conflict: config.Conflict{Mode: "version"}}},
 		Expose:  map[string]*config.Expose{"pub": x},
 	}
 	e := &env{cfg: cfg, base: base, st: store.Local{Base: base, Conflict: "version"}, now: t0, logs: &bytes.Buffer{}}
@@ -423,7 +423,7 @@ func TestCleanupAgeAndClaimed(t *testing.T) {
 
 func TestCleanupAgeWithoutExpose(t *testing.T) {
 	base := t.TempDir()
-	cfg := &config.Config{Storage: map[string]*config.Storage{"archive": {Type: "local", Base: base, Conflict: "version"}}}
+	cfg := &config.Config{Storage: map[string]*config.Storage{"archive": {Base: base, Conflict: config.Conflict{Mode: "version"}}}}
 	cfg.Storage["archive"].Cleanup.Age = config.Duration(24 * time.Hour)
 	e := &env{cfg: cfg, base: base, st: store.Local{Base: base, Conflict: "version"}, now: t0, logs: &bytes.Buffer{}}
 	old := t0.Add(-25 * time.Hour).Format(time.RFC3339)
@@ -437,20 +437,6 @@ func TestCleanupAgeWithoutExpose(t *testing.T) {
 			t.Errorf("%s: present %v, want %v", name, !want, want)
 		}
 	}
-}
-
-func TestSkipsNonLocal(t *testing.T) {
-	cfg := &config.Config{
-		Storage: map[string]*config.Storage{"s": {Type: "s3", Expose: "pub"}},
-		Expose:  map[string]*config.Expose{"pub": {Listen: config.StringList{"l"}, Path: "/d/"}},
-	}
-	h := New(cfg, slog.New(slog.DiscardHandler), time.Now, "l", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "/d/f", nil))
-	if w.Code != 404 {
-		t.Errorf("s3: %d", w.Code)
-	}
-	sweep(cfg, slog.New(slog.DiscardHandler), time.Now())
 }
 
 func TestJanitorKeepsReplacedFile(t *testing.T) {
@@ -472,7 +458,7 @@ func TestJanitorKeepsReplacedFile(t *testing.T) {
 func TestSweepUnexposedStorage(t *testing.T) {
 	e := newEnv(t, nil)
 	other := t.TempDir()
-	e.cfg.Storage["archive"] = &config.Storage{Type: "local", Base: other}
+	e.cfg.Storage["archive"] = &config.Storage{Base: other}
 	tmp, orphan := filepath.Join(other, ".db", "tmp", "0123"), filepath.Join(other, store.DataDir, ".lost")
 	for _, p := range []string{tmp, orphan} {
 		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
@@ -553,8 +539,8 @@ func TestListenerRoutes(t *testing.T) {
 	root, dir := t.TempDir(), t.TempDir()
 	cfg := &config.Config{
 		Storage: map[string]*config.Storage{
-			"a": {Type: "local", Base: root, Expose: "root", Conflict: "version"},
-			"b": {Type: "local", Base: dir, Expose: "dir", Conflict: "version"},
+			"a": {Base: root, Expose: "root", Conflict: config.Conflict{Mode: "version"}},
+			"b": {Base: dir, Expose: "dir", Conflict: config.Conflict{Mode: "version"}},
 		},
 		Expose: map[string]*config.Expose{
 			"root": {Listen: config.StringList{"dl"}, Path: "/"},
@@ -663,8 +649,8 @@ listen:
   l: {addr: "127.0.0.1:1", public: "http://l.vm"}
   m: {addr: "127.0.0.1:2", public: "http://m.vm"}
 storage:
-  outer: {type: local, base: ` + outer + `, path: x, expose: outer}
-  inner: {type: local, base: ` + inner + `, path: x, expose: inner}
+  outer: {directory: ` + outer + `, path: x, expose: outer}
+  inner: {directory: ` + inner + `, path: x, expose: inner}
 expose:
   outer: {listen: [l, m], path: /}
   inner: {listen: l, path: /v/}

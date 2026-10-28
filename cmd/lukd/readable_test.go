@@ -22,13 +22,13 @@ func readableDir(t *testing.T) string {
 		}
 	}
 	text := `root: ` + filepath.Join(dir, "root") + `
-listen: {main: {addr: "127.0.0.1:0", tls: {mode: self, cert: ` + filepath.Join(dir, "tls/c.crt") + `, key: ` + filepath.Join(dir, "tls/c.key") + `, host: lukd.vm}}}
+listen: {main: {addr: "127.0.0.1:0", tls: {mode: self, cert: ` + filepath.Join(dir, "tls/c.crt") + `, key: ` + filepath.Join(dir, "tls/c.key") + `}}}
 endpoint:
-  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [robert.socha]}
+  backup: {listen: main, endpoint: /backup, allow: [robert.socha]}
 pipeline:
   archive: {endpoint: [backup], steps: [{store: archive}]}
 storage:
-  archive: {type: local, base: s/archive, path: "{{ .File }}"}
+  archive: {directory: s/archive, path: "{{ .File }}"}
 gpg: {keys: ` + filepath.Join(dir, "gpg") + `}
 `
 	for _, f := range []struct {

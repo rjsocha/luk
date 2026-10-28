@@ -209,7 +209,7 @@ func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	if aside != "" {
 		log.Warn("status file corrupt, moved aside, starting empty", "file", stPath, "aside", aside)
 	}
-	q := queue.New(int64(cfg.Limits.Queue.Reserve), nil)
+	q := queue.New(int64(cfg.Queue.Reserve), nil)
 	d := pipeline.NewDispatcher(cfg, q, log)
 	d.SetStatus(st)
 	d.RefreshFailed()
@@ -240,7 +240,7 @@ func Process(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 			return nil
 		case <-hup:
 			next := reloadConfig(cur.Load(), "process", log, func(next *config.Config) {
-				q.SetReserve(int64(next.Limits.Queue.Reserve))
+				q.SetReserve(int64(next.Queue.Reserve))
 				d.Reload(next)
 				cur.Store(next)
 			})

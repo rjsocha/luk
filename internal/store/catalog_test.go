@@ -111,16 +111,20 @@ func checkNoAlias(t *testing.T, l Local, alias string) {
 }
 
 func TestFromConfig(t *testing.T) {
-	l := FromConfig(&config.Storage{Base: "/b", Conflict: "reject", Catalog: true, Shard: 2})
+	l := FromConfig(&config.Storage{Base: "/b", Conflict: config.Conflict{Mode: "reject"}, Catalog: true, Shard: 2})
 	if !reflect.DeepEqual(l, Local{Base: "/b", Conflict: "reject", Catalog: true, Shard: 2, Dedup: true, Hardlink: true, MaxLinks: config.DefaultLinksMax}) {
 		t.Fatalf("%+v", l)
 	}
-	off := false
-	if l := FromConfig(&config.Storage{Base: "/b", Conflict: "version", Dedup: &off}); l.Dedup {
-		t.Fatalf("dedup false: %+v", l)
+	if l := FromConfig(&config.Storage{Base: "/b", Conflict: config.Conflict{Mode: "version", Identical: "store"}}); l.Dedup {
+		t.Fatalf("identical store: %+v", l)
 	}
-	if l := FromConfig(&config.Storage{Base: "/b", Hardlink: &off}); l.Hardlink {
+	if l := FromConfig(&config.Storage{Base: "/b", Hardlink: config.Hardlink{Off: true}}); l.Hardlink {
 		t.Fatalf("hardlink false: %+v", l)
+	}
+	h := config.Hardlink{}
+	h.Owner.Max = 7
+	if l := FromConfig(&config.Storage{Base: "/b", Hardlink: h}); !l.Hardlink || l.MaxLinks != 7 {
+		t.Fatalf("hardlink owner max: %+v", l)
 	}
 }
 

@@ -118,7 +118,7 @@ func TestEndpointList(t *testing.T) {
 func TestEndpointListSecretTTL(t *testing.T) {
 	f := newFixtureWith(t, func(s string) string {
 		s = strings.Replace(s, `respond: url, storage: drop}`, `respond: url, storage: drop, secret: {allow: ['*'], path: q/secret, storage: volatile}}`, 1)
-		s = strings.Replace(s, "expose: drop}\n", "expose: drop}\n  volatile: {type: local, base: s/volatile, ttl: {user: true, min: 1h, max: 1d}, path: \"{{ .Random }}\", expose: volatile}\n", 1)
+		s = strings.Replace(s, "expose: drop}\n", "expose: drop}\n  volatile: {directory: s/volatile, ttl: {user: true, min: 1h, max: 1d}, path: \"{{ .Random }}\", expose: volatile}\n", 1)
 		return strings.Replace(s, "drop: {listen: main, path: /d/}", "drop: {listen: main, path: /d/}\n  volatile: {listen: main, path: /v/}", 1)
 	})
 	got := decodeList(t, f.list(t, listReq{signer: f.user}))
@@ -180,7 +180,7 @@ func TestEndpointListPerListener(t *testing.T) {
 	}
 }
 
-// The acme: true listener keeps answering the challenges and redirects
+// The acme entrypoint listener keeps answering the challenges and redirects
 // the listing to https like any other path; there, outside the channel,
 // it is refused.
 func TestEndpointListACME(t *testing.T) {

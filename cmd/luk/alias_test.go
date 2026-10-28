@@ -130,8 +130,8 @@ func TestAliasOverrideRun(t *testing.T) {
 	if code != 0 || e.meta.TTL != "60m" || e.meta.Portal != "direct" || !slices.Equal(e.meta.Tags, []string{"c"}) {
 		t.Fatalf("exit %d err %q meta %+v", code, errs, e.meta)
 	}
-	code, _, errs = runLuk(t, "drop", "--stdin", "--portal")
-	if code != 1 || !strings.Contains(errs, "--portal and --secret are mutually exclusive") {
+	code, _, errs = runLuk(t, "drop", "--stdin", "--private")
+	if code != 1 || !strings.Contains(errs, "--private takes no --secret or --indirect") {
 		t.Errorf("exclusive: exit %d: %s", code, errs)
 	}
 	code, _, errs = runLuk(t, "drop", "--stdin", "--ttl", "1h", "--ttl", "2h")

@@ -376,11 +376,11 @@ func parseCfg(t *testing.T, pipelines string) *config.Config {
 	cfg, err := config.Parse([]byte(`root: ` + t.TempDir() + `
 listen: {main: {addr: "127.0.0.1:0"}}
 auth:
-  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+  keys: {robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}
 endpoint:
-  ep: {listen: main, endpoint: /ep, path: q/ep, allow: [robert.socha]}
+  ep: {listen: main, endpoint: /ep, allow: [robert.socha]}
 storage:
-  s: {type: local, base: s/s, path: "{{ .File }}"}
+  s: {directory: s/s, path: "{{ .File }}"}
 ` + pipelines))
 	if err != nil {
 		t.Fatal(err)

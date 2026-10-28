@@ -17,7 +17,7 @@ import (
 
 func TestMaintainRetention(t *testing.T) {
 	base := t.TempDir()
-	st := &config.Storage{Type: "local", Base: base, Conflict: "version", Catalog: true, Retention: []config.Retention{
+	st := &config.Storage{Base: base, Conflict: config.Conflict{Mode: "version"}, Catalog: true, Retention: []config.Retention{
 		{Origin: config.StringList{"*-prod"}, Keep: config.Keep{Last: 1, Daily: 2}},
 	}}
 	cfg := &config.Config{Storage: map[string]*config.Storage{"archive": st}}
@@ -73,7 +73,7 @@ func TestMaintainRetention(t *testing.T) {
 // until it is released.
 func TestJanitorHold(t *testing.T) {
 	base := t.TempDir()
-	st := &config.Storage{Type: "local", Base: base, Conflict: "version", Retention: []config.Retention{{Keep: config.Keep{Last: 1}}}}
+	st := &config.Storage{Base: base, Conflict: config.Conflict{Mode: "version"}, Retention: []config.Retention{{Keep: config.Keep{Last: 1}}}}
 	st.Cleanup.Age = config.Duration(24 * time.Hour)
 	cfg := &config.Config{Storage: map[string]*config.Storage{"archive": st}}
 	e := &env{cfg: cfg, base: base, st: store.FromConfig(st), now: t0, logs: &bytes.Buffer{}}

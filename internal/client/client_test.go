@@ -61,16 +61,16 @@ func newLukdWith(t *testing.T, user ssh.PublicKey, mod func(string) string) (*se
 root: ` + root + `
 listen: {main: {addr: "127.0.0.1:0", public: "https://lukd.test"}}
 auth:
-  keys: [{name: robert.socha, key: "` + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(user))) + `"}]
+  keys: {robert.socha: "` + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(user))) + `"}
 endpoint:
-  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [robert.socha]}
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: drop}
+  backup: {listen: main, endpoint: /backup, allow: [robert.socha]}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha], respond: url, storage: drop}
 pipeline:
   all: {endpoint: [backup], steps: [{store: s}]}
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:
-  s: {type: local, base: s/archive, path: "{{ .Id }}"}
-  drop: {type: local, base: s/drop, path: "{{ .Random }}", expose: drop, ttl: {max: 1d}}
+  s: {directory: s/archive, path: "{{ .Id }}"}
+  drop: {directory: s/drop, path: "{{ .Random }}", expose: drop, ttl: {max: 1d}}
 expose:
   drop: {listen: main, path: /d/}
 `
@@ -81,7 +81,7 @@ expose:
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range []string{"q/backup", "q/drop"} {
+	for _, d := range []string{"queue/backup", "queue/drop"} {
 		if err := os.MkdirAll(filepath.Join(root, "data", d), 0o750); err != nil {
 			t.Fatal(err)
 		}

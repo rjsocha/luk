@@ -208,20 +208,20 @@ auth: {nonces: /srv/nonces/}
 gpg: {keys: /srv/gpg}
 listen:
   web:
-    tls: {mode: acme, cert: tls/c.pem, key: /etc/ssl/private/k.pem, eab: {kid: k, key_file: /etc/eab.key}}
+    tls: {mode: acme, cert: tls/c.pem, key: /etc/ssl/private/k.pem, acme: {eab: {kid: k, file: /etc/eab.key}}}
 endpoint:
-  up: {path: /srv/q/up, secret: {path: /run/v/q}}
-  rel: {path: queue/rel}
+  up: {secret: {path: /run/v/q}}
+  rel: {}
 storage:
-  s: {type: local, base: /storage/s, path: x}
-  r: {type: local, base: store, path: x}
+  s: {directory: /storage/s, path: x}
+  r: {directory: store, path: x}
   b: {type: s3, bucket: x}
 `, 0o640)
-	write(t, filepath.Join(sd, "40-more.yaml"), "storage:\n  t: {type: local, base: /storage/s, path: y}\n", 0o640)
+	write(t, filepath.Join(sd, "40-more.yaml"), "storage:\n  t: {directory: /storage/s, path: y}\n", 0o640)
 	if lk, err = LoadLukd(p, top, me); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/data/luk", "/etc/eab.key", "/etc/ssl/private/k.pem", "/run/v/q", "/srv/gpg", "/srv/nonces", "/srv/q/up", "/storage/s"}
+	want := []string{"/data/luk", "/etc/eab.key", "/etc/ssl/private/k.pem", "/run/v/q", "/srv/gpg", "/srv/nonces", "/storage/s"}
 	if !slices.Equal(lk.Paths, want) {
 		t.Fatalf("paths\n got %q\nwant %q", lk.Paths, want)
 	}

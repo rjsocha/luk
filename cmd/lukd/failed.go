@@ -16,9 +16,9 @@ import (
 	"luk/internal/status"
 )
 
-func queueCmd(cfgPath *string) *cobra.Command {
+func failedCmd(cfgPath *string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "queue",
+		Use:   "failed",
 		Short: "Failure records of uploads",
 		Long: "Failure records of uploads. An upload whose pipelines ended with a failure\n" +
 			"is deleted; what stays is its record: what the upload was and how each\n" +
@@ -30,7 +30,7 @@ func queueCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return asServiceUser("lukd queue", cfg)
+			return asServiceUser("lukd failed", cfg)
 		},
 	}
 	var asJSON bool

@@ -76,18 +76,18 @@ func newFixtureDir(t *testing.T, mod func(string) string, dir func(dir string, u
 root: ` + root + `
 listen: {main: {addr: "127.0.0.1:0", public: "https://lukd.vm:8443"}}
 auth:
-  keys: [{name: robert.socha, key: "` + pubLine(user.PublicKey()) + `"}]
-  ca: [{name: hosts, type: host, key: "` + pubLine(hostCA.PublicKey()) + `"}]
+  keys: {robert.socha: "` + pubLine(user.PublicKey()) + `"}
+  ca: {hosts: {type: host, key: "` + pubLine(hostCA.PublicKey()) + `"}}
 endpoint:
-  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [robert.socha, "hosts:*"], limits: {body: {size: 1K}}}
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: drop}
+  backup: {listen: main, endpoint: /backup, allow: [robert.socha, "hosts:*"], limits: {body: {size: 1K}}}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha], respond: url, storage: drop}
 pipeline:
   archive: {endpoint: [backup], tags: [prod], steps: [{store: archive}]}
   devdb: {endpoint: [backup], tags: [prod, devdump], steps: [{store: archive}]}
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:
-  archive: {type: local, base: s/archive, path: "{{ .File }}"}
-  drop: {type: local, base: s/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}
+  archive: {directory: s/archive, path: "{{ .File }}"}
+  drop: {directory: s/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}
 expose:
   drop: {listen: main, path: /d/}
 `
@@ -291,7 +291,7 @@ func TestAcceptKey(t *testing.T) {
 	if err := json.Unmarshal(b, &sc); err != nil || sc.ID != out.ID || sc.Sender != "robert.socha" || sc.Endpoint != "backup" || sc.Expires != "" {
 		t.Fatalf("sidecar %s", b)
 	}
-	if e := entries(t, filepath.Join(f.root, "data", "q/backup")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "queue/backup")); len(e) != 0 {
 		t.Fatalf("queue left %v", e)
 	}
 }
@@ -433,20 +433,11 @@ func TestPrettyURLNotOfferedBeforeBody(t *testing.T) {
 	}
 }
 
-func TestURLStorageNotLocal(t *testing.T) {
-	f := newFixture(t)
-	f.srv.config().Storage["drop"] = &config.Storage{Type: "s3", Bucket: "b", Expose: "drop"}
-	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin}, body: []byte("x")})
-	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "storage drop is not a local storage") {
-		t.Fatalf("%d %s", rec.Code, rec.Body)
-	}
-}
-
 func TestInternalErrorIsGeneric(t *testing.T) {
 	f := newFixture(t)
 	var logs bytes.Buffer
 	f.srv.log = slog.New(slog.NewTextHandler(&logs, nil))
-	if err := os.RemoveAll(filepath.Join(f.root, "data", "q/backup")); err != nil {
+	if err := os.RemoveAll(filepath.Join(f.root, "data", "queue/backup")); err != nil {
 		t.Fatal(err)
 	}
 	body := []byte("x")
@@ -454,7 +445,7 @@ func TestInternalErrorIsGeneric(t *testing.T) {
 	if rec.Code != 500 || strings.TrimSpace(rec.Body.String()) != "{\n  \"error\": \"internal error\"\n}" {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
-	if !strings.Contains(logs.String(), "q/backup") {
+	if !strings.Contains(logs.String(), "queue/backup") {
 		t.Fatalf("detail not logged: %s", logs.String())
 	}
 }
@@ -611,7 +602,7 @@ func sidecarOf(t *testing.T, base, rel string) store.Sidecar {
 func TestExpiresPerStorage(t *testing.T) {
 	f := newFixtureWith(t, func(s string) string {
 		s = strings.Replace(s, "steps: [{store: drop}]", "steps: [{store: [drop, archive]}]", 1)
-		return strings.Replace(s, `base: s/archive, path: "{{ .File }}"}`, `base: s/archive, path: "{{ .File }}", ttl: {max: 1h}}`, 1)
+		return strings.Replace(s, `directory: s/archive, path: "{{ .File }}"}`, `directory: s/archive, path: "{{ .File }}", ttl: {max: 1h}}`, 1)
 	})
 	before := time.Now()
 	rec, _ := f.do(t, req{signer: f.user, path: "/drop", meta: wire.Meta{Portal: wire.PortalDirect, Source: wire.SourceStdin, File: "a.txt", TTL: "2d"}, body: []byte("x")})
@@ -627,7 +618,7 @@ func TestExpiresPerStorage(t *testing.T) {
 
 func TestExpiresRespondAccept(t *testing.T) {
 	f := newFixtureWith(t, func(s string) string {
-		return strings.Replace(s, `base: s/archive, path: "{{ .File }}"}`, `base: s/archive, path: "{{ .File }}", ttl: {user: true, max: 2h}}`, 1)
+		return strings.Replace(s, `directory: s/archive, path: "{{ .File }}"}`, `directory: s/archive, path: "{{ .File }}", ttl: {user: true, max: 2h}}`, 1)
 	})
 	body := []byte("data")
 	before := time.Now()
@@ -652,8 +643,8 @@ func TestExpiresRespondAccept(t *testing.T) {
 func TestExpiresAcceptFanOut(t *testing.T) {
 	f := newFixtureWith(t, func(s string) string {
 		s = strings.Replace(s, "tags: [prod], steps: [{store: archive}]", "tags: [prod], steps: [{store: [archive, keep]}]", 1)
-		s = strings.Replace(s, `base: s/archive, path: "{{ .File }}"}`, `base: s/archive, path: "{{ .File }}", ttl: {user: true, max: 2h}}`, 1)
-		return strings.Replace(s, "storage:\n", "storage:\n  keep: {type: local, base: s/keep, path: \"{{ .File }}\", ttl: {max: 21d}}\n", 1)
+		s = strings.Replace(s, `directory: s/archive, path: "{{ .File }}"}`, `directory: s/archive, path: "{{ .File }}", ttl: {user: true, max: 2h}}`, 1)
+		return strings.Replace(s, "storage:\n", "storage:\n  keep: {directory: s/keep, path: \"{{ .File }}\", ttl: {max: 21d}}\n", 1)
 	})
 	body := []byte("data")
 	m := fileMeta(body, "prod")
@@ -680,7 +671,7 @@ func TestNoSpaceBeforeBody(t *testing.T) {
 	if read != 0 {
 		t.Fatalf("body read %d bytes", read)
 	}
-	if e := entries(t, filepath.Join(f.root, "data", "q/drop")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "queue/drop")); len(e) != 0 {
 		t.Fatalf("queue %v", e)
 	}
 }
@@ -812,7 +803,7 @@ func TestSignedHashMismatch(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("short body: %d %s", rec.Code, rec.Body)
 	}
-	if e := entries(t, filepath.Join(f.root, "data", "q/backup")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "queue/backup")); len(e) != 0 {
 		t.Fatalf("queue left %v", e)
 	}
 }
@@ -823,7 +814,7 @@ func TestStreamOverMaxSize(t *testing.T) {
 	if rec.Code != 413 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
-	if e := entries(t, filepath.Join(f.root, "data", "q/backup")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "queue/backup")); len(e) != 0 {
 		t.Fatalf("queue left %v", e)
 	}
 }
@@ -859,14 +850,14 @@ func TestMatch(t *testing.T) {
 func TestMatchClaim(t *testing.T) {
 	f := newFixture(t)
 	cfg := f.srv.config()
-	cfg.Pipeline["devdb"].Claim = true
+	cfg.Pipeline["devdb"].Exclusive = true
 	if got, skipped, err := Match(cfg, "backup", []string{"prod", "devdump"}); err != nil || strings.Join(got, ",") != "devdb" || strings.Join(skipped, ",") != "archive" {
 		t.Fatalf("%v %v %v", got, skipped, err)
 	}
 	if got, skipped, _ := Match(cfg, "backup", []string{"prod"}); skipped != nil || strings.Join(got, ",") != "archive" {
 		t.Fatalf("unclaimed %v %v", got, skipped)
 	}
-	cfg.Pipeline["archive"].Claim = true
+	cfg.Pipeline["archive"].Exclusive = true
 	if _, _, err := Match(cfg, "backup", []string{"prod", "devdump"}); err == nil || !strings.Contains(err.Error(), "upload claimed by archive and devdb") {
 		t.Fatalf("two claims: %v", err)
 	}
@@ -907,7 +898,7 @@ func TestDryRunScheduleAndStages(t *testing.T) {
 	m.DryRun = false
 	rec, _ = f.do(t, req{signer: f.user, path: "/backup", meta: m, body: body})
 	receipt(t, rec, http.StatusAccepted)
-	pending, err := queue.Pending(filepath.Join(f.root, "data", "q/backup"))
+	pending, err := queue.Pending(filepath.Join(f.root, "data", "queue/backup"))
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("%v %v", pending, err)
 	}
@@ -956,7 +947,7 @@ func TestDryRunEchoedAndVerified(t *testing.T) {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	f.settle(t)
-	for _, d := range []string{"q/backup", "q/drop", "s/archive/file", "s/drop/file"} {
+	for _, d := range []string{"queue/backup", "queue/drop", "s/archive/file", "s/drop/file"} {
 		if e := entries(t, filepath.Join(f.root, "data", d)); len(e) != 0 {
 			t.Fatalf("%s: %v", d, e)
 		}
@@ -988,7 +979,7 @@ func TestUnstorableNameBeforeBody(t *testing.T) {
 	if read != 0 {
 		t.Fatalf("body read %d bytes", read)
 	}
-	if e := entries(t, filepath.Join(f.root, "data", "q/backup")); len(e) != 0 {
+	if e := entries(t, filepath.Join(f.root, "data", "queue/backup")); len(e) != 0 {
 		t.Fatalf("queue %v", e)
 	}
 }
@@ -1092,11 +1083,12 @@ func TestRevealPortalEndToEnd(t *testing.T) {
 
 func TestCatalogEndToEnd(t *testing.T) {
 	f := newFixtureWith(t, func(s string) string {
-		old := `drop: {type: local, base: s/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}`
+		old := `drop: {directory: s/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}`
 		if !strings.Contains(s, old) {
 			t.Fatal("drop storage line not found")
 		}
-		return strings.Replace(s, old, `drop: {type: local, base: s/drop, ttl: {user: true, max: 7d}, path: "{{ .File }}", expose: drop, catalog: true}`, 1)
+		s = strings.Replace(s, old, `drop: {directory: s/drop, ttl: {user: true, max: 7d}, path: "{{ .File }}", expose: drop}`, 1)
+		return strings.Replace(s, "drop: {listen: main, path: /d/}", "drop: {listen: main, path: /d/, catalog: true}", 1)
 	})
 	body := []byte("report")
 	m := fileMeta(body)
@@ -1151,7 +1143,7 @@ func TestRevealUnsizedOverLimit(t *testing.T) {
 func TestHostnameAndOriginPaths(t *testing.T) {
 	withPath := func(p string) *fixture {
 		return newFixtureWith(t, func(s string) string {
-			return strings.Replace(s, `archive: {type: local, base: s/archive, path: "{{ .File }}"}`, `archive: {type: local, base: s/archive, path: "`+p+`"}`, 1)
+			return strings.Replace(s, `archive: {directory: s/archive, path: "{{ .File }}"}`, `archive: {directory: s/archive, path: "`+p+`"}`, 1)
 		})
 	}
 	body := []byte("dump")
@@ -1272,7 +1264,7 @@ func TestACMEUnknownHostLogLevel(t *testing.T) {
 func TestPortalOwner(t *testing.T) {
 	userCA := newSigner(t)
 	f := newFixtureWith(t, func(s string) string {
-		s = strings.Replace(s, `ca: [{name: hosts, type: host, key: "`, `ca: [{name: users, type: user, key: "`+pubLine(userCA.PublicKey())+`"}, {name: hosts, type: host, key: "`, 1)
+		s = strings.Replace(s, `ca: {hosts: {type: host, key: "`, `ca: {users: {type: user, key: "`+pubLine(userCA.PublicKey())+`"}, hosts: {type: host, key: "`, 1)
 		return strings.Replace(s, `allow: [robert.socha], respond: url`, `allow: [robert.socha, "hosts:*", "users:*"], respond: url`, 1)
 	})
 	user := newSigner(t)

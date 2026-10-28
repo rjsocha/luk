@@ -57,22 +57,22 @@ func newPrivateEnv(t *testing.T) *privateEnv {
 	e.other, otherPub = newKeyFile(t)
 	crt, key := filepath.Join(e.root, "data/tls/s.crt"), filepath.Join(e.root, "data/tls/s.key")
 	var err error
-	if e.pin, err = tlsself.Generate(crt, key, "luk.test", tlsself.ECDSAP256); err != nil {
+	if e.pin, err = tlsself.Generate(crt, key, []string{"luk.test"}, tlsself.ECDSAP256); err != nil {
 		t.Fatal(err)
 	}
 	text := fmt.Sprintf(`
 root: %s
 listen:
   main: {addr: "%s", public: "http://%s"}
-  secure: {addr: "%s", public: "https://%s", tls: {mode: self, cert: tls/s.crt, key: tls/s.key, host: luk.test}}
+  secure: {addr: "%s", public: "https://%s", tls: {mode: self, cert: tls/s.crt, key: tls/s.key}}
 auth:
-  keys: [{name: robert.socha, key: "%s"}, {name: other, key: "%s"}]
+  keys: {robert.socha: "%s", other: "%s"}
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha, other], respond: url, storage: drop, private: {owner: ['*'], any: ['*']}, link: {remove: ['*'], list: ['*']}}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha, other], respond: url, storage: drop, private: {owner: ['*'], any: ['*']}, link: {remove: ['*'], list: ['*']}}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:
-  drop: {type: local, base: s/drop, ttl: {user: true}, path: "{{ .Random }}", expose: drop, protect: secure}
+  drop: {directory: s/drop, ttl: {user: true}, path: "{{ .Random }}", expose: drop, protect: secure}
 expose:
   drop: {listen: main, path: /d/}
   secure: {listen: secure, path: /, auth: {ssh: {allow: ["*"]}}}
@@ -285,8 +285,8 @@ func TestSendPrivateUsage(t *testing.T) {
 		want string
 	}{
 		{[]string{"--any"}, "--any needs --private"},
-		{[]string{"--private", "--secret"}, "--private takes no --secret or --portal"},
-		{[]string{"--private", "--portal"}, "--private takes no --secret or --portal"},
+		{[]string{"--private", "--secret"}, "--private takes no --secret or --indirect"},
+		{[]string{"--private", "--indirect"}, "--private takes no --secret or --indirect"},
 	} {
 		code, _, errs := runLuk(t, append([]string{"send", "--file", f}, c.args...)...)
 		if code != 1 || !strings.Contains(errs, c.want) {

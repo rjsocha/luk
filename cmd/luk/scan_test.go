@@ -43,24 +43,24 @@ func newScanEnv(t *testing.T) *scanEnv {
 	e.key, pub = newKeyFile(t)
 	_, otherPub = newKeyFile(t)
 	var err error
-	if e.pin, err = tlsself.Generate(filepath.Join(root, "data/tls/s.crt"), filepath.Join(root, "data/tls/s.key"), "luk.test", tlsself.ECDSAP256); err != nil {
+	if e.pin, err = tlsself.Generate(filepath.Join(root, "data/tls/s.crt"), filepath.Join(root, "data/tls/s.key"), []string{"luk.test"}, tlsself.ECDSAP256); err != nil {
 		t.Fatal(err)
 	}
 	text := fmt.Sprintf(`
 root: %s
 listen:
-  main: {addr: "%s", tls: {mode: self, cert: tls/s.crt, key: tls/s.key, host: luk.test}}
+  main: {addr: "%s", tls: {mode: self, cert: tls/s.crt, key: tls/s.key}}
 auth:
-  keys: [{name: robert.socha, key: "%s"}, {name: other, key: "%s"}]
+  keys: {robert.socha: "%s", other: "%s"}
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: drop, pretty: {allow: ['*']}, link: {replace: ['*'], list: ['*']}, secret: {allow: ['*'], path: q/secret, storage: volatile}}
-  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [other]}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha], respond: url, storage: drop, pretty: {allow: ['*']}, link: {replace: ['*'], list: ['*']}, secret: {allow: ['*'], path: q/secret, storage: volatile}}
+  backup: {listen: main, endpoint: /backup, allow: [other]}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
   backup: {endpoint: [backup], steps: [{store: drop}]}
 storage:
-  drop: {type: local, base: s/drop, ttl: {user: true, min: 1h, max: 7d}, path: "{{ .Random }}", expose: drop}
-  volatile: {type: local, base: s/volatile, ttl: {user: true, max: 1d}, path: "{{ .Random }}", expose: volatile}
+  drop: {directory: s/drop, ttl: {user: true, min: 1h, max: 7d}, path: "{{ .Random }}", expose: drop}
+  volatile: {directory: s/volatile, ttl: {user: true, max: 1d}, path: "{{ .Random }}", expose: volatile}
 expose:
   drop: {listen: main, path: /d/}
   volatile: {listen: main, path: /v/}
@@ -315,22 +315,22 @@ func TestMixedListener(t *testing.T) {
 	tempConfig(t)
 	addr, root := freeAddr(t), t.TempDir()
 	key, pub := newKeyFile(t)
-	spki, err := tlsself.Generate(filepath.Join(root, "data/tls/s.crt"), filepath.Join(root, "data/tls/s.key"), "luk.test", tlsself.ECDSAP256)
+	spki, err := tlsself.Generate(filepath.Join(root, "data/tls/s.crt"), filepath.Join(root, "data/tls/s.key"), []string{"luk.test"}, tlsself.ECDSAP256)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := fmt.Sprintf(`
 root: %s
 listen:
-  main: {addr: "%s", public: "https://%s", tls: {mode: self, cert: tls/s.crt, key: tls/s.key, host: luk.test}}
+  main: {addr: "%s", public: "https://%s", tls: {mode: self, cert: tls/s.crt, key: tls/s.key}}
 auth:
-  keys: [{name: robert.socha, key: "%s"}]
+  keys: {robert.socha: "%s"}
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: drop, private: {owner: ['*']}}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha], respond: url, storage: drop, private: {owner: ['*']}}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:
-  drop: {type: local, base: s/drop, path: "{{ .Random }}", expose: drop, protect: secure}
+  drop: {directory: s/drop, path: "{{ .Random }}", expose: drop, protect: secure}
 expose:
   drop: {listen: main, path: /d/}
   secure: {listen: main, path: /p/, auth: {ssh: {allow: ["*"]}}}

@@ -26,15 +26,14 @@ func storageConfig(t *testing.T) (string, string) {
 	text := `root: ` + root + `
 listen: {main: {addr: "127.0.0.1:0", public: "https://drop.example.com"}}
 auth:
-  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+  keys: {robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: drop}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha], respond: url, storage: drop}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: drop}]}
 storage:
-  drop: {type: local, base: s/drop, path: "{{ .Random }}", expose: drop}
-  plain: {type: local, base: s/plain, path: "{{ .File }}"}
-  off: {type: s3, bucket: b}
+  drop: {directory: s/drop, path: "{{ .Random }}", expose: drop}
+  plain: {directory: s/plain, path: "{{ .File }}"}
 expose:
   drop: {listen: main, path: /d/}
 `
@@ -127,7 +126,6 @@ func TestStorageLs(t *testing.T) {
 		t.Fatalf("empty json %q %v", out, err)
 	}
 	for args, want := range map[string]string{
-		"--storage off":               "storage off is not a local storage (s3)",
 		"--storage nope":              `unknown storage "nope"`,
 		"--storage drop --older soon": "--older",
 		"--storage drop --older 0s":   "--older",
@@ -239,9 +237,6 @@ func TestStorageRm(t *testing.T) {
 	}
 	if !exists("a") {
 		t.Fatal("a removed by a refused command")
-	}
-	if _, err := runLukd(t, "storage", "rm", "--storage", "off", "--name", "a", "--yes", "-c", cfg); err == nil || !strings.Contains(err.Error(), "not a local storage") {
-		t.Fatalf("s3: %v", err)
 	}
 
 	stdinIsTerminal = func() bool { return true }
@@ -435,9 +430,6 @@ func TestStorageHold(t *testing.T) {
 		if _, err := run(cmd); err == nil || !strings.Contains(err.Error(), "name") {
 			t.Errorf("%s without --name: %v", cmd, err)
 		}
-		if _, err := runLukd(t, "storage", cmd, "--storage", "off", "--name", "a", "-c", cfg); err == nil || !strings.Contains(err.Error(), "not a local storage") {
-			t.Errorf("%s of s3: %v", cmd, err)
-		}
 	}
 }
 
@@ -516,15 +508,14 @@ func TestStorageRetention(t *testing.T) {
 	text := `root: ` + root + `
 listen: {main: {addr: "127.0.0.1:0"}}
 auth:
-  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+  keys: {robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}
 endpoint:
-  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [robert.socha]}
+  backup: {listen: main, endpoint: /backup, allow: [robert.socha]}
 pipeline:
   nightly: {endpoint: [backup], steps: [{store: archive}]}
 storage:
   archive:
-    type: local
-    base: s/archive
+    directory: s/archive
     path: "{{ .Origin }}/{{ .File }}"
     retention:
       - origin: ["*-prod"]
@@ -627,15 +618,14 @@ func TestStorageWatch(t *testing.T) {
 	text := `root: ` + root + `
 listen: {main: {addr: "127.0.0.1:0"}}
 auth:
-  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+  keys: {robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}
 endpoint:
-  backup: {listen: main, endpoint: /backup, path: q/backup, allow: [robert.socha]}
+  backup: {listen: main, endpoint: /backup, allow: [robert.socha]}
 pipeline:
   nightly: {endpoint: [backup], steps: [{store: archive}]}
 storage:
   archive:
-    type: local
-    base: s/archive
+    directory: s/archive
     path: "{{ .Origin }}/{{ .Id }}/{{ .File }}"
     watch:
       - origin: ["db1-prod"]
@@ -731,13 +721,13 @@ func TestStorageFilesSignedExpose(t *testing.T) {
 	cfg, err := config.Parse([]byte(`root: ` + t.TempDir() + `
 listen: {main: {addr: "127.0.0.1:0", public: "https://drop.example.com"}}
 auth:
-  keys: [{name: robert.socha, key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}]
+  keys: {robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"}
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: vault}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha], respond: url, storage: vault}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: vault}]}
 storage:
-  vault: {type: local, base: s/vault, path: "{{ .File }}", expose: vault}
+  vault: {directory: s/vault, path: "{{ .File }}", expose: vault}
 expose:
   vault: {listen: main, path: /v/, auth: {ssh: {allow: [robert.socha]}}}
 `))

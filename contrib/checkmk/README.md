@@ -13,7 +13,7 @@ an empty pipeline) and `luk watch <storage> rule <n>` per watch rule no series m
 Spaces and non-printable characters in names become `_`.
 
 Rules:
-- `failed` > 0: CRIT, with the last error (sanitized, 200 chars) and `lukd queue ls / rm`
+- `failed` > 0: CRIT, with the last error (sanitized, 200 chars) and `lukd failed ls / rm`
   (the failure records; a failed upload is deleted and has to be sent again).
 - With an expectation (first matching section wins): no success ever or older than `crit_age`
   is CRIT, older than `warn_age` is WARN, last size below `min_size` is WARN.

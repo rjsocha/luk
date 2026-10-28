@@ -12,9 +12,9 @@ import (
 func TestDirectStoresAfterTee(t *testing.T) {
 	cfg := &config.Config{
 		Storage: map[string]*config.Storage{
-			"a": {Type: "local", Base: "/a"},
-			"b": {Type: "local", Base: "/b"},
-			"c": {Type: "local", Base: "/c"},
+			"a": {Base: "/a"},
+			"b": {Base: "/b"},
+			"c": {Base: "/c"},
 		},
 		Pipeline: map[string]*config.Pipeline{
 			"p": {Steps: []config.Step{
@@ -44,8 +44,8 @@ func TestDirectStoresAfterTee(t *testing.T) {
 func TestDirectStoresAfterRelay(t *testing.T) {
 	cfg := &config.Config{
 		Storage: map[string]*config.Storage{
-			"a": {Type: "local", Base: "/a"},
-			"b": {Type: "local", Base: "/b"},
+			"a": {Base: "/a"},
+			"b": {Base: "/b"},
 		},
 		Pipeline: map[string]*config.Pipeline{
 			"p": {Steps: []config.Step{

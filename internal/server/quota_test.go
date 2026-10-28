@@ -92,7 +92,7 @@ func TestQuotaStream(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "1800" {
 		t.Fatalf("%d %q: %s", rec.Code, rec.Header().Get("Retry-After"), rec.Body)
 	}
-	if e := entries(t, filepath.Join(f.root, "data", "q/backup")); len(e) != 1 {
+	if e := entries(t, filepath.Join(f.root, "data", "queue/backup")); len(e) != 1 {
 		t.Fatalf("queue %v", e)
 	}
 	if c := do(50); c != http.StatusAccepted {

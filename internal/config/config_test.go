@@ -18,27 +18,25 @@ listen:
     addr: 127.0.0.1:8080
   main:
     addr: 127.0.0.1:8443
-    tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key, host: lukd.vm}
+    host: [lukd.vm]
+    tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key}
 auth:
   keys:
-    - name: robert.socha
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
+    robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
   ca:
-    - name: hosts
+    hosts:
       type: host
       key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n ca"
-      revoked: {key_ids: [old], serials: [7]}
+      revoked: {key: ["SHA256:y6BrVzb69n5UsHtWHq6UOV53TFF6fZEKVDaeEmPM+9Q"]}
 endpoint:
   backup:
     listen: main
     endpoint: /backup
-    path: /queue/backup
     allow: [robert.socha, "hosts:*"]
     limits: {body: {size: 50G}}
   drop:
     listen: [main]
     endpoint: /drop
-    path: /queue/drop
     allow: [robert.socha]
     respond: url
     storage: drop
@@ -56,8 +54,8 @@ pipeline:
     steps:
       - store: drop
 storage:
-  archive: {type: local, base: /storage/archive, path: "{{ .Sender }}/{{ .File }}"}
-  drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}
+  archive: {directory: /storage/archive, path: "{{ .Sender }}/{{ .File }}"}
+  drop: {directory: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}
 expose:
   drop:
     listen: main
@@ -69,8 +67,8 @@ func TestParseGood(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Duration(c.Auth.ClockSkew) != time.Minute || c.Auth.Nonces != "/run/luk/nonces" {
-		t.Fatalf("auth defaults %v %q", time.Duration(c.Auth.ClockSkew), c.Auth.Nonces)
+	if time.Duration(c.Auth.Skew) != time.Minute || c.Auth.Nonces != "/run/luk/nonces" {
+		t.Fatalf("auth defaults %v %q", time.Duration(c.Auth.Skew), c.Auth.Nonces)
 	}
 	if c.Endpoint["backup"].Name != "backup" || c.Endpoint["backup"].Respond != "accept" {
 		t.Fatalf("endpoint %+v", c.Endpoint["backup"])
@@ -119,37 +117,28 @@ func TestValidationErrors(t *testing.T) {
 		"relative run":              {"run: /opt/luk/dbdump", "run: dbdump"},
 		"pipeline timeout 7d":       {"timeout: 2h", "timeout: 7d"},
 		"hidden pipeline name":      {"  devdb:\n    endpoint: [backup]", "  .devdb:\n    endpoint: [backup]"},
-		"storage base in work":      {"base: /storage/archive", "base: /var/lib/luk/data/work/a"},
+		"storage base in work":      {"directory: /storage/archive", "directory: /var/lib/luk/data/work/a"},
 		"respond url no storage":    {"    respond: url\n    storage: drop", "    respond: url"},
 		"bad respond":               {"respond: url", "respond: maybe"},
 		"relative endpoint path":    {"endpoint: /backup", "endpoint: backup"},
 		"tls acme unsupported":      {"mode: self", "mode: acme"},
 		"tls files no key":          {"mode: self, cert: /tmp/c.crt, key: /tmp/c.key", "mode: files, cert: /tmp/c.crt"},
 		"tls files algorithm":       {"mode: self", "mode: files, algorithm: ed25519"},
-		"bad tls algorithm":         {"host: lukd.vm}", "host: lukd.vm, algorithm: rsa}"},
+		"bad tls algorithm":         {"key: /tmp/c.key}", "key: /tmp/c.key, algorithm: rsa}"},
 		"bad ca type":               {"type: host", "type: robot"},
-		"bad key":                   {"key: \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha\"", "key: \"garbage\""},
-		"key with options":          {"key: \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha\"", "key: 'from=\"10.0.0.0/8\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha'"},
+		"bad key":                   {"robert.socha: \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha\"", "robert.socha: \"garbage\""},
+		"key with options":          {"robert.socha: \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha\"", "robert.socha: 'from=\"10.0.0.0/8\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha'"},
 		"ca key with options":       {"key: \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n ca\"", "key: 'cert-authority ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n ca'"},
 		"expose path no slash":      {"path: /d/", "path: /d"},
 		"storage unexposed for url": {", expose: drop}\nexpose:", "}\nexpose:"},
-		"exposed s3 storage":        {`drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}`, `drop: {type: s3, bucket: b, expose: drop}`},
-		"store to s3":               {"      - store: archive\n  drop:", "      - store: off\n  drop:"},
 		"url storage not stored":    {"    endpoint: [drop]\n    steps:\n      - store: drop", "    endpoint: [drop]\n    steps:\n      - store: archive"},
 	}
 	for name, r := range cases {
 		if !strings.Contains(good, r[0]) {
 			t.Fatalf("%s: fixture does not contain %q", name, r[0])
 		}
-		src := good
-		if name == "store to s3" {
-			src = strings.Replace(src, "storage:\n", "storage:\n  off: {type: s3, bucket: b}\n", 1)
-		}
-		_, err := Parse([]byte(strings.Replace(src, r[0], r[1], 1)))
-		if err == nil {
+		if _, err := Parse([]byte(strings.Replace(good, r[0], r[1], 1))); err == nil {
 			t.Errorf("%s: accepted", name)
-		} else if name == "store to s3" && !strings.Contains(err.Error(), "pipeline devdb: step 3: storage off: s3 storage is not implemented yet") {
-			t.Errorf("%s: %v", name, err)
 		}
 	}
 }
@@ -171,14 +160,14 @@ func TestPipelineNames(t *testing.T) {
 }
 
 func TestTLSFilesMode(t *testing.T) {
-	src := strings.Replace("root: /srv/luk\n"+good, "tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key, host: lukd.vm}",
+	src := strings.Replace("root: /srv/luk\n"+good, "tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key}",
 		"tls: {mode: files, cert: tls/c.crt, key: /etc/ssl/c.key}", 1)
 	c, err := Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
 	tl := c.Listen["main"].TLS
-	if tl.Mode != "files" || tl.Cert != "/srv/luk/data/tls/c.crt" || tl.Key != "/etc/ssl/c.key" || tl.Host != "" || tl.Algorithm != "" {
+	if tl.Mode != "files" || tl.Cert != "/srv/luk/data/tls/c.crt" || tl.Key != "/etc/ssl/c.key" || tl.Algorithm != "" {
 		t.Fatalf("%+v", tl)
 	}
 }
@@ -229,10 +218,9 @@ func TestSpecExampleConfig(t *testing.T) {
 	}
 	ex = strings.Replace(ex, "auth: {...}", `auth:
   keys:
-    - name: robert.socha
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
+    robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
   ca:
-    - name: hosts
+    hosts:
       type: host
       key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl ca"`, 1)
 	if _, err := Parse([]byte(ex)); err != nil {
@@ -247,13 +235,11 @@ listen:
   plain: {addr: 127.0.0.1:8080}
 auth:
   keys:
-    - name: robert.socha
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
+    robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
 endpoint:
   backup:
     listen: plain
     endpoint: /backup
-    path: /queue/backup
     allow: [robert.socha]
   drop:
 pipeline:
@@ -262,20 +248,18 @@ pipeline:
     steps:
       - store: archive
 storage:
-  archive: {type: local, base: /storage/archive, path: "{{ .Sender }}/{{ .File }}"}
+  archive: {directory: /storage/archive, path: "{{ .Sender }}/{{ .File }}"}
 `,
 		"null expose": `
 listen:
   plain: {addr: 127.0.0.1:8080}
 auth:
   keys:
-    - name: robert.socha
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
+    robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
 endpoint:
   backup:
     listen: plain
     endpoint: /backup
-    path: /queue/backup
     allow: [robert.socha]
     respond: url
     storage: archive
@@ -285,7 +269,7 @@ pipeline:
     steps:
       - store: archive
 storage:
-  archive: {type: local, base: /storage/archive, path: "{{ .Sender }}/{{ .File }}", expose: drop}
+  archive: {directory: /storage/archive, path: "{{ .Sender }}/{{ .File }}", expose: drop}
 expose:
   drop:
 `,
@@ -298,18 +282,18 @@ expose:
 	}
 }
 
-func TestClockSkewLimits(t *testing.T) {
+func TestSkewLimits(t *testing.T) {
 	for _, v := range []string{"-1s", "2000000h"} {
-		if _, err := Parse([]byte(strings.Replace(good, "auth:\n", "auth:\n  clock_skew: "+v+"\n", 1))); err == nil || !strings.Contains(err.Error(), "clock_skew") {
-			t.Errorf("clock_skew %s: %v", v, err)
+		if _, err := Parse([]byte(strings.Replace(good, "auth:\n", "auth:\n  skew: "+v+"\n", 1))); err == nil || !strings.Contains(err.Error(), "auth.skew") {
+			t.Errorf("skew %s: %v", v, err)
 		}
 	}
-	c, err := Parse([]byte(strings.Replace(good, "auth:\n", "auth:\n  clock_skew: 1h\n", 1)))
+	c, err := Parse([]byte(strings.Replace(good, "auth:\n", "auth:\n  skew: 1h\n", 1)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Duration(c.Auth.ClockSkew) != time.Hour {
-		t.Fatalf("%v", time.Duration(c.Auth.ClockSkew))
+	if time.Duration(c.Auth.Skew) != time.Hour {
+		t.Fatalf("%v", time.Duration(c.Auth.Skew))
 	}
 }
 
@@ -346,7 +330,7 @@ func TestTLSCertKeySamePath(t *testing.T) {
 const edKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n"
 
 func TestDuplicateKeyMaterial(t *testing.T) {
-	dup := strings.Replace(good, "  ca:\n", "    - name: alias\n      key: \""+edKey+" another comment\"\n  ca:\n", 1)
+	dup := strings.Replace(good, "  ca:\n", "    alias: \""+edKey+" another comment\"\n  ca:\n", 1)
 	_, err := Parse([]byte(dup))
 	if err == nil || !strings.Contains(err.Error(), "robert.socha") || !strings.Contains(err.Error(), "alias") {
 		t.Fatalf("%v", err)
@@ -355,7 +339,7 @@ func TestDuplicateKeyMaterial(t *testing.T) {
 
 func TestDuplicateCA(t *testing.T) {
 	second := func(typ string) string {
-		return strings.Replace(good, "endpoint:\n", "    - name: hosts2\n      type: "+typ+"\n      key: \""+edKey+" other\"\nendpoint:\n", 1)
+		return strings.Replace(good, "endpoint:\n", "    hosts2:\n      type: "+typ+"\n      key: \""+edKey+" other\"\nendpoint:\n", 1)
 	}
 	_, err := Parse([]byte(second("host")))
 	if err == nil || !strings.Contains(err.Error(), "hosts2") {
@@ -387,8 +371,8 @@ func TestRootDefaultAndRelative(t *testing.T) {
 	if got := c.Storage["drop"].Base; got != "/storage/drop" {
 		t.Fatalf("absolute base changed: %q", got)
 	}
-	if got := c.Endpoint["drop"].Path; got != "/queue/drop" {
-		t.Fatalf("absolute path changed: %q", got)
+	if got := c.Endpoint["drop"].Path; got != "/srv/luk/data/queue/drop" {
+		t.Fatalf("queue %q", got)
 	}
 }
 
@@ -396,10 +380,8 @@ func TestRootErrors(t *testing.T) {
 	cases := map[string][3]string{
 		"relative root":   {"root: srv\n" + good, "", "root"},
 		"cert escape":     {good, "cert: /tmp/c.crt|cert: ../x", "tls.cert"},
-		"path escape":     {good, "path: /queue/backup|path: ../x", "endpoint.backup.path"},
-		"path nested esc": {good, "path: /queue/backup|path: queue/../../x", "endpoint.backup.path"},
-		"base escape":     {good, "base: /storage/archive|base: ../x", "storage.archive.base"},
-		"base nested esc": {good, "base: /storage/archive|base: queue/../../x", "storage.archive.base"},
+		"base escape":     {good, "directory: /storage/archive|directory: ../x", "storage.archive.directory"},
+		"base nested esc": {good, "directory: /storage/archive|directory: queue/../../x", "storage.archive.directory"},
 		"cert eq key":     {good, "cert: /tmp/c.crt|cert: /var/lib/luk/data/tls/a\n      key: tls/a", "different files"},
 	}
 	for name, c := range cases {
@@ -407,8 +389,8 @@ func TestRootErrors(t *testing.T) {
 		if c[1] != "" {
 			old, repl, _ := strings.Cut(c[1], "|")
 			if name == "cert eq key" {
-				src = strings.Replace(src, "tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key, host: lukd.vm}",
-					"tls:\n      mode: self\n      cert: /var/lib/luk/data/tls/a\n      key: tls/a\n      host: lukd.vm", 1)
+				src = strings.Replace(src, "tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key}",
+					"tls:\n      mode: self\n      cert: /var/lib/luk/data/tls/a\n      key: tls/a", 1)
 			} else {
 				src = strings.Replace(src, old, repl, 1)
 			}
@@ -436,7 +418,7 @@ func TestLimitsDefaults(t *testing.T) {
 	if ch := l.Channel; ch.Auth != Duration(time.Minute) || ch.Pending != 1024 || ch.Idle != Duration(2*time.Minute) {
 		t.Fatalf("%+v", ch)
 	}
-	if u := l.Uploads; u.Total != 256 || u.Identity != 8 {
+	if u := l.Uploads; u.Max != 256 || u.Owner.Max != 8 {
 		t.Fatalf("%+v", u)
 	}
 	if b.BytesPerSecond() != 64<<10 {
@@ -468,7 +450,7 @@ func TestLimitsSet(t *testing.T) {
 		t.Fatalf("%+v", b)
 	}
 	c, err = Parse([]byte(strings.Replace(good, "limits: {body: {size: 50G}}", "limits: {body: {rate: 0}}\n    parts: {size: 2097088K, parallel: 64}", 1) +
-		"\nlimits: {uploads: {total: 3, identity: 2}}\n"))
+		"\nlimits: {uploads: {max: 3, owner: {max: 2}}}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +460,7 @@ func TestLimitsSet(t *testing.T) {
 	if p := c.Endpoint["backup"].Parts; p.Size != 2<<30-64<<10 || p.Parallel != 64 {
 		t.Fatalf("%+v", p)
 	}
-	if u := c.Limits.Uploads; u.Total != 3 || u.Identity != 2 {
+	if u := c.Limits.Uploads; u.Max != 3 || u.Owner.Max != 2 {
 		t.Fatalf("%+v", u)
 	}
 }
@@ -504,7 +486,7 @@ func TestPartsInvalid(t *testing.T) {
 func TestLimitsInvalid(t *testing.T) {
 	for _, l := range []string{"conn: {max: -1}", "conn: {idle: -1s}", "header: {timeout: -1s}",
 		"channel: {auth: -1s}", "channel: {idle: -1s}", "channel: {pending: -1}",
-		"uploads: {total: -1}", "uploads: {identity: -1}"} {
+		"uploads: {max: -1}", "uploads: {owner: {max: -1}}"} {
 		if _, err := Parse([]byte(good + "\nlimits: {" + l + "}\n")); err == nil || !strings.Contains(err.Error(), "limits.") {
 			t.Fatalf("%s: %v", l, err)
 		}
@@ -539,10 +521,10 @@ func TestLogLevel(t *testing.T) {
 
 func TestLocalStoragePath(t *testing.T) {
 	for name, repl := range map[string]string{
-		"missing":      `drop: {type: local, base: /storage/drop, expose: drop}`,
-		"bad template": `drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random", expose: drop}`,
+		"missing":      `drop: {directory: /storage/drop, expose: drop}`,
+		"bad template": `drop: {directory: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random", expose: drop}`,
 	} {
-		src := strings.Replace(good, `drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}`, repl, 1)
+		src := strings.Replace(good, `drop: {directory: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}`, repl, 1)
 		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage drop") {
 			t.Errorf("%s: %v", name, err)
 		}
@@ -568,19 +550,21 @@ func TestConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Storage["archive"].Conflict != "version" {
-		t.Fatalf("default %q", c.Storage["archive"].Conflict)
+	if cf := c.Storage["archive"].Conflict; cf.Mode != "version" || cf.Identical != "skip" {
+		t.Fatalf("default %+v", cf)
 	}
 	for _, v := range []string{"version", "reject", "replace"} {
-		src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", conflict: `+v+`}`, 1)
+		src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", conflict: {mode: `+v+`}}`, 1)
 		c, err := Parse([]byte(src))
-		if err != nil || c.Storage["archive"].Conflict != v {
+		if err != nil || c.Storage["archive"].Conflict.Mode != v {
 			t.Errorf("%s: %v", v, err)
 		}
 	}
-	src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", conflict: merge}`, 1)
-	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "conflict") {
-		t.Fatalf("bad conflict: %v", err)
+	for _, bad := range []string{"conflict: {mode: merge}", "conflict: replace", "conflict: {identical: drop}", "conflict: {mode: replace, identical: store}", "conflict: {mode: version, same: skip}"} {
+		src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", `+bad+`}`, 1)
+		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "conflict") {
+			t.Errorf("%s: %v", bad, err)
+		}
 	}
 }
 
@@ -601,15 +585,6 @@ func TestCleanupAge(t *testing.T) {
 		src = strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", `+v+`}`, 1)
 		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "must be positive") {
 			t.Errorf("%s: %v", v, err)
-		}
-	}
-}
-
-func TestLifetimeNeedsLocal(t *testing.T) {
-	for _, ttl := range []string{"{max: 1d}", "{user: true}"} {
-		src := strings.Replace(good, "storage:\n", "storage:\n  off: {type: s3, bucket: b, ttl: "+ttl+"}\n", 1)
-		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage off: ttl and cleanup.age need a local storage") {
-			t.Errorf("%s: %v", ttl, err)
 		}
 	}
 }
@@ -756,16 +731,12 @@ func TestTagTTL(t *testing.T) {
 			t.Errorf("%s: %v", ttl, err)
 		}
 	}
-	src = strings.Replace(good, "storage:\n", "storage:\n  off: {type: s3, bucket: b, ttl: {tag: {ttl-3d: 1d}}}\n", 1)
-	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage off: ttl and cleanup.age need a local storage") {
-		t.Errorf("ttl.tag on s3: %v", err)
-	}
 }
 
-func TestExposeLifetimeMoved(t *testing.T) {
+func TestExposeLifetimeUnknown(t *testing.T) {
 	for _, tc := range []struct{ add, want string }{
-		{"    ttl: {max: 7d}\n", "expose drop: ttl moved to storage.drop.ttl.max"},
-		{"    cleanup: {age: 14d}\n", "expose drop: cleanup moved to storage.drop.cleanup.age"},
+		{"    ttl: {max: 7d}\n", "field ttl not found in type config.Expose"},
+		{"    cleanup: {age: 14d}\n", "field cleanup not found in type config.Expose"},
 	} {
 		src := strings.Replace(good, "    path: /d/\n", "    path: /d/\n"+tc.add, 1)
 		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -784,7 +755,7 @@ func TestPipelineQueue(t *testing.T) {
 		t.Fatalf("%+v", q)
 	}
 	for _, tc := range []struct{ add, want string }{
-		{"    concurrency: 1\n", "pipeline devdb: concurrency moved to queue.concurrency"},
+		{"    concurrency: 1\n", "field concurrency not found in type config.Pipeline"},
 		{"    queue: {concurrency: -1}\n", "pipeline devdb: negative queue.concurrency or timeout"},
 		{"    queue: {group: backup, order: -1}\n", "pipeline devdb: queue.order must not be negative"},
 		{"    queue: {order: 1}\n", "pipeline devdb: queue.order needs queue.group"},
@@ -803,15 +774,18 @@ func TestQueueReserve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Limits.Queue.Reserve != 1<<30 {
-		t.Fatalf("default %d", c.Limits.Queue.Reserve)
+	if c.Queue.Reserve != 1<<30 {
+		t.Fatalf("default %d", c.Queue.Reserve)
 	}
-	c, err = Parse([]byte(good + "\nlimits: {queue: {reserve: 5M}}\n"))
+	c, err = Parse([]byte(good + "\nqueue: {reserve: 5M}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Limits.Queue.Reserve != 5<<20 {
-		t.Fatalf("set %d", c.Limits.Queue.Reserve)
+	if c.Queue.Reserve != 5<<20 {
+		t.Fatalf("set %d", c.Queue.Reserve)
+	}
+	if _, err := Parse([]byte(good + "\nlimits: {queue: {reserve: 5M}}\n")); err == nil {
+		t.Fatal("limits.queue accepted")
 	}
 }
 
@@ -840,8 +814,8 @@ func TestExposeHelpers(t *testing.T) {
 }
 
 func TestTwoStoragesOneExpose(t *testing.T) {
-	src := strings.Replace(good, `archive: {type: local, base: /storage/archive, path: "{{ .Sender }}/{{ .File }}"}`,
-		`archive: {type: local, base: /storage/archive, path: "{{ .Sender }}/{{ .File }}", expose: drop}`, 1)
+	src := strings.Replace(good, `archive: {directory: /storage/archive, path: "{{ .Sender }}/{{ .File }}"}`,
+		`archive: {directory: /storage/archive, path: "{{ .Sender }}/{{ .File }}", expose: drop}`, 1)
 	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "expose drop") {
 		t.Fatalf("%v", err)
 	}
@@ -855,7 +829,7 @@ func TestWarnings(t *testing.T) {
 	if w := c.Warnings(); len(w) != 0 {
 		t.Fatalf("%v", w)
 	}
-	src := strings.Replace(good, "endpoint:\n  backup:", "endpoint:\n  test:\n    listen: main\n    endpoint: /test\n    path: /storage/test\n    allow: [robert.socha]\n  backup:", 1)
+	src := strings.Replace(good, "endpoint:\n  backup:", "endpoint:\n  test:\n    listen: main\n    endpoint: /test\n    allow: [robert.socha]\n  backup:", 1)
 	c, err = Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
@@ -882,7 +856,7 @@ func TestWarningVersionWithoutUniqueName(t *testing.T) {
 			t.Errorf("%s: %v %v", p, err, c.Warnings())
 		}
 	}
-	s := strings.Replace(src, `path: "{{ .File }}", expose: drop}`, `path: "{{ .File }}", conflict: reject, expose: drop}`, 1)
+	s := strings.Replace(src, `path: "{{ .File }}", expose: drop}`, `path: "{{ .File }}", conflict: {mode: reject}, expose: drop}`, 1)
 	if c, err := Parse([]byte(s)); err != nil || len(c.Warnings()) != 0 {
 		t.Errorf("reject: %v %v", err, c.Warnings())
 	}
@@ -938,23 +912,20 @@ func TestPathTemplateUnknownKey(t *testing.T) {
 
 func TestStorageOverlap(t *testing.T) {
 	for name, c := range map[string]struct{ old, new, want string }{
-		"same base":      {"base: /storage/drop,", "base: /storage/archive,", "storage archive and drop"},
-		"nested base":    {"base: /storage/drop,", "base: /storage/archive/drop,", "storage archive and drop"},
-		"parent base":    {"base: /storage/archive,", "base: /storage,", "storage archive and drop"},
-		"queue in base":  {"path: /queue/drop", "path: /storage/drop/queue", "endpoint drop: path"},
-		"base in queue":  {"path: /queue/drop", "path: /storage", "endpoint drop: path"},
-		"queue is base":  {"path: /queue/backup", "path: /storage/archive/", "endpoint backup: path"},
-		"relative match": {"base: /storage/drop,", "base: queue/x/..,", "overlaps storage drop"},
+		"same base":      {"directory: /storage/drop,", "directory: /storage/archive,", "storage archive and drop"},
+		"nested base":    {"directory: /storage/drop,", "directory: /storage/archive/drop,", "storage archive and drop"},
+		"parent base":    {"directory: /storage/archive,", "directory: /storage,", "storage archive and drop"},
+		"queue in base":  {"directory: /storage/drop,", "directory: /var/lib/luk/data/queue,", "endpoint drop: path /var/lib/luk/data/queue/drop overlaps storage drop"},
+		"base in queue":  {"directory: /storage/drop,", "directory: /var/lib/luk/data/queue/drop/x,", "endpoint drop: path"},
+		"queue is base":  {"directory: /storage/archive,", "directory: /var/lib/luk/data/queue/backup/,", "endpoint backup: path"},
+		"relative match": {"directory: /storage/drop,", "directory: queue/x/..,", "overlaps storage drop"},
 	} {
 		src := strings.Replace(good, c.old, c.new, 1)
-		if name == "relative match" {
-			src = "root: /\n" + strings.Replace(src, "path: /queue/drop", "path: /data/queue/drop", 1)
-		}
 		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	src := strings.Replace(good, "base: /storage/drop,", "base: /storage/archive2,", 1)
+	src := strings.Replace(good, "directory: /storage/drop,", "directory: /storage/archive2,", 1)
 	if _, err := Parse([]byte(src)); err != nil {
 		t.Errorf("sibling with common prefix: %v", err)
 	}
@@ -984,7 +955,7 @@ func TestExposePathsOverlap(t *testing.T) {
 func TestExposePathsNested(t *testing.T) {
 	src := strings.NewReplacer(
 		"    path: /d/\n", "    path: /d/\n  inner:\n    listen: main\n    path: /d/v/w/\n  sib:\n    listen: main\n    path: /e/\n",
-		"storage:\n", "storage:\n  inner: {type: local, base: /storage/inner, path: x, expose: inner}\n  sib: {type: local, base: /storage/sib, path: x, expose: sib}\n",
+		"storage:\n", "storage:\n  inner: {directory: /storage/inner, path: x, expose: inner}\n  sib: {directory: /storage/sib, path: x, expose: sib}\n",
 	).Replace(good)
 	c, err := Parse([]byte(src))
 	if err != nil {
@@ -1005,7 +976,7 @@ func TestExposePathsNested(t *testing.T) {
 	if n := c.Storage["drop"].Nested(); len(n) != 0 {
 		t.Fatalf("other listener nested %q", n)
 	}
-	src = strings.Replace(privateGood, "storage:\n", "storage:\n  inner: {type: local, base: /storage/inner, path: x, expose: inner}\n", 1) +
+	src = strings.Replace(privateGood, "storage:\n", "storage:\n  inner: {directory: /storage/inner, path: x, expose: inner}\n", 1) +
 		"  inner:\n    listen: main\n    path: /s/in/\n"
 	if c, err = Parse([]byte(src)); err != nil {
 		t.Fatal(err)
@@ -1036,18 +1007,21 @@ func TestBasicAuthHash(t *testing.T) {
 }
 
 func TestCatalog(t *testing.T) {
-	src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", catalog: true}`, 1)
+	src := strings.Replace(good, "    path: /d/\n", "    path: /d/\n    catalog: true\n", 1)
 	c, err := Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.Storage["archive"].Catalog || c.Storage["drop"].Catalog {
-		t.Fatalf("catalog %v %v", c.Storage["archive"].Catalog, c.Storage["drop"].Catalog)
+	if !c.Storage["drop"].Catalog || c.Storage["archive"].Catalog {
+		t.Fatalf("catalog %v %v", c.Storage["drop"].Catalog, c.Storage["archive"].Catalog)
 	}
-	src = strings.Replace(good, `  drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}`,
-		"  drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: \"{{ .Random }}\", expose: drop}\n  off: {type: s3, bucket: b, catalog: true}", 1)
-	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "catalog") {
-		t.Fatalf("s3 catalog: %v", err)
+	src = strings.Replace(good, "    path: /d/\n", "    path: /d/\n  lone:\n    listen: main\n    path: /l/\n    catalog: true\n", 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "expose lone: catalog needs a storage with expose lone") {
+		t.Fatalf("catalog without storage: %v", err)
+	}
+	src = strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", catalog: true}`, 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "field catalog not found in type config.Storage") {
+		t.Fatalf("catalog on a storage: %v", err)
 	}
 }
 
@@ -1056,9 +1030,9 @@ func TestRandom(t *testing.T) {
 	if err != nil || c.Storage["drop"].Random != (Random{}) {
 		t.Fatalf("default: %v %+v", err, c.Storage["drop"].Random)
 	}
-	drop := `  drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}`
+	drop := `  drop: {directory: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}`
 	with := func(random string) string {
-		return strings.Replace(good, drop, `  drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop, random: `+random+`}`, 1)
+		return strings.Replace(good, drop, `  drop: {directory: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop, random: `+random+`}`, 1)
 	}
 	for random, want := range map[string]Random{
 		`{alphabet: "abcdefghjkmnpqrstuvwxyz23456789"}`:             {"abcdefghjkmnpqrstuvwxyz23456789", 26},
@@ -1089,10 +1063,6 @@ func TestRandom(t *testing.T) {
 		if _, err := Parse([]byte(with(random))); err == nil || !strings.Contains(err.Error(), msg) {
 			t.Errorf("%s: %v", random, err)
 		}
-	}
-	src := drop + "\n  off: {type: s3, bucket: b, random: {length: 30}}"
-	if _, err := Parse([]byte(strings.Replace(good, drop, src, 1))); err == nil || !strings.Contains(err.Error(), "random needs a local storage") {
-		t.Errorf("s3: %v", err)
 	}
 }
 
@@ -1151,15 +1121,14 @@ func TestShard(t *testing.T) {
 	if err != nil || c.Storage["drop"].Shard != 0 {
 		t.Fatalf("default: %v", err)
 	}
-	drop := `  drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}`
-	src := strings.Replace(good, drop, `  drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop, shard: 4}`, 1)
+	drop := `  drop: {directory: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop}`
+	src := strings.Replace(good, drop, `  drop: {directory: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop, shard: 4}`, 1)
 	if c, err := Parse([]byte(src)); err != nil || c.Storage["drop"].Shard != 4 {
 		t.Fatalf("shard 4: %v", err)
 	}
 	for _, bad := range []string{
-		`  drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop, shard: 5}`,
-		`  drop: {type: local, base: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop, shard: -1}`,
-		drop + "\n  off: {type: s3, bucket: b, shard: 1}",
+		`  drop: {directory: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop, shard: 5}`,
+		`  drop: {directory: /storage/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}", expose: drop, shard: -1}`,
 	} {
 		if _, err := Parse([]byte(strings.Replace(good, drop, bad, 1))); err == nil || !strings.Contains(err.Error(), "shard") {
 			t.Errorf("%s: %v", bad, err)
@@ -1260,11 +1229,11 @@ func TestRelayStep(t *testing.T) {
 // with luk-job run, tee or not.
 func TestRunStepJobs(t *testing.T) {
 	for step, want := range map[string]string{
-		"      - run: /opt/luk/x\n        jobs: [S3]\n":                     `step 1: jobs: "S3": invalid job name`,
-		"      - run: /opt/luk/x\n        jobs: [a/b]\n":                    `step 1: jobs: "a/b": invalid job name`,
-		"      - run: /opt/luk/x\n        jobs: [a, b, a]\n":                `step 1: jobs: a listed twice`,
-		"      - relay: s3-upload\n        jobs: [s3-upload]\n":             "step 1: jobs needs run",
-		"      - encrypt: {key: [robert@example.com]}\n        jobs: [a]\n": "step 1: jobs needs run",
+		"      - run: /opt/luk/x\n        jobs: [S3]\n":                                    `step 1: jobs: "S3": invalid job name`,
+		"      - run: /opt/luk/x\n        jobs: [a/b]\n":                                   `step 1: jobs: "a/b": invalid job name`,
+		"      - run: /opt/luk/x\n        jobs: [a, b, a]\n":                               `step 1: jobs: a listed twice`,
+		"      - relay: s3-upload\n        jobs: [s3-upload]\n":                            "step 1: jobs needs run",
+		"      - encrypt: {recipients: {keys: [robert@example.com]}}\n        jobs: [a]\n": "step 1: jobs needs run",
 	} {
 		src := strings.Replace(good, "    steps:\n      - store: drop\n", "    steps:\n"+step+"      - store: drop\n", 1)
 		_, err := Parse([]byte(src))
@@ -1293,7 +1262,7 @@ func TestRunStepEnvReservesLUK(t *testing.T) {
 }
 
 func TestTeeNeedsRun(t *testing.T) {
-	for _, step := range []string{"      - store: drop\n        tee: true\n", "      - encrypt: {key: [robert@example.com]}\n        tee: true\n      - store: drop\n"} {
+	for _, step := range []string{"      - store: drop\n        tee: true\n", "      - encrypt: {recipients: {keys: [robert@example.com]}}\n        tee: true\n      - store: drop\n"} {
 		src := strings.Replace(good, "    steps:\n      - store: drop\n", "    steps:\n"+step, 1)
 		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "pipeline drop: step 1: tee needs run") {
 			t.Fatalf("%q: %v", step, err)
@@ -1306,8 +1275,8 @@ func TestTeeNeedsRun(t *testing.T) {
 }
 
 func TestWarningRunIntoPathWithoutName(t *testing.T) {
-	src := strings.Replace(good, `archive: {type: local, base: /storage/archive, path: "{{ .Sender }}/{{ .File }}"}`,
-		`archive: {type: local, base: /storage/archive, path: "{{ .Sender }}/{{ .Year }}{{ .Month }}{{ .Day }}"}`, 1)
+	src := strings.Replace(good, `archive: {directory: /storage/archive, path: "{{ .Sender }}/{{ .File }}"}`,
+		`archive: {directory: /storage/archive, path: "{{ .Sender }}/{{ .Year }}{{ .Month }}{{ .Day }}"}`, 1)
 	c, err := Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
@@ -1328,12 +1297,12 @@ func TestWarningRunIntoPathWithoutName(t *testing.T) {
 }
 
 func TestWarningCatalogWithoutAuth(t *testing.T) {
-	src := strings.Replace(good, `path: "{{ .Random }}", expose: drop}`, `path: "{{ .Random }}", expose: drop, catalog: true}`, 1)
+	src := strings.Replace(good, "    path: /d/\n", "    path: /d/\n    catalog: true\n", 1)
 	c, err := Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := c.Warnings(); len(w) != 1 || !hasWarning(w, "storage drop", "catalog", "auth") {
+	if w := c.Warnings(); len(w) != 1 || !hasWarning(w, "expose drop", "catalog", "auth", "storage drop") {
 		t.Fatalf("%v", w)
 	}
 	src = strings.Replace(src, "    path: /d/\n", "    path: /d/\n    auth: {basic: [\"u:$2y$10$abcdefghijklmnopqrstuuJ0x5N2mXv0g8y2t1R8vQ5b9nJ0mJ2e6\"]}\n", 1)
@@ -1384,7 +1353,7 @@ func TestTLSAlgorithm(t *testing.T) {
 	for algo, want := range map[string]string{"": "ed25519", "ed25519": "ed25519", "ecdsa-p256": "ecdsa-p256"} {
 		src := good
 		if algo != "" {
-			src = strings.Replace(good, "host: lukd.vm}", "host: lukd.vm, algorithm: "+algo+"}", 1)
+			src = strings.Replace(good, "key: /tmp/c.key}", "key: /tmp/c.key, algorithm: "+algo+"}", 1)
 		}
 		c, err := Parse([]byte(src))
 		if err != nil {
@@ -1398,9 +1367,9 @@ func TestTLSAlgorithm(t *testing.T) {
 
 func TestListenValidation(t *testing.T) {
 	const plain = "  plain:\n    addr: 127.0.0.1:8080\n"
-	const second = "  second:\n    addr: 127.0.0.1:8443\n    host: [b.vm]\n    tls: {mode: self, cert: /tmp/b.crt, key: /tmp/b.key, host: b.vm}\n"
+	const second = "  second:\n    addr: 127.0.0.1:8443\n    host: [b.vm]\n    tls: {mode: self, cert: /tmp/b.crt, key: /tmp/b.key}\n"
 	withMain := func(extra string) string {
-		return strings.Replace(good, "    tls: {mode: self, cert: /tmp/c.crt", "    host: [lukd.vm, A.vm]\n    tls: {mode: self, cert: /tmp/c.crt", 1) + "listen2:\n" + extra
+		return strings.Replace(good, "    host: [lukd.vm]\n", "    host: [lukd.vm, A.vm]\n", 1) + "listen2:\n" + extra
 	}
 	// listen2 is spliced into listen below.
 	splice := func(src string) string {
@@ -1456,8 +1425,9 @@ func TestListenValidation(t *testing.T) {
 
 func TestListenPublic(t *testing.T) {
 	for _, c := range []struct{ listen, want string }{
-		{"{addr: 0.0.0.0:443, host: [a.vm], tls: {mode: self, cert: /c, key: /k, host: t.vm}}", "https://a.vm"},
-		{"{addr: 0.0.0.0:8443, tls: {mode: self, cert: /c, key: /k, host: t.vm}}", "https://t.vm:8443"},
+		{"{addr: 0.0.0.0:443, host: [a.vm], tls: {mode: self, cert: /c, key: /k}}", "https://a.vm"},
+		{"{addr: 0.0.0.0:8443, tls: {mode: self, cert: /c, key: /k}}", ""},
+		{"{addr: 127.0.0.1:9443, tls: {mode: self, cert: /c, key: /k}}", "https://127.0.0.1:9443"},
 		{"{addr: 0.0.0.0:80, host: [a.vm]}", "http://a.vm"},
 		{"{addr: 127.0.0.1:8080}", "http://127.0.0.1:8080"},
 		{"{addr: '[::1]:80'}", "http://[::1]"},
@@ -1476,14 +1446,15 @@ func TestListenPublic(t *testing.T) {
 	}
 }
 
-func TestDedup(t *testing.T) {
-	c, err := Parse([]byte(good))
-	if err != nil || c.Storage["archive"].Dedup != nil {
-		t.Fatalf("default: %v", err)
+func TestConflictIdentical(t *testing.T) {
+	src := strings.Replace(good, `archive: {directory: /storage/archive,`, `archive: {conflict: {identical: store}, directory: /storage/archive,`, 1)
+	c, err := Parse([]byte(src))
+	if err != nil || c.Storage["archive"].Conflict != (Conflict{Mode: "version", Identical: "store"}) {
+		t.Fatalf("identical store: %v", err)
 	}
-	src := strings.Replace(good, `archive: {type: local, base: /storage/archive,`, `archive: {type: local, dedup: false, base: /storage/archive,`, 1)
-	if c, err = Parse([]byte(src)); err != nil || c.Storage["archive"].Dedup == nil || *c.Storage["archive"].Dedup {
-		t.Fatalf("dedup false: %v", err)
+	src = strings.Replace(good, `archive: {directory: /storage/archive,`, `archive: {dedup: false, directory: /storage/archive,`, 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "field dedup not found") {
+		t.Fatalf("dedup: %v", err)
 	}
 }
 
@@ -1492,58 +1463,64 @@ func TestLinksMax(t *testing.T) {
 	if err != nil || c.Storage["archive"].MaxLinks() != DefaultLinksMax {
 		t.Fatalf("default: %v", err)
 	}
-	src := strings.Replace(good, `archive: {type: local, base: /storage/archive,`, `archive: {type: local, links: {max: 3}, base: /storage/archive,`, 1)
+	src := strings.Replace(good, `archive: {directory: /storage/archive,`, `archive: {hardlink: {owner: {max: 3}}, directory: /storage/archive,`, 1)
 	if c, err = Parse([]byte(src)); err != nil || c.Storage["archive"].MaxLinks() != 3 {
 		t.Fatalf("max 3: %v", err)
 	}
-	src = strings.Replace(good, `archive: {type: local, base: /storage/archive,`, `archive: {type: local, links: {max: -1}, base: /storage/archive,`, 1)
-	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage archive: links.max must be at least 1") {
+	src = strings.Replace(good, `archive: {directory: /storage/archive,`, `archive: {hardlink: {owner: {max: -1}}, directory: /storage/archive,`, 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage archive: hardlink.owner.max must be at least 1") {
 		t.Fatalf("negative: %v", err)
 	}
-	src = strings.Replace(good, "storage:\n", "storage:\n  off: {type: s3, bucket: b, links: {max: 3}}\n", 1)
-	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage off: links.max needs a local storage") {
-		t.Fatalf("s3: %v", err)
+	src = strings.Replace(good, `archive: {directory: /storage/archive,`, `archive: {links: {max: 3}, directory: /storage/archive,`, 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "field links not found") {
+		t.Fatalf("links: %v", err)
 	}
 }
 
 func TestHardlink(t *testing.T) {
 	c, err := Parse([]byte(good))
-	if err != nil || c.Storage["archive"].Hardlink != nil {
+	if err != nil || c.Storage["archive"].Hardlink.Off {
 		t.Fatalf("default: %v", err)
 	}
-	src := strings.Replace(good, `archive: {type: local, base: /storage/archive,`, `archive: {type: local, hardlink: false, base: /storage/archive,`, 1)
-	if c, err = Parse([]byte(src)); err != nil || c.Storage["archive"].Hardlink == nil || *c.Storage["archive"].Hardlink {
+	src := strings.Replace(good, `archive: {directory: /storage/archive,`, `archive: {hardlink: false, directory: /storage/archive,`, 1)
+	if c, err = Parse([]byte(src)); err != nil || !c.Storage["archive"].Hardlink.Off {
 		t.Fatalf("hardlink false: %v", err)
 	}
-	src = strings.Replace(good, "storage:\n", "storage:\n  off: {type: s3, bucket: b, hardlink: true}\n", 1)
-	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage off: hardlink needs a local storage") {
-		t.Fatalf("s3: %v", err)
+	src = strings.Replace(good, `archive: {directory: /storage/archive,`, `archive: {hardlink: true, directory: /storage/archive,`, 1)
+	if c, err = Parse([]byte(src)); err != nil || c.Storage["archive"].Hardlink.Off {
+		t.Fatalf("hardlink true: %v", err)
+	}
+	for _, bad := range []string{"hardlink: 3", "hardlink: {max: 3}", "hardlink: {owner: 3}"} {
+		src = strings.Replace(good, `archive: {directory: /storage/archive,`, `archive: {`+bad+`, directory: /storage/archive,`, 1)
+		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "hardlink") {
+			t.Errorf("%s: %v", bad, err)
+		}
 	}
 }
 
-func TestFailedAge(t *testing.T) {
+func TestFailedTTL(t *testing.T) {
 	c, err := Parse([]byte(good))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := c.Limits.Failed.MaxAge(); got != 3*24*time.Hour {
+	if got := c.Failed.Lifetime(); got != 3*24*time.Hour {
 		t.Fatalf("default %v", got)
 	}
-	c, err = Parse([]byte(good + "\nlimits: {failed: {age: 0}}\n"))
+	c, err = Parse([]byte(good + "\nfailed: {ttl: 0}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := c.Limits.Failed.MaxAge(); got != 0 {
+	if got := c.Failed.Lifetime(); got != 0 {
 		t.Fatalf("zero %v", got)
 	}
-	c, err = Parse([]byte(good + "\nlimits: {failed: {age: 12h}}\n"))
-	if err != nil || c.Limits.Failed.MaxAge() != 12*time.Hour {
+	c, err = Parse([]byte(good + "\nfailed: {ttl: 12h}\n"))
+	if err != nil || c.Failed.Lifetime() != 12*time.Hour {
 		t.Fatalf("set %v", err)
 	}
-	if _, err := Parse([]byte(good + "\nlimits: {failed: {age: -1h}}\n")); err == nil || !strings.Contains(err.Error(), "limits.failed.age") {
+	if _, err := Parse([]byte(good + "\nfailed: {ttl: -1h}\n")); err == nil || !strings.Contains(err.Error(), "failed.ttl") {
 		t.Fatalf("negative: %v", err)
 	}
-	if got := (FailedLimits{}).MaxAge(); got != DefaultFailedAge {
+	if got := (Failed{}).Lifetime(); got != DefaultFailedTTL {
 		t.Fatalf("unset %v", got)
 	}
 }
@@ -1555,13 +1532,13 @@ func encryptConfig(gpg, step string) string {
 
 func TestEncryptStep(t *testing.T) {
 	src := encryptConfig("gpg:\n  keys: /etc/site/lukd/gpg\n  wkd:\n    cache: 2h\n",
-		"      - encrypt:\n          wkd: [Robert@Example.net, marek@example.net]\n          key: matt@example.com\n          strict: true\n")
+		"      - encrypt:\n          recipients:\n            wkd: [Robert@Example.net, marek@example.net]\n            keys: matt@example.com\n          strict: true\n")
 	c, err := Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
 	e := c.Pipeline["drop"].Steps[0].Encrypt
-	if e == nil || !e.Strict || strings.Join(e.WKD, ",") != "robert@example.net,marek@example.net" || strings.Join(e.Key, ",") != "matt@example.com" {
+	if e == nil || !e.Strict || strings.Join(e.Recipients.WKD, ",") != "robert@example.net,marek@example.net" || strings.Join(e.Recipients.Keys, ",") != "matt@example.com" {
 		t.Fatalf("encrypt %+v", e)
 	}
 	if c.GPG.Keys != "/etc/site/lukd/gpg" || time.Duration(c.GPG.WKD.Cache) != 2*time.Hour {
@@ -1574,7 +1551,7 @@ func TestEncryptStep(t *testing.T) {
 		t.Fatalf("warnings %v", w)
 	}
 
-	c, err = Parse([]byte(encryptConfig("", "      - encrypt: {wkd: [a@b.example]}\n")))
+	c, err = Parse([]byte(encryptConfig("", "      - encrypt: {recipients: {wkd: [a@b.example]}}\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1587,18 +1564,18 @@ func TestEncryptValidation(t *testing.T) {
 	keys := "gpg:\n  keys: /etc/site/lukd/gpg\n"
 	cases := map[string][2]string{
 		"no recipient":         {keys, "      - encrypt: {strict: true}\n"},
-		"empty lists":          {keys, "      - encrypt: {wkd: [], key: []}\n"},
-		"key without gpg.keys": {"", "      - encrypt: {key: [a@b.example]}\n"},
-		"relative gpg.keys":    {"gpg:\n  keys: gpg\n", "      - encrypt: {key: [a@b.example]}\n"},
-		"negative cache":       {"gpg:\n  wkd:\n    cache: -1h\n", "      - encrypt: {wkd: [a@b.example]}\n"},
-		"bad address":          {keys, "      - encrypt: {wkd: [not-an-address]}\n"},
-		"display name":         {keys, "      - encrypt: {wkd: ['Robert <r@b.example>']}\n"},
-		"slash":                {keys, "      - encrypt: {wkd: [a/b@b.example]}\n"},
-		"duplicate":            {keys, "      - encrypt: {wkd: [a@b.example, A@B.example]}\n"},
-		"in both lists":        {keys, "      - encrypt: {wkd: [a@b.example], key: [A@b.example]}\n"},
-		"with run":             {keys, "      - encrypt: {wkd: [a@b.example]}\n        run: /bin/true\n"},
-		"with store":           {keys, "      - encrypt: {wkd: [a@b.example]}\n        store: drop\n"},
-		"unknown key":          {keys, "      - encrypt: {wkd: [a@b.example], bogus: 1}\n"},
+		"empty lists":          {keys, "      - encrypt: {recipients: {wkd: [], keys: []}}\n"},
+		"key without gpg.keys": {"", "      - encrypt: {recipients: {keys: [a@b.example]}}\n"},
+		"relative gpg.keys":    {"gpg:\n  keys: gpg\n", "      - encrypt: {recipients: {keys: [a@b.example]}}\n"},
+		"negative cache":       {"gpg:\n  wkd:\n    cache: -1h\n", "      - encrypt: {recipients: {wkd: [a@b.example]}}\n"},
+		"bad address":          {keys, "      - encrypt: {recipients: {wkd: [not-an-address]}}\n"},
+		"display name":         {keys, "      - encrypt: {recipients: {wkd: ['Robert <r@b.example>']}}\n"},
+		"slash":                {keys, "      - encrypt: {recipients: {wkd: [a/b@b.example]}}\n"},
+		"duplicate":            {keys, "      - encrypt: {recipients: {wkd: [a@b.example, A@B.example]}}\n"},
+		"in both lists":        {keys, "      - encrypt: {recipients: {wkd: [a@b.example], keys: [A@b.example]}}\n"},
+		"with run":             {keys, "      - encrypt: {recipients: {wkd: [a@b.example]}}\n        run: /bin/true\n"},
+		"with store":           {keys, "      - encrypt: {recipients: {wkd: [a@b.example]}}\n        store: drop\n"},
+		"unknown key":          {keys, "      - encrypt: {recipients: {wkd: [a@b.example]}, bogus: 1}\n"},
 	}
 	for name, r := range cases {
 		if _, err := Parse([]byte(encryptConfig(r[0], r[1]))); err == nil {
@@ -1614,13 +1591,14 @@ func TestRestartChangesAll(t *testing.T) {
 	}
 	next, err := Parse([]byte(strings.NewReplacer(
 		"addr: 127.0.0.1:8080", "addr: 127.0.0.1:8081",
-		"host: lukd.vm}", "host: other.vm}",
+		"host: [lukd.vm]", "host: [other.vm]",
+		"key: /tmp/c.key}", "key: /tmp/c.key, algorithm: ecdsa-p256}",
 		"auth:\n", "limits: {conn: {max: 7}}\nauth:\n",
 	).Replace(good)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"listen.main.public", "listen.main.tls", "listen.plain.addr", "listen.plain.public", "limits.conn.max"}
+	want := []string{"listen.main.host", "listen.main.public", "listen.main.tls", "listen.plain.addr", "listen.plain.public", "limits.conn.max"}
 	if got := cur.Restart().Changes(next.Restart()); !slices.Equal(got, want) {
 		t.Fatalf("changes %v, want %v", got, want)
 	}
@@ -1629,28 +1607,33 @@ func TestRestartChangesAll(t *testing.T) {
 	}
 }
 
-// acmeConfig is good with an acme listener download on :443 and a plain
-// acme: true listener http on :80; extra is spliced into download.tls.
+// acmeConfig is good with an acme listener download on :443 whose
+// entrypoint is the plain listener http on :80; extra is spliced into
+// download.tls.acme (8 spaces) or, at 6 spaces, into download.tls.
 func acmeConfig(extra string) string {
+	server := "        server: https://acme-v02.api.letsencrypt.org/directory\n"
+	if strings.Contains(extra, "server:") {
+		server = ""
+	}
 	return strings.Replace("root: /srv/luk\n"+good, "  plain:\n    addr: 127.0.0.1:8080\n",
 		"  plain:\n    addr: 127.0.0.1:8080\n"+
-			"  download:\n    addr: 0.0.0.0:443\n    host: [drop.example.com, Get.Example.com]\n    tls:\n      mode: acme\n"+extra+
-			"  http:\n    addr: 0.0.0.0:80\n    acme: true\n", 1)
+			"  download:\n    addr: 0.0.0.0:443\n    host: [drop.example.com, Get.Example.com]\n    tls:\n      mode: acme\n      acme:\n        entrypoint: http\n"+server+extra+
+			"  http:\n    addr: 0.0.0.0:80\n", 1)
 }
 
 func TestACMEListen(t *testing.T) {
-	c, err := Parse([]byte(acmeConfig("      email: ops@example.com\n")))
+	c, err := Parse([]byte(acmeConfig("        email: ops@example.com\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	l := c.Listen["download"]
-	if l.TLS.Directory != DefaultACMEDirectory || l.TLS.Email != "ops@example.com" || l.Public != "https://drop.example.com" || l.Host[1] != "get.example.com" {
+	if a := l.TLS.ACME; a.Server != LetsEncrypt || a.Email != "ops@example.com" || a.Entrypoint != "http" || l.Public != "https://drop.example.com" || l.Host[1] != "get.example.com" {
 		t.Fatalf("%+v %+v", l, l.TLS)
 	}
-	if !c.Listen["http"].ACME || len(c.Warnings()) != 0 {
+	if !c.Listen["http"].Entrypoint || c.Listen["plain"].Entrypoint || len(c.Warnings()) != 0 {
 		t.Fatalf("http %+v, warnings %v", c.Listen["http"], c.Warnings())
 	}
-	if got := c.ACMECacheDir(l.TLS.Directory); got != "/srv/luk/data/acme/acme-v02.api.letsencrypt.org_directory" {
+	if got := c.ACMECacheDir(l.TLS.ACME.Server); got != "/srv/luk/data/acme/acme-v02.api.letsencrypt.org_directory" {
 		t.Fatalf("cache dir %s", got)
 	}
 	if got := c.ACMECacheDir("https://acme-staging-v02.api.letsencrypt.org/directory"); got != "/srv/luk/data/acme/acme-staging-v02.api.letsencrypt.org_directory" {
@@ -1659,7 +1642,7 @@ func TestACMEListen(t *testing.T) {
 	if got := c.ACMECacheDir("https://ca.example.com:14000/dir"); got != "/srv/luk/data/acme/ca.example.com_14000_dir" {
 		t.Fatalf("cache dir with port %s", got)
 	}
-	src := strings.Replace(acmeConfig(""), "addr: 0.0.0.0:80", "addr: 0.0.0.0:8080", 1)
+	src := strings.Replace(acmeConfig(""), "addr: 0.0.0.0:80\n", "addr: 0.0.0.0:8080\n", 1)
 	if c, err = Parse([]byte(src)); err != nil || len(c.Warnings()) != 1 || !strings.Contains(c.Warnings()[0], "port 8080") {
 		t.Fatalf("port warning: %v %v", err, c.Warnings())
 	}
@@ -1669,50 +1652,73 @@ func TestACMEListen(t *testing.T) {
 	}
 }
 
+// Every acme listener names its own entrypoint: two addresses, two
+// plain listeners, each answering for the names of its listener only.
+func TestACMEEntrypoints(t *testing.T) {
+	src := strings.Replace(acmeConfig(""), "  http:\n",
+		"  other:\n    addr: 192.0.2.20:443\n    host: [o.example.com]\n    tls: {mode: acme, acme: {entrypoint: http-b, server: 'https://acme-v02.api.letsencrypt.org/directory'}}\n"+
+			"  http-b:\n    addr: 192.0.2.20:80\n  http:\n", 1)
+	c, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Listen["http"].Entrypoint || !c.Listen["http-b"].Entrypoint {
+		t.Fatalf("entrypoints %+v %+v", c.Listen["http"], c.Listen["http-b"])
+	}
+}
+
 func TestACMEValidation(t *testing.T) {
 	keyFile := t.TempDir() + "/eab.key"
 	if err := os.WriteFile(keyFile, []byte("not base64 !\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	noHTTP := strings.Replace(acmeConfig(""), "  http:\n    addr: 0.0.0.0:80\n    acme: true\n", "", 1)
+	noEntry := strings.Replace(acmeConfig(""), "        entrypoint: http\n", "", 1)
+	noServer := strings.Replace(acmeConfig(""), "        server: https://acme-v02.api.letsencrypt.org/directory\n", "", 1)
 	bad := map[string]string{
-		"wildcard host":      strings.Replace(acmeConfig(""), "drop.example.com,", "'*.example.com',", 1),
-		"ip host":            strings.Replace(acmeConfig(""), "drop.example.com,", "192.0.2.1,", 1),
-		"single label host":  strings.Replace(acmeConfig(""), "drop.example.com,", "drop,", 1),
-		"no host":            strings.Replace(acmeConfig(""), "    host: [drop.example.com, Get.Example.com]\n    tls:\n      mode: acme", "    tls:\n      mode: acme", 1),
-		"cert":               acmeConfig("      cert: tls/c.crt\n"),
-		"algorithm":          acmeConfig("      algorithm: ecdsa-p256\n"),
-		"http directory":     acmeConfig("      directory: http://ca.example.com/dir\n"),
-		"bad email":          acmeConfig("      email: 'Ops <ops@example.com>'\n"),
-		"eab without kid":    acmeConfig("      eab: {key: AAAA}\n"),
-		"eab without key":    acmeConfig("      eab: {kid: k}\n"),
-		"eab key and file":   acmeConfig("      eab: {kid: k, key: AAAA, key_file: /etc/x}\n"),
-		"eab bad key":        acmeConfig("      eab: {kid: k, key: 'not base64 !'}\n"),
-		"eab bad key file":   acmeConfig("      eab: {kid: k, key_file: " + keyFile + "}\n"),
-		"eab missing file":   acmeConfig("      eab: {kid: k, key_file: /nonexistent/eab.key}\n"),
-		"no acme listener":   noHTTP,
-		"acme true no acme":  strings.Replace(acmeConfig(""), "      mode: acme\n", "      mode: self\n      cert: tls/d.crt\n      key: tls/d.key\n      host: drop.example.com\n", 1),
-		"acme true and tls":  strings.Replace(acmeConfig(""), "    acme: true\n", "    acme: true\n    tls: {mode: self, cert: /tmp/h.crt, key: /tmp/h.key, host: h.vm}\n", 1),
-		"acme true endpoint": strings.Replace(acmeConfig(""), "    listen: main\n    endpoint: /backup", "    listen: [main, http]\n    endpoint: /backup", 1),
-		"acme true expose":   strings.Replace(acmeConfig(""), "    listen: main\n    path: /d/", "    listen: [main, http]\n    path: /d/", 1),
-		"email on self":      strings.Replace(good, "host: lukd.vm}", "host: lukd.vm, email: ops@example.com}", 1),
-		"eab on files":       strings.Replace(good, "tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key, host: lukd.vm}", "tls: {mode: files, cert: /tmp/c.crt, key: /tmp/c.key, eab: {kid: k, key: AAAA}}", 1),
-		"same directory, other email": strings.Replace(acmeConfig("      email: a@example.com\n"), "  http:\n",
-			"  other:\n    addr: 0.0.0.0:8443\n    host: [o.example.com]\n    tls: {mode: acme, email: b@example.com}\n  http:\n", 1),
+		"wildcard host":            strings.Replace(acmeConfig(""), "drop.example.com,", "'*.example.com',", 1),
+		"ip host":                  strings.Replace(acmeConfig(""), "drop.example.com,", "192.0.2.1,", 1),
+		"single label host":        strings.Replace(acmeConfig(""), "drop.example.com,", "drop,", 1),
+		"no host":                  strings.Replace(acmeConfig(""), "    host: [drop.example.com, Get.Example.com]\n    tls:\n      mode: acme", "    tls:\n      mode: acme", 1),
+		"cert":                     acmeConfig("      cert: tls/c.crt\n"),
+		"algorithm":                acmeConfig("      algorithm: ecdsa-p256\n"),
+		"http server":              acmeConfig("        server: http://ca.example.com/dir\n"),
+		"bad email":                acmeConfig("        email: 'Ops <ops@example.com>'\n"),
+		"eab without kid":          acmeConfig("        eab: {key: AAAA}\n"),
+		"eab without key":          acmeConfig("        eab: {kid: k}\n"),
+		"eab key and file":         acmeConfig("        eab: {kid: k, key: AAAA, file: /etc/x}\n"),
+		"eab bad key":              acmeConfig("        eab: {kid: k, key: 'not base64 !'}\n"),
+		"eab bad key file":         acmeConfig("        eab: {kid: k, file: " + keyFile + "}\n"),
+		"eab missing file":         acmeConfig("        eab: {kid: k, file: /nonexistent/eab.key}\n"),
+		"eab key_file":             acmeConfig("        eab: {kid: k, key_file: /etc/x}\n"),
+		"provider":                 acmeConfig("        provider: cloudflare\n"),
+		"no entrypoint":            noEntry,
+		"no server":                noServer,
+		"entrypoint unknown":       strings.Replace(acmeConfig(""), "entrypoint: http\n", "entrypoint: nope\n", 1),
+		"entrypoint with tls":      strings.Replace(acmeConfig(""), "entrypoint: http\n", "entrypoint: main\n", 1),
+		"entrypoint with endpoint": strings.Replace(acmeConfig(""), "    listen: main\n    endpoint: /backup", "    listen: [main, http]\n    endpoint: /backup", 1),
+		"entrypoint with expose":   strings.Replace(acmeConfig(""), "    listen: main\n    path: /d/", "    listen: [main, http]\n    path: /d/", 1),
+		"acme on self":             strings.Replace(good, "tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key}", "tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key, acme: {email: ops@example.com}}", 1),
+		"acme listen key":          strings.Replace(acmeConfig(""), "  http:\n    addr: 0.0.0.0:80\n", "  http:\n    addr: 0.0.0.0:80\n    acme: true\n", 1),
+		"tls host":                 strings.Replace(good, "tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key}", "tls: {mode: self, cert: /tmp/c.crt, key: /tmp/c.key, host: lukd.vm}", 1),
+		"same server, other email": strings.Replace(acmeConfig("        email: a@example.com\n"), "  http:\n",
+			"  other:\n    addr: 0.0.0.0:8443\n    host: [o.example.com]\n    tls: {mode: acme, acme: {entrypoint: http, server: 'https://acme-v02.api.letsencrypt.org/directory', email: b@example.com}}\n  http:\n", 1),
 	}
 	for name, src := range bad {
 		if _, err := Parse([]byte(src)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := Parse([]byte(noHTTP)); err == nil || !strings.Contains(err.Error(), "listen download: tls mode acme needs a plain listener with acme: true") {
-		t.Errorf("no acme: true listener: %v", err)
+	if _, err := Parse([]byte(noServer)); err == nil || !strings.Contains(err.Error(), "listen download: tls mode acme needs tls.acme.server") {
+		t.Errorf("no server: %v", err)
 	}
-	// Different directories may differ.
-	src := strings.Replace(acmeConfig("      email: a@example.com\n"), "  http:\n",
-		"  other:\n    addr: 0.0.0.0:8443\n    host: [o.example.com]\n    tls: {mode: acme, email: b@example.com, directory: 'https://acme-staging-v02.api.letsencrypt.org/directory'}\n  http:\n", 1)
+	if _, err := Parse([]byte(noEntry)); err == nil || !strings.Contains(err.Error(), "listen download: tls mode acme needs tls.acme.entrypoint") {
+		t.Errorf("no entrypoint: %v", err)
+	}
+	// Different servers may differ.
+	src := strings.Replace(acmeConfig("        email: a@example.com\n"), "  http:\n",
+		"  other:\n    addr: 0.0.0.0:8443\n    host: [o.example.com]\n    tls: {mode: acme, acme: {entrypoint: http, email: b@example.com, server: 'https://acme-staging-v02.api.letsencrypt.org/directory'}}\n  http:\n", 1)
 	if _, err := Parse([]byte(src)); err != nil {
-		t.Fatalf("two directories: %v", err)
+		t.Fatalf("two servers: %v", err)
 	}
 }
 
@@ -1721,27 +1727,27 @@ func TestACMEEAB(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("c2VjcmV0LWtleQ\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	inline, err := Parse([]byte(acmeConfig("      eab: {kid: k1, key: c2VjcmV0LWtleQ}\n")))
+	inline, err := Parse([]byte(acmeConfig("        eab: {kid: k1, key: c2VjcmV0LWtleQ}\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	file, err := Parse([]byte(acmeConfig("      eab: {kid: k1, key_file: " + keyFile + "}\n")))
+	file, err := Parse([]byte(acmeConfig("        eab: {kid: k1, file: " + keyFile + "}\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []*Config{inline, file} {
-		e := c.Listen["download"].TLS.EAB
+		e := c.Listen["download"].TLS.ACME.EAB
 		if mac, err := e.MAC(); err != nil || string(mac) != "secret-key" || e.KeySum == "" {
 			t.Fatalf("%+v: %q %v", e, mac, err)
 		}
 	}
-	if inline.Listen["download"].TLS.EAB.KeySum != file.Listen["download"].TLS.EAB.KeySum {
+	if inline.Listen["download"].TLS.ACME.EAB.KeySum != file.Listen["download"].TLS.ACME.EAB.KeySum {
 		t.Fatal("same key, different sums")
 	}
 	// Standard base64 with padding is accepted too.
-	if c, err := Parse([]byte(acmeConfig("      eab: {kid: k1, key: 'c2VjcmV0LWtleQ=='}\n"))); err != nil {
+	if c, err := Parse([]byte(acmeConfig("        eab: {kid: k1, key: 'c2VjcmV0LWtleQ=='}\n"))); err != nil {
 		t.Fatal(err)
-	} else if mac, _ := c.Listen["download"].TLS.EAB.MAC(); string(mac) != "secret-key" {
+	} else if mac, _ := c.Listen["download"].TLS.ACME.EAB.MAC(); string(mac) != "secret-key" {
 		t.Fatalf("padded: %q", mac)
 	}
 
@@ -1750,7 +1756,7 @@ func TestACMEEAB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "c2VjcmV0LWtleQ") || !strings.Contains(string(data), inline.Listen["download"].TLS.EAB.KeySum) {
+	if strings.Contains(string(data), "c2VjcmV0LWtleQ") || !strings.Contains(string(data), inline.Listen["download"].TLS.ACME.EAB.KeySum) {
 		t.Fatalf("running file %s", data)
 	}
 	var back Restart
@@ -1760,7 +1766,7 @@ func TestACMEEAB(t *testing.T) {
 	if got := back.Changes(inline.Restart()); len(got) != 0 {
 		t.Fatalf("round trip changes %v", got)
 	}
-	other, err := Parse([]byte(acmeConfig("      eab: {kid: k1, key: b3RoZXIta2V5}\n")))
+	other, err := Parse([]byte(acmeConfig("        eab: {kid: k1, key: b3RoZXIta2V5}\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1771,12 +1777,20 @@ func TestACMEEAB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := Parse([]byte(strings.Replace(acmeConfig(""), "  http:\n    addr: 0.0.0.0:80\n    acme: true\n", "  http:\n    addr: 0.0.0.0:80\n    acme: true\n  http6:\n    addr: '[::]:80'\n    acme: true\n", 1)))
+	next, err := Parse([]byte(strings.Replace(acmeConfig(""), "  http:\n    addr: 0.0.0.0:80\n", "  http:\n    addr: 0.0.0.0:80\n  http6:\n    addr: '[::]:80'\n", 1)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := plain.Restart().Changes(next.Restart()); !slices.Equal(got, []string{"listen.http6"}) {
-		t.Fatalf("new acme listener: %v", got)
+		t.Fatalf("new listener: %v", got)
+	}
+	moved, err := Parse([]byte(strings.Replace(next.Path+acmeConfig(""), "  http:\n    addr: 0.0.0.0:80\n", "  http:\n    addr: 0.0.0.0:80\n  http6:\n    addr: '[::]:80'\n", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved.Listen["http"].Entrypoint, moved.Listen["http6"].Entrypoint = false, true
+	if got := next.Restart().Changes(moved.Restart()); !slices.Equal(got, []string{"listen.http.entrypoint", "listen.http6.entrypoint"}) {
+		t.Fatalf("entrypoint moved: %v", got)
 	}
 }
 
@@ -1832,13 +1846,12 @@ func TestCapabilityLists(t *testing.T) {
 		"pretty without allow":        {"    pretty: {bits: 64}\n", `endpoint drop: pretty.allow is required: a list of identities, e.g. ["*"]`},
 		"secret without allow":        {"    secret: {path: /run/luk/volatile/queue, storage: volatile}\n", `endpoint drop: secret.allow is required`},
 		"secret unknown key in allow": {"    secret: {path: /run/luk/volatile/queue, storage: volatile, allow: [nobody]}\n", `endpoint drop: secret.allow: allow "nobody" is not a known key`},
-		"backup hostname any bool":    {"    backup: {hostname: {any: true}}\n", `backup.hostname.any: a list of identities, e.g. ["*"]`},
-		"backup hostname scalar":      {"    backup: {hostname: robert.socha}\n", `backup.hostname: a mapping of any and principal`},
-		"backup hostname null":        {"    backup: {hostname: }\n", `backup.hostname: a mapping of any and principal`},
-		"backup unknown key":          {"    backup: {path: [robert.socha]}\n", "field path not found in backup"},
-		"backup hostname unknown key": {"    backup: {hostname: {all: ['*']}}\n", "field all not found in backup.hostname"},
-		"backup hostname unknown id":  {"    backup: {hostname: {principal: [nobody]}}\n", `endpoint drop: backup.hostname.principal: allow "nobody" is not a known key`},
-		"backup hostname bad pattern": {"    backup: {hostname: {any: ['hosts:[']}}\n", `endpoint drop: backup.hostname.any: allow "hosts:[" has a bad pattern`},
+		"origin any bool":             {"    origin: {any: true}\n", `origin.any: a list of identities, e.g. ["*"]`},
+		"origin scalar":               {"    origin: robert.socha\n", `origin: a mapping of any and principal`},
+		"origin unknown key":          {"    origin: {all: ['*']}\n", "field all not found in origin"},
+		"origin unknown id":           {"    origin: {principal: [nobody]}\n", `endpoint drop: origin.principal: allow "nobody" is not a known key`},
+		"origin bad pattern":          {"    origin: {any: ['hosts:[']}\n", `endpoint drop: origin.any: allow "hosts:[" has a bad pattern`},
+		"backup":                      {"    backup: {hostname: {any: ['*']}}\n", "field backup not found"},
 	}
 	for name, tc := range cases {
 		src := strings.Replace(secretGood, "    secret: {allow: ['*'], path: /run/luk/volatile/queue, storage: volatile}\n", "", 1)
@@ -1858,24 +1871,24 @@ func TestCapabilityLists(t *testing.T) {
 	}
 }
 
-// TestBackupHostnameConfig: backup.hostname takes two lists of
-// identities; without it there is no restriction (nil).
-func TestBackupHostnameConfig(t *testing.T) {
+// TestOriginConfig: origin takes two lists of identities; without it
+// there is no restriction (nil).
+func TestOriginConfig(t *testing.T) {
 	c, err := Parse([]byte(good))
-	if err != nil || c.Endpoint["backup"].Backup.Hostname != nil {
-		t.Fatalf("default: %v %+v", err, c.Endpoint["backup"].Backup)
+	if err != nil || c.Endpoint["backup"].Origin != nil {
+		t.Fatalf("default: %v %+v", err, c.Endpoint["backup"].Origin)
 	}
-	src := strings.Replace(good, `allow: [robert.socha, "hosts:*"]`+"\n", `allow: [robert.socha, "hosts:*"]`+"\n    backup:\n      hostname:\n        any: [robert.socha]\n        principal: [\"hosts:*\"]\n", 1)
+	src := strings.Replace(good, `allow: [robert.socha, "hosts:*"]`+"\n", `allow: [robert.socha, "hosts:*"]`+"\n    origin:\n      any: [robert.socha]\n      principal: [\"hosts:*\"]\n", 1)
 	if c, err = Parse([]byte(src)); err != nil {
 		t.Fatal(err)
 	}
-	if h := c.Endpoint["backup"].Backup.Hostname; h == nil || !slices.Equal(h.Any, []string{"robert.socha"}) || !slices.Equal(h.Principal, []string{"hosts:*"}) {
+	if h := c.Endpoint["backup"].Origin; h == nil || !slices.Equal(h.Any, []string{"robert.socha"}) || !slices.Equal(h.Principal, []string{"hosts:*"}) {
 		t.Fatalf("lists: %+v", h)
 	}
-	if c, err = Parse([]byte(strings.Replace(src, "        any: [robert.socha]\n        principal: [\"hosts:*\"]\n", "        {}\n", 1))); err != nil {
+	if c, err = Parse([]byte(strings.Replace(src, "      any: [robert.socha]\n      principal: [\"hosts:*\"]\n", "      {}\n", 1))); err != nil {
 		t.Fatal(err)
 	}
-	if h := c.Endpoint["backup"].Backup.Hostname; h == nil || h.Any != nil || h.Principal != nil {
+	if h := c.Endpoint["backup"].Origin; h == nil || h.Any != nil || h.Principal != nil {
 		t.Fatalf("empty block: %+v", h)
 	}
 }
@@ -1936,13 +1949,12 @@ func TestPrivateConfig(t *testing.T) {
 		"protect unknown":             {"protect: secure}", "protect: nope}", "unknown protect expose"},
 		"protect without auth.ssh":    {"    auth: {ssh: {allow: [\"*\", robert.socha, \"hosts:*.vm\"]}}\n", "", "protect expose secure needs auth.ssh"},
 		"protect is expose":           {"expose: drop, protect: secure}", "expose: secure, protect: secure}", "expose and protect must differ"},
-		"protect on s3":               {"storage:\n", "storage:\n  off: {type: s3, bucket: b, protect: secure}\n", "protect needs a local storage"},
 		"protect with basic":          {"auth: {ssh: {", "auth: {basic: ['dev:$2y$05$TpFzQdt1oY6UgSKCZGgt8eCbBXDAuiQxNl13XDuDnYKUSuIC9O79W'], ssh: {", "expose secure: auth.basic on a protect expose"},
 		"ssh allow unknown key":       {`allow: ["*", robert.socha`, `allow: [nobody`, `allow "nobody" is not a known key`},
 		"ssh allow unknown ca":        {`"hosts:*.vm"`, `"nope:*"`, "names an unknown CA"},
 		"protect on plain listener":   {"    listen: main\n    path: /s/", "    listen: plain\n    path: /s/", "needs an https public URL"},
-		"key named *":                 {"    - name: robert.socha\n", "    - name: \"*\"\n", `name "*"`},
-		"protect used twice":          {"storage:\n", "storage:\n  two: {type: local, base: /storage/two, path: x, protect: secure}\n", "used by storages drop and two"},
+		"key named *":                 {"    robert.socha: ", "    \"*\": ", `name "*"`},
+		"protect used twice":          {"storage:\n", "storage:\n  two: {directory: /storage/two, path: x, protect: secure}\n", "used by storages drop and two"},
 	}
 	for name, r := range cases {
 		if !strings.Contains(privateGood, r[0]) {
@@ -1981,17 +1993,17 @@ func TestSignedExposeConfig(t *testing.T) {
 		t.Fatal("archive has a protect URL")
 	}
 	// The catalog of a storage behind auth.ssh publishes nothing.
-	cat := strings.Replace(signedGood, `expose: vault}`, `expose: vault, catalog: true}`, 1)
+	cat := strings.Replace(signedGood, "    path: /v/\n", "    path: /v/\n    catalog: true\n", 1)
 	if c, err := Parse([]byte(cat)); err != nil {
 		t.Fatal(err)
-	} else if w := strings.Join(c.Warnings(), "\n"); strings.Contains(w, "catalog on expose vault") {
+	} else if w := strings.Join(c.Warnings(), "\n"); strings.Contains(w, "expose vault: catalog") {
 		t.Fatalf("warnings %s", w)
 	}
 	cases := map[string][3]string{
 		"index":              {"    path: /v/\n", "    path: /v/\n    index: true\n", "index excludes auth.ssh"},
 		"plain listener":     {"    listen: main\n    path: /v/", "    listen: plain\n    path: /v/", "expose vault: listen plain (first of the expose) needs an https public URL"},
 		"expose and protect": {`expose: vault}`, `expose: vault, protect: vault}`, "expose and protect must differ"},
-		"used twice":         {"storage:\n", "storage:\n  two: {type: local, base: /storage/two, path: x, expose: vault}\n", "used by storages"},
+		"used twice":         {"storage:\n", "storage:\n  two: {directory: /storage/two, path: x, expose: vault}\n", "used by storages"},
 	}
 	for name, r := range cases {
 		if !strings.Contains(signedGood, r[0]) {
@@ -2033,33 +2045,24 @@ func TestDualAuthExposeConfig(t *testing.T) {
 
 // A queue directory never nests in another or holds what lukd keeps
 // itself: the start of the receive role cleans every queue directory.
+// The queues lie in <root>/data/queue/<endpoint>, out of the way of the
+// rest of lukd; a TLS file placed in one is still refused.
 func TestQueuePathOverlaps(t *testing.T) {
 	src := "root: /var/lib/luk\n" + good
-	if _, err := Parse([]byte(src)); err != nil {
+	c, err := Parse([]byte(src))
+	if err != nil {
 		t.Fatal(err)
 	}
-	shared := strings.Replace(src, "path: /queue/drop", "path: /queue/backup", 1)
-	if _, err := Parse([]byte(shared)); err != nil {
-		t.Fatalf("one queue directory for two endpoints: %v", err)
+	if c.Endpoint["backup"].Path != "/var/lib/luk/data/queue/backup" || c.Endpoint["drop"].Path != "/var/lib/luk/data/queue/drop" {
+		t.Fatalf("queues %s %s", c.Endpoint["backup"].Path, c.Endpoint["drop"].Path)
 	}
-	for name, r := range map[string][3]string{
-		"nested queue":    {"path: /queue/drop", "path: /queue/backup/drop", "endpoint backup and drop: paths /queue/backup and /queue/backup/drop nest"},
-		"enclosing queue": {"path: /queue/drop", "path: /queue", "endpoint backup and drop: paths /queue/backup and /queue nest"},
-		"relative nested": {"path: /queue/drop", "path: x", "paths"},
-		"acme":            {"path: /queue/drop", "path: acme", "endpoint drop: path /var/lib/luk/data/acme overlaps the ACME cache /var/lib/luk/data/acme"},
-		"in acme":         {"path: /queue/drop", "path: acme/q", "overlaps the ACME cache"},
-		"gpg cache":       {"path: /queue/drop", "path: gpg-cache/x", "overlaps the WKD key cache /var/lib/luk/data/gpg-cache"},
-		"nonces":          {"path: /queue/drop", "path: /run/luk", "endpoint drop: path /run/luk overlaps auth.nonces /run/luk/nonces"},
-		"tls files":       {"path: /queue/drop", "path: /tmp", "endpoint drop: path /tmp holds the TLS file /tmp/c.crt of listener main"},
-		"root":            {"path: /queue/drop", "path: /var/lib/luk", "overlaps"},
-	} {
-		y := strings.Replace(src, r[0], r[1], 1)
-		if name == "relative nested" {
-			y = strings.Replace(strings.Replace(src, "path: /queue/drop", "path: q/drop", 1), "path: /queue/backup", "path: q", 1)
-		}
-		if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), r[2]) {
-			t.Errorf("%s: %v, want an error with %q", name, err, r[2])
-		}
+	y := strings.Replace(src, "cert: /tmp/c.crt", "cert: /var/lib/luk/data/queue/drop/c.crt", 1)
+	if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "endpoint drop: path /var/lib/luk/data/queue/drop holds the TLS file /var/lib/luk/data/queue/drop/c.crt of listener main") {
+		t.Errorf("tls file: %v", err)
+	}
+	y = strings.Replace(src, "  backup:\n    listen: main", "  .backup:\n    listen: main", 1)
+	if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), `endpoint ".backup": the name names its queue directory`) {
+		t.Errorf("name: %v", err)
 	}
 	sec := strings.Replace("root: /var/lib/luk\n"+secretGood, "path: /run/luk/volatile/queue", "path: /run/luk/nonces/q", 1)
 	if _, err := Parse([]byte(sec)); err == nil || !strings.Contains(err.Error(), "endpoint drop: secret.path /run/luk/nonces/q overlaps auth.nonces") {
@@ -2071,7 +2074,7 @@ func TestQueuePathOverlaps(t *testing.T) {
 // storage volatile, exposed nested in the expose of drop.
 var secretGood = strings.NewReplacer(
 	"    respond: url\n    storage: drop\n", "    respond: url\n    storage: drop\n    secret: {allow: ['*'], path: /run/luk/volatile/queue, storage: volatile}\n",
-	"storage:\n", "storage:\n  volatile: {type: local, base: /run/luk/volatile/storage, path: \"{{ .Random }}\", expose: volatile, ttl: {user: true}}\n",
+	"storage:\n", "storage:\n  volatile: {directory: /run/luk/volatile/storage, path: \"{{ .Random }}\", expose: volatile, ttl: {user: true}}\n",
 ).Replace(good) + "  volatile:\n    listen: main\n    path: /d/volatile/\n"
 
 func TestEndpointSecret(t *testing.T) {
@@ -2098,25 +2101,21 @@ func TestEndpointSecret(t *testing.T) {
 		"no path":        {"path: /run/luk/volatile/queue, ", "", "secret.path is required"},
 		"path escapes":   {"path: /run/luk/volatile/queue", "path: ../q", "escapes /var/lib/luk/data"},
 		"unknown":        {"storage: volatile}", "storage: nope}", `secret.storage "nope" is not a known storage`},
-		"s3":             {"storage: volatile}", "storage: off}\n  x:", "secret storage off is not a local storage"},
 		"not exposed":    {"storage: volatile}", "storage: archive}", "secret storage archive is not exposed"},
 		"same storage":   {"storage: volatile}", "storage: drop}", "secret.storage must differ from storage"},
 		"in base":        {"path: /run/luk/volatile/queue", "path: /run/luk/volatile/storage/q", "secret.path /run/luk/volatile/storage/q overlaps storage volatile base"},
 		"base in it":     {"path: /run/luk/volatile/queue", "path: /run/luk", "overlaps storage volatile base"},
 		"in drop base":   {"path: /run/luk/volatile/queue", "path: /storage/drop/q", "overlaps storage drop base"},
-		"is a queue":     {"path: /run/luk/volatile/queue", "path: /queue/backup", "secret.path /queue/backup overlaps the queue /queue/backup of endpoint backup"},
-		"own queue":      {"path: /run/luk/volatile/queue", "path: /queue/drop/s", "overlaps the queue /queue/drop of endpoint drop"},
+		"is a queue":     {"path: /run/luk/volatile/queue", "path: /var/lib/luk/data/queue/backup", "secret.path /var/lib/luk/data/queue/backup overlaps the queue /var/lib/luk/data/queue/backup of endpoint backup"},
+		"own queue":      {"path: /run/luk/volatile/queue", "path: queue/drop/s", "overlaps the queue /var/lib/luk/data/queue/drop of endpoint drop"},
 		"work dir":       {"path: /run/luk/volatile/queue", "path: /var/lib/luk/data/work/s", "overlaps the work directory"},
 		"pretty":         {"    secret:", "    pretty: {allow: ['*']}\n    secret:", "pretty needs a path of secret storage volatile that uses .Random"},
 	}
 	for name, r := range cases {
 		src := secretGood
 		switch name {
-		case "s3":
-			src = strings.Replace(src, "storage:\n", "storage:\n  off: {type: s3, bucket: b}\n", 1)
-			r[1] = "storage: off}"
 		case "pretty":
-			src = strings.Replace(src, `base: /run/luk/volatile/storage, path: "{{ .Random }}"`, "base: /run/luk/volatile/storage, path: x", 1)
+			src = strings.Replace(src, `directory: /run/luk/volatile/storage, path: "{{ .Random }}"`, "directory: /run/luk/volatile/storage, path: x", 1)
 		}
 		if !strings.Contains(src, r[0]) {
 			t.Fatalf("%s: fixture does not contain %q", name, r[0])
@@ -2126,7 +2125,7 @@ func TestEndpointSecret(t *testing.T) {
 		}
 	}
 	two := strings.Replace(secretGood, "    limits: {body: {size: 50G}}\n", "    limits: {body: {size: 50G}}\n    respond: url\n    storage: archive2\n    secret: {allow: ['*'], path: /run/luk/volatile/queue/x, storage: volatile}\n", 1)
-	two = strings.Replace(two, "storage:\n", "storage:\n  archive2: {type: local, base: /storage/archive2, path: x, expose: a2}\n", 1) + "  a2:\n    listen: plain\n    path: /a2/\n"
+	two = strings.Replace(two, "storage:\n", "storage:\n  archive2: {directory: /storage/archive2, path: x, expose: a2}\n", 1) + "  a2:\n    listen: plain\n    path: /a2/\n"
 	two = strings.Replace(two, "    steps:\n      - store: drop\n", "    steps:\n      - store: drop\n  a2:\n    endpoint: [backup]\n    steps:\n      - store: archive2\n", 1)
 	if _, err := Parse([]byte(two)); err == nil || !strings.Contains(err.Error(), "overlaps secret.path /run/luk/volatile/queue of endpoint drop") {
 		t.Errorf("nested secret paths: %v", err)
@@ -2163,7 +2162,7 @@ func TestLinkReplaceStoreStepsOnly(t *testing.T) {
 	if _, err := Parse([]byte(fanOut)); err != nil {
 		t.Fatalf("store steps: %v", err)
 	}
-	for what, step := range map[string]string{"run": "      - run: /opt/luk/mark\n", "run tee": "      - run: /opt/luk/mark\n        tee: true\n", "encrypt": "      - encrypt: {key: [robert@example.com]}\n", "relay": "      - relay: s3-upload\n"} {
+	for what, step := range map[string]string{"run": "      - run: /opt/luk/mark\n", "run tee": "      - run: /opt/luk/mark\n        tee: true\n", "encrypt": "      - encrypt: {recipients: {keys: [robert@example.com]}}\n", "relay": "      - relay: s3-upload\n"} {
 		bad := strings.Replace(src, "    steps:\n      - store: drop\n", "    steps:\n      - store: drop\n"+step, 1)
 		_, err := Parse([]byte(bad))
 		if want := "endpoint drop: link.replace needs pipelines of store steps only: pipeline drop step 2 is " + strings.TrimSuffix(what, " tee"); err == nil || !strings.Contains(err.Error(), want) {
@@ -2233,8 +2232,8 @@ func TestKeyIDAllowAndNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range [][2]string{
-		{"    - name: robert.socha\n", "    - name: robert#socha\n"},
-		{"    - name: hosts\n", "    - name: ho#sts\n"},
+		{"    robert.socha: ", "    robert#socha: "},
+		{"    hosts:\n", "    ho#sts:\n"},
 	} {
 		if _, err := Parse([]byte(strings.Replace(good, r[0], r[1], 1))); err == nil || !strings.Contains(err.Error(), "contains ':' or '#'") {
 			t.Errorf("%q: %v", r[1], err)
@@ -2282,12 +2281,12 @@ func TestRetention(t *testing.T) {
 }
 
 func TestRetentionConflictReplace(t *testing.T) {
-	src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", conflict: replace, retention: [{keep: {daily: 1}}]}`, 1)
-	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage archive: retention needs conflict version or reject, not replace") {
+	src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", conflict: {mode: replace}, retention: [{keep: {daily: 1}}]}`, 1)
+	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage archive: retention needs conflict.mode version or reject, not replace") {
 		t.Fatalf("replace: %v", err)
 	}
 	for _, conflict := range []string{"version", "reject"} {
-		src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", conflict: `+conflict+`, retention: [{keep: {daily: 1}}]}`, 1)
+		src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", conflict: {mode: `+conflict+`}, retention: [{keep: {daily: 1}}]}`, 1)
 		if _, err := Parse([]byte(src)); err != nil {
 			t.Fatalf("%s: %v", conflict, err)
 		}
@@ -2311,10 +2310,6 @@ func TestRetentionErrors(t *testing.T) {
 		if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v", rules, err)
 		}
-	}
-	src := strings.Replace(good, "storage:\n", "storage:\n  off: {type: s3, bucket: b, retention: [{keep: {daily: 1}}]}\n", 1)
-	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage off: retention needs a local storage") {
-		t.Errorf("s3: %v", err)
 	}
 }
 
@@ -2370,11 +2365,7 @@ func TestWatchErrors(t *testing.T) {
 			t.Errorf("%s: %v", rules, err)
 		}
 	}
-	src := strings.Replace(good, "storage:\n", "storage:\n  off: {type: s3, bucket: b, watch: [{every: 1h}]}\n", 1)
-	if _, err := Parse([]byte(src)); err == nil || !strings.Contains(err.Error(), "storage off: watch needs a local storage") {
-		t.Errorf("s3: %v", err)
-	}
-	src = strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", watch: [{origin: x, every: 1h}, {every: 2h}]}`, 1)
+	src := strings.Replace(good, `path: "{{ .Sender }}/{{ .File }}"}`, `path: "{{ .Sender }}/{{ .File }}", watch: [{origin: x, every: 1h}, {every: 2h}]}`, 1)
 	if _, err := Parse([]byte(src)); err != nil {
 		t.Errorf("catch-all last: %v", err)
 	}

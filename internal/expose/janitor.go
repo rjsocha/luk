@@ -100,9 +100,6 @@ func StartJanitor(ctx context.Context, cfg func() *config.Config, log *slog.Logg
 
 func expire(cfg *config.Config, log *slog.Logger, now time.Time) {
 	for name, s := range cfg.Storage {
-		if s.Type != "local" {
-			continue
-		}
 		// Removals only mark the catalog stale; it is rebuilt once after
 		// the pass.
 		st := store.FromConfig(s).Batch()
@@ -160,9 +157,6 @@ func expire(cfg *config.Config, log *slog.Logger, now time.Time) {
 
 func maintain(cfg *config.Config, log *slog.Logger, now time.Time) {
 	for name, s := range cfg.Storage {
-		if s.Type != "local" {
-			continue
-		}
 		st := store.FromConfig(s)
 		// Retention removals only mark the catalog stale; Reconcile
 		// rebuilds it once.

@@ -91,8 +91,8 @@ func endpointList(cfg *config.Config, l *listener, host string, id *wire.Identit
 				}
 			}
 		}
-		if ep.Backup.Hostname != nil {
-			info.BackupHostname = backupHostMode(id, ep.Backup.Hostname)
+		if ep.Origin != nil {
+			info.BackupHostname = backupHostMode(id, ep.Origin)
 		}
 		if lim, ok := quota.Resolve(ep.Quota, id); ok {
 			info.Quota = &wire.QuotaInfo{Mode: lim.Mode, Rate: lim.Rate.String(), Burst: lim.Burst,
@@ -104,10 +104,10 @@ func endpointList(cfg *config.Config, l *listener, host string, id *wire.Identit
 	return out
 }
 
-// backupHostMode is which backup.hostname id may send under h: any when
-// it matches h.Any (also when in both lists), principal when it matches
-// h.Principal, else none.
-func backupHostMode(id *wire.Identity, h *config.BackupHostname) string {
+// backupHostMode is which backup.hostname id may send under the origin
+// block h: any when it matches h.Any (also when in both lists), principal
+// when it matches h.Principal, else none.
+func backupHostMode(id *wire.Identity, h *config.Origin) string {
 	switch {
 	case auth.Allowed(id, h.Any):
 		return wire.BackupHostAny
@@ -132,10 +132,10 @@ func permanentOffered(id *wire.Identity, ep *config.Endpoint) bool {
 }
 
 // backupHostAllowed reports whether id may send the backup hostname to
-// ep: always without a backup.hostname block, else by backupHostMode,
-// where principal takes only a principal of the certificate of id.
+// ep: always without an origin block, else by backupHostMode, where
+// principal takes only a principal of the certificate of id.
 func backupHostAllowed(id *wire.Identity, ep *config.Endpoint, hostname string) bool {
-	h := ep.Backup.Hostname
+	h := ep.Origin
 	if h == nil {
 		return true
 	}
@@ -148,9 +148,9 @@ func backupHostAllowed(id *wire.Identity, ep *config.Endpoint, hostname string) 
 	return false
 }
 
-// ttlPolicy is the ttl policy of a local storage; nil for any other.
+// ttlPolicy is the ttl policy of a storage; nil without one.
 func ttlPolicy(st *config.Storage) *wire.TTLPolicy {
-	if st == nil || st.Type != "local" {
+	if st == nil {
 		return nil
 	}
 	p := &wire.TTLPolicy{User: st.TTL.User}

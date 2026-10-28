@@ -53,7 +53,7 @@ func newSecretFixture(t *testing.T, mod func(string) string) *secretFixture {
 			"  drop: {endpoint: [drop], steps: [{store: drop}]}\n",
 			"  drop: {endpoint: [drop], steps: [{store: drop}]}\n  mark: {endpoint: [drop], steps: [{run: "+prog+"}]}\n",
 			"storage:\n",
-			"storage:\n  volatile: {type: local, base: "+vol+"/storage, path: \"{{ .Random }}\", expose: volatile, ttl: {user: true}}\n",
+			"storage:\n  volatile: {directory: "+vol+"/storage, path: \"{{ .Random }}\", expose: volatile, ttl: {user: true}}\n",
 			"  drop: {listen: main, path: /d/}\n",
 			"  drop: {listen: main, path: /d/}\n  volatile: {listen: main, path: /d/volatile/}\n",
 		).Replace(s)
@@ -96,7 +96,7 @@ func (f *secretFixture) runs(t *testing.T) int {
 // nothing.
 func (f *secretFixture) wantEmpty(t *testing.T, when string) {
 	t.Helper()
-	for _, d := range []string{filepath.Join(f.root, "data", "q/drop"), filepath.Join(f.root, "data", "s/drop/file")} {
+	for _, d := range []string{filepath.Join(f.root, "data", "queue/drop"), filepath.Join(f.root, "data", "s/drop/file")} {
 		if v := visible(t, d); len(v) != 0 {
 			t.Fatalf("%s: %s holds %v", when, d, v)
 		}
@@ -207,7 +207,7 @@ func TestSecretOthersUnchanged(t *testing.T) {
 		if !strings.HasPrefix(out.URL, "https://lukd.vm:8443/d/") || strings.HasPrefix(out.URL, "https://lukd.vm:8443/d/volatile/") {
 			t.Fatalf("url %s", out.URL)
 		}
-		if q := visible(t, filepath.Join(f.root, "data", "q/drop")); len(q) != 1 {
+		if q := visible(t, filepath.Join(f.root, "data", "queue/drop")); len(q) != 1 {
 			t.Fatalf("endpoint queue %v", q)
 		}
 		f.settle(t)
@@ -284,7 +284,7 @@ func TestSecretLinks(t *testing.T) {
 	if q := visible(t, filepath.Join(f.vol, "queue")); len(q) != 1 || q[0] != ans.ID {
 		t.Fatalf("replace queue %v", q)
 	}
-	if q := visible(t, filepath.Join(f.root, "data", "q/drop")); len(q) != 0 {
+	if q := visible(t, filepath.Join(f.root, "data", "queue/drop")); len(q) != 0 {
 		t.Fatalf("endpoint queue %v", q)
 	}
 	f.settle(t)
@@ -309,7 +309,7 @@ func TestSecretLinks(t *testing.T) {
 // goes to the nested expose even when such a file exists.
 func TestNestedExposeReserved(t *testing.T) {
 	f := newSecretFixture(t, func(s string) string {
-		return strings.Replace(s, `base: s/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}"`, `base: s/drop, ttl: {user: true, max: 7d}, path: "{{ .File }}"`, 1)
+		return strings.Replace(s, `directory: s/drop, ttl: {user: true, max: 7d}, path: "{{ .Random }}"`, `directory: s/drop, ttl: {user: true, max: 7d}, path: "{{ .File }}"`, 1)
 	})
 	for _, name := range []string{"volatile"} {
 		m := fileMeta([]byte("x"))
@@ -373,14 +373,14 @@ func TestSecretDirsCreated(t *testing.T) {
 func TestSecretReserve(t *testing.T) {
 	f := newSecretFixture(t, func(s string) string {
 		s = strings.Replace(s, "storage: volatile}", "storage: volatile, reserve: 1M}", 1)
-		return strings.Replace(s, "listen: {main:", "limits: {queue: {reserve: 1G}}\nlisten: {main:", 1)
+		return strings.Replace(s, "listen: {main:", "queue: {reserve: 1G}\nlisten: {main:", 1)
 	})
 	cfg := f.srv.config()
 	if r := cfg.Endpoint["drop"].Secret.Reserve; r != 1<<20 {
 		t.Fatalf("reserve %d", r)
 	}
 	free := int64(100 << 20)
-	f.srv.queue = queue.New(int64(cfg.Limits.Queue.Reserve), func(string) (int64, error) { return free, nil })
+	f.srv.queue = queue.New(int64(cfg.Queue.Reserve), func(string) (int64, error) { return free, nil })
 	f.srv.queue.SetDirReserves(cfg.SecretReserves())
 	receipt(t, mustDo(t, f.fixture, secretMeta("tmpfs"), "tmpfs"), http.StatusCreated)
 	if rec := mustDo(t, f.fixture, fileMeta([]byte("disk")), "disk"); rec.Code != http.StatusInsufficientStorage {

@@ -29,8 +29,14 @@ func signer(t *testing.T) ssh.Signer {
 
 func cert(t *testing.T, ca ssh.Signer, typ uint32, keyID string, serial uint64, principals []string, before uint64) *ssh.Certificate {
 	t.Helper()
+	return certOf(t, ca, signer(t).PublicKey(), typ, keyID, serial, principals, before)
+}
+
+// certOf is cert of the given certified key.
+func certOf(t *testing.T, ca ssh.Signer, key ssh.PublicKey, typ uint32, keyID string, serial uint64, principals []string, before uint64) *ssh.Certificate {
+	t.Helper()
 	c := &ssh.Certificate{
-		Key: signer(t).PublicKey(), CertType: typ, KeyId: keyID, Serial: serial,
+		Key: key, CertType: typ, KeyId: keyID, Serial: serial,
 		ValidPrincipals: principals, ValidBefore: before,
 	}
 	if err := c.SignCert(rand.Reader, ca); err != nil {
@@ -39,6 +45,16 @@ func cert(t *testing.T, ca ssh.Signer, typ uint32, keyID string, serial uint64, 
 	return c
 }
 
+// goneKey is the certified key the CA hosts of setup revoked.
+var goneKey = func() ssh.PublicKey {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	k, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		panic(err)
+	}
+	return k
+}()
+
 func setup(t *testing.T) (*Authenticator, ssh.Signer, ssh.Signer, ssh.Signer) {
 	user := signer(t)
 	hostCA := signer(t)
@@ -46,7 +62,7 @@ func setup(t *testing.T) (*Authenticator, ssh.Signer, ssh.Signer, ssh.Signer) {
 	a := config.Auth{
 		Keys: []config.Key{{Name: "robert.socha", Parsed: []ssh.PublicKey{user.PublicKey()}}},
 		CA: []config.CA{
-			{Name: "hosts", Type: "host", Parsed: []ssh.PublicKey{hostCA.PublicKey()}, Revoked: config.Revoked{KeyIDs: []string{"gone"}, Serials: []uint64{13}}},
+			{Name: "hosts", Type: "host", Parsed: []ssh.PublicKey{hostCA.PublicKey()}, Revoked: config.Revoked{Key: []string{ssh.FingerprintSHA256(goneKey)}}},
 			{Name: "people", Type: "user", Parsed: []ssh.PublicKey{userCA.PublicKey()}},
 		},
 	}
@@ -85,8 +101,8 @@ func TestResolveCert(t *testing.T) {
 	}
 
 	bad := map[string]*ssh.Certificate{
-		"revoked key id":       cert(t, hostCA, ssh.HostCert, "gone", 1, nil, ssh.CertTimeInfinity),
-		"revoked serial":       cert(t, hostCA, ssh.HostCert, "x", 13, nil, ssh.CertTimeInfinity),
+		"revoked key":          certOf(t, hostCA, goneKey, ssh.HostCert, "gone", 1, nil, ssh.CertTimeInfinity),
+		"revoked key reissued": certOf(t, hostCA, goneKey, ssh.HostCert, "gone", 2, []string{"gone.example"}, ssh.CertTimeInfinity),
 		"expired":              cert(t, hostCA, ssh.HostCert, "x", 1, nil, uint64(now.Add(-time.Hour).Unix())),
 		"user cert of host CA": cert(t, hostCA, ssh.UserCert, "x", 1, nil, ssh.CertTimeInfinity),
 		"host cert of user CA": cert(t, userCA, ssh.HostCert, "x", 1, nil, ssh.CertTimeInfinity),
@@ -96,6 +112,10 @@ func TestResolveCert(t *testing.T) {
 		if _, err := a.Resolve(c, now); err == nil {
 			t.Errorf("%s: resolved", name)
 		}
+	}
+	// The host of a revoked key comes back with a new key: same Key ID, accepted.
+	if id, err := a.Resolve(cert(t, hostCA, ssh.HostCert, "gone", 3, nil, ssh.CertTimeInfinity), now); err != nil || id.Name != "hosts:gone" {
+		t.Fatalf("new key of a revoked host: %v %+v", err, id)
 	}
 	if id, err := a.Resolve(cert(t, userCA, ssh.UserCert, "robert", 2, []string{"robert"}, ssh.CertTimeInfinity), now); err != nil || id.Name != "people:robert" {
 		t.Fatalf("user cert: %v %+v", err, id)

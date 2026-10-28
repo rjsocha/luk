@@ -46,9 +46,11 @@ type page struct {
 	Updated stamp
 	// Owner is the sender of the upload, empty with no_owner.
 	Owner string
-	// SaveName is the file name the landing page script saves binary
-	// revealed content as.
+	// SaveName is the file name the landing page script saves revealed
+	// content as; Named: the upload has a name, so text is offered for
+	// download too, not only binary content.
 	SaveName string
+	Named    bool
 	// Binary is set on the reveal page when Content is the base64 of
 	// content that is not text.
 	Binary bool
@@ -106,13 +108,14 @@ func newPage(rel string, sc store.Sidecar, now time.Time) page {
 		// could be found from its hash by anyone who sees this page.
 		typ, sum = "secret", ""
 	}
-	save := fileName(rel, sc)
-	if sc.Produced == "" && sc.Client.File == "" {
+	save, named := fileName(rel, sc), sc.Produced != "" || sc.Client.File != ""
+	if !named {
 		save = path.Base(rel) + ".bin"
 	}
 	return page{
 		Name:      fileName(rel, sc),
 		SaveName:  save,
+		Named:     named,
 		Size:      humanSize(sc.Size),
 		Type:      typ,
 		SHA256:    sum,

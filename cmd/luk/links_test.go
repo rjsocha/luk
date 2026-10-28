@@ -158,7 +158,7 @@ func TestSendLinksMax(t *testing.T) {
 }
 
 func TestSendLinksLimitReached(t *testing.T) {
-	e := newLukdEnvTTL(t, "{user: true, max: 7d}, links: {max: 2}")
+	e := newLukdEnvTTL(t, "{user: true, max: 7d}, hardlink: {owner: {max: 2}}")
 	code, out, errs := runLuk(t, "send", "-e", "drop", "-k", e.key, "--links", "3", "--file", namedFile(t, "a.txt", "limited"))
 	if code != 2 || len(lines(out)) != 2 || !strings.Contains(errs, "rejected (429 Too Many Requests): limit of 2 links to the same content reached; 2 of 3 links made") {
 		t.Fatalf("exit %d: %q %q", code, out, errs)

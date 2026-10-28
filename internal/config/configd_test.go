@@ -19,13 +19,11 @@ listen:
     addr: 127.0.0.1:8080
 auth:
   keys:
-    - name: robert.socha
-      key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
+    robert.socha: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILfWnf2l8r4MBD1t4Rnk3fF9BGDtA+LubieHdJSa5e6n Robert Socha"
 endpoint:
   backup:
     listen: main
     endpoint: /backup
-    path: /queue/backup
     allow: [robert.socha]
 pipeline:
   backup:
@@ -33,7 +31,7 @@ pipeline:
     steps:
       - store: archive
 storage:
-  archive: {type: local, base: /storage/archive, path: "{{ .File }}"}
+  archive: {directory: /storage/archive, path: "{{ .File }}"}
 `
 
 // writeTree creates files under a fresh directory and returns the path of
@@ -87,7 +85,6 @@ endpoint:
   drop:
     listen: other
     endpoint: /drop
-    path: /queue/drop
     allow: [ops, "hosts:*"]
     respond: url
     storage: drop
@@ -97,17 +94,16 @@ pipeline:
     steps:
       - store: drop
 storage:
-  drop: {type: local, base: /storage/drop, path: "{{ .Random }}", expose: drop}
+  drop: {directory: /storage/drop, path: "{{ .Random }}", expose: drop}
 expose:
   drop: {listen: other, path: /d/}
 `),
 		"config.d/20-auth.yaml": s(`
 auth:
   keys:
-    - name: ops
-      key: "` + key + `"
+    ops: "` + key + `"
   ca:
-    - name: hosts
+    hosts:
       type: host
       key: "` + ca + `"
 `),
@@ -133,10 +129,10 @@ func TestConfigDDuplicateName(t *testing.T) {
 	_, key := pubLine(t, "")
 	cases := map[string]string{
 		"listen":   "listen:\n  main: {addr: 127.0.0.1:9}\n",
-		"endpoint": "endpoint:\n  backup: {listen: main, endpoint: /x, path: /q/x, allow: [robert.socha]}\n",
+		"endpoint": "endpoint:\n  backup: {listen: main, endpoint: /x, allow: [robert.socha]}\n",
 		"pipeline": "pipeline:\n  backup: {endpoint: [backup], steps: [{store: archive}]}\n",
-		"storage":  "storage:\n  archive: {type: s3, bucket: other}\n",
-		"keys":     "auth:\n  keys:\n    - name: robert.socha\n      key: \"" + key + "\"\n",
+		"storage":  "storage:\n  archive: {directory: /other, path: x}\n",
+		"keys":     "auth:\n  keys:\n    robert.socha: \"" + key + "\"\n",
 	}
 	for name, snippet := range cases {
 		_, p := writeTree(t, map[string]*string{"config.yaml": s(baseMain), "config.d/a.yaml": s(snippet)})
@@ -163,8 +159,8 @@ func TestConfigDScalarTwice(t *testing.T) {
 	cases := map[string][2]string{
 		"root":            {"root: /srv/a\n", "root: /srv/b\n"},
 		"limits.conn.max": {"limits: {conn: {max: 5}}\n", "limits:\n  conn:\n    max: 6\n"},
-		"limits.failed":   {"limits: {failed: {age: 1d}}\n", "limits: {failed: {age: 2d}}\n"},
-		"clock_skew":      {"auth: {clock_skew: 1m}\n", "auth: {clock_skew: 2m}\n"},
+		"failed.ttl":      {"failed: {ttl: 1d}\n", "failed: {ttl: 2d}\n"},
+		"auth.skew":       {"auth: {skew: 1m}\n", "auth: {skew: 2m}\n"},
 		"gpg.keys":        {"gpg: {keys: /etc/a}\n", "gpg: {keys: /etc/b}\n"},
 		"gpg.wkd.cache":   {"gpg: {wkd: {cache: 1h}}\n", "gpg: {wkd: {cache: 2h}}\n"},
 	}
@@ -194,8 +190,8 @@ func TestConfigDScalarTwice(t *testing.T) {
 func TestConfigDOrderIndependent(t *testing.T) {
 	_, key := pubLine(t, "")
 	_, key2 := pubLine(t, "")
-	a := "listen:\n  b: {addr: 127.0.0.1:9001}\nauth:\n  keys:\n    - {name: zed, key: \"" + key + "\"}\nstorage:\n  z: {type: s3, bucket: z}\n"
-	b := "listen:\n  a: {addr: 127.0.0.1:9002}\nauth:\n  keys:\n    - {name: alf, key: \"" + key2 + "\"}\nlimits: {conn: {max: 9}}\n"
+	a := "listen:\n  b: {addr: 127.0.0.1:9001}\nauth:\n  keys:\n    zed: \"" + key + "\"\nstorage:\n  z: {directory: /z, path: x}\n"
+	b := "listen:\n  a: {addr: 127.0.0.1:9002}\nauth:\n  keys:\n    alf: \"" + key2 + "\"\nlimits: {conn: {max: 9}}\n"
 	_, p1 := writeTree(t, map[string]*string{"config.yaml": s(baseMain), "config.d/1.yaml": s(a), "config.d/2.yaml": s(b)})
 	_, p2 := writeTree(t, map[string]*string{"config.yaml": s(baseMain), "config.d/x-first.yaml": s(b), "config.d/y-second.yaml": s(a)})
 	var out [2]string
@@ -254,7 +250,7 @@ func TestConfigDErrorsNameTheFile(t *testing.T) {
 	}
 	dir, p = writeTree(t, map[string]*string{
 		"config.yaml":     s(baseMain),
-		"config.d/a.yaml": s("endpoint:\n  drop: {listen: main, endpoint: drop, path: /q/d, allow: [robert.socha]}\nlimits: {conn: {max: -1}}\n"),
+		"config.d/a.yaml": s("endpoint:\n  drop: {listen: main, endpoint: drop, allow: [robert.socha]}\nlimits: {conn: {max: -1}}\n"),
 	})
 	_, err := Load(p)
 	if err == nil {
@@ -304,7 +300,7 @@ func TestKeyDErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	certLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(crt)))
-	withCA := strings.Replace(baseMain, "endpoint:\n", "  ca:\n    - {name: people, type: user, key: \""+caLine+"\"}\nendpoint:\n", 1)
+	withCA := strings.Replace(baseMain, "endpoint:\n", "  ca:\n    people: {type: user, key: \""+caLine+"\"}\nendpoint:\n", 1)
 	cases := map[string]struct {
 		main, file, body, want string
 	}{
@@ -363,7 +359,7 @@ func TestKeyDCA(t *testing.T) {
 	_, k2 := pubLine(t, "2026")
 	_, k3 := pubLine(t, "")
 	main := strings.Replace(baseMain, "allow: [robert.socha]", "allow: [robert.socha, hosts:*, people:*]", 1)
-	main = strings.Replace(main, "endpoint:\n", "  ca:\n    - {name: people, revoked: {key_ids: [gone], serials: [7]}}\nendpoint:\n", 1)
+	main = strings.Replace(main, "endpoint:\n", "  ca:\n    people: {revoked: {key: [\"SHA256:KDu53u8C5oQ6v7U476HspwgBvYpwHD+YGR4SNJYzkkc\"]}}\nendpoint:\n", 1)
 	dir, p := writeTree(t, map[string]*string{
 		"config.yaml":              s(main),
 		"ssh.d/ca/host/hosts.pub":  s("# rotation\n" + k1 + "\n" + k2 + "\n"),
@@ -383,7 +379,7 @@ func TestKeyDCA(t *testing.T) {
 	if len(got) != 2 || hosts.Type != "host" || len(hosts.Parsed) != 2 || hosts.File != filepath.Join(dir, "ssh.d/ca/host/hosts.pub") {
 		t.Fatalf("hosts %+v", c.Auth.CA)
 	}
-	if people.Type != "user" || len(people.Parsed) != 1 || people.Revoked.KeyIDs[0] != "gone" || people.Revoked.Serials[0] != 7 {
+	if people.Type != "user" || len(people.Parsed) != 1 || people.Revoked.Key[0] != "SHA256:KDu53u8C5oQ6v7U476HspwgBvYpwHD+YGR4SNJYzkkc" {
 		t.Fatalf("people %+v", people)
 	}
 	if !slices.Contains(c.Files, hosts.File) || !slices.Contains(c.Files, people.File) {
@@ -400,14 +396,14 @@ func TestKeyDCAErrors(t *testing.T) {
 	}
 	certLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(crt)))
 	inline := func(entry string) string {
-		return strings.Replace(baseMain, "endpoint:\n", "  ca:\n    - "+entry+"\nendpoint:\n", 1)
+		return strings.Replace(baseMain, "endpoint:\n", "  ca:\n    "+entry+"\nendpoint:\n", 1)
 	}
 	cases := map[string]struct {
 		main  string
 		files map[string]string
 		want  []string
 	}{
-		"inline clash": {inline(`{name: hosts, type: host, key: "` + k2 + `"}`),
+		"inline clash": {inline(`hosts: {type: host, key: "` + k2 + `"}`),
 			map[string]string{"ssh.d/ca/host/hosts.pub": k1}, []string{"CA hosts is also defined in", "config.yaml"}},
 		"host and user": {baseMain,
 			map[string]string{"ssh.d/ca/host/hosts.pub": k1, "ssh.d/ca/user/hosts.pub": k2}, []string{"user/hosts.pub: CA hosts is also defined in", "host/hosts.pub"}},
@@ -415,9 +411,9 @@ func TestKeyDCAErrors(t *testing.T) {
 			map[string]string{"ssh.d/ca/user/robert.socha.pub": k1}, []string{"CA robert.socha is the name of an identity in", "config.yaml"}},
 		"ssh.d identity": {baseMain,
 			map[string]string{"ssh.d/jan.pub": k2, "ssh.d/ca/user/jan.pub": k1}, []string{"CA jan is the name of an identity in", "ssh.d/jan.pub"}},
-		"type mismatch": {inline("{name: hosts, type: user, revoked: {key_ids: [x]}}"),
+		"type mismatch": {inline(`hosts: {type: user, revoked: {key: ["SHA256:KDu53u8C5oQ6v7U476HspwgBvYpwHD+YGR4SNJYzkkc"]}}`),
 			map[string]string{"ssh.d/ca/host/hosts.pub": k1}, []string{"CA hosts has type user in", "config.yaml"}},
-		"keyless without file": {inline("{name: hosts, revoked: {key_ids: [x]}}"),
+		"keyless without file": {inline(`hosts: {revoked: {key: ["SHA256:KDu53u8C5oQ6v7U476HspwgBvYpwHD+YGR4SNJYzkkc"]}}`),
 			nil, []string{"auth.ca hosts: no key and no ssh.d/ca file"}},
 		"options":        {baseMain, map[string]string{"ssh.d/ca/host/hosts.pub": "cert-authority " + k1}, []string{"hosts.pub:1: authorized_keys options"}},
 		"certificate":    {baseMain, map[string]string{"ssh.d/ca/host/hosts.pub": k1 + "\n" + certLine}, []string{"hosts.pub:2: a certificate"}},
@@ -471,7 +467,7 @@ func TestKeyDCAPermissions(t *testing.T) {
 // Every file holds one YAML document: a second one is an error naming the
 // file, trailing comments and blank lines are not.
 func TestOneDocumentPerFile(t *testing.T) {
-	second := "\n---\nauth: {clock_skew: -1s}\nunknown_security_option: true\n"
+	second := "\n---\nauth: {skew: -1s}\nunknown_security_option: true\n"
 	if _, err := Parse([]byte(good + second)); err == nil || !strings.Contains(err.Error(), "more than one YAML document") {
 		t.Fatalf("Parse: %v", err)
 	}

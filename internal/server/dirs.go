@@ -34,9 +34,7 @@ func prepareDirs(cfg *config.Config, role string) error {
 		}
 	}
 	for _, name := range sortedKeys(cfg.Storage) {
-		if s := cfg.Storage[name]; s.Type == "local" {
-			errs = append(errs, prepareStorage(name, s))
-		}
+		errs = append(errs, prepareStorage(name, cfg.Storage[name]))
 	}
 	acme := map[string]bool{}
 	for _, name := range sortedKeys(cfg.Listen) {
@@ -45,7 +43,7 @@ func prepareDirs(cfg *config.Config, role string) error {
 			continue
 		}
 		if l.TLS.Mode == "acme" {
-			if d := cfg.ACMECacheDir(l.TLS.Directory); !acme[d] {
+			if d := cfg.ACMECacheDir(l.TLS.ACME.Server); !acme[d] {
 				acme[d] = true
 				errs = append(errs, prepareACMEDir(d))
 			}

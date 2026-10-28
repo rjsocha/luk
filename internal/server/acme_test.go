@@ -23,7 +23,7 @@ import (
 )
 
 // acmeTestConfig has an acme listener download (drop.example.com,
-// get.example.com) on dl, a second one on 443 and the acme: true
+// get.example.com) on dl, a second one on 443 and their entrypoint
 // listener http on plain.
 func acmeTestConfig(t *testing.T, root, directory, dl, plain string) *config.Config {
 	t.Helper()
@@ -33,14 +33,13 @@ listen:
   download:
     addr: %s
     host: [drop.example.com, get.example.com]
-    tls: {mode: acme, email: ops@example.com, directory: '%s'}
+    tls: {mode: acme, acme: {entrypoint: http, email: ops@example.com, server: '%s'}}
   main:
     addr: 0.0.0.0:443
     host: [main.example.com]
-    tls: {mode: acme, email: ops@example.com, directory: '%s'}
+    tls: {mode: acme, acme: {entrypoint: http, email: ops@example.com, server: '%s'}}
   http:
     addr: %s
-    acme: true
 `, root, dl, directory, directory, plain))
 	if err != nil {
 		t.Fatal(err)
@@ -85,6 +84,49 @@ func TestACMEHTTPListener(t *testing.T) {
 	}
 }
 
+// Each entrypoint answers for the names of the acme listeners naming it:
+// the names of the other entrypoint are misdirected there.
+func TestACMEEntrypointNames(t *testing.T) {
+	cfg, err := config.Parse(fmt.Appendf(nil, `
+root: %s
+listen:
+  a:
+    addr: 127.0.0.1:8443
+    host: [a.example.com]
+    tls: {mode: acme, acme: {entrypoint: http-a, server: 'https://ca.example.com/dir'}}
+  b:
+    addr: 127.0.0.2:8443
+    host: [b.example.com]
+    tls: {mode: acme, acme: {entrypoint: http-b, server: 'https://ca.example.com/dir'}}
+  http-a:
+    addr: 127.0.0.1:8080
+  http-b:
+    addr: 127.0.0.2:8080
+`, t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(cfg, slog.New(slog.DiscardHandler))
+	s.acme = newACME(cfg, slog.New(slog.DiscardHandler), nil)
+	for _, c := range []struct {
+		addr, host string
+		code       int
+	}{
+		{"127.0.0.1:8080", "a.example.com", 308},
+		{"127.0.0.1:8080", "b.example.com", 421},
+		{"127.0.0.2:8080", "b.example.com", 308},
+		{"127.0.0.2:8080", "a.example.com", 421},
+	} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Host = c.host
+		s.Handler(c.addr).ServeHTTP(w, r)
+		if w.Code != c.code {
+			t.Errorf("%s %s: %d", c.addr, c.host, w.Code)
+		}
+	}
+}
+
 func TestACMEManagersPerDirectory(t *testing.T) {
 	cfg := acmeTestConfig(t, t.TempDir(), "https://ca.example.com/dir", "0.0.0.0:8443", "127.0.0.1:8080")
 	a := newACME(cfg, slog.New(slog.DiscardHandler), nil)
@@ -94,7 +136,7 @@ func TestACMEManagersPerDirectory(t *testing.T) {
 	if got := a.managers[0].Hosts(); strings.Join(got, ",") != "drop.example.com,get.example.com,main.example.com" {
 		t.Fatalf("hosts %v", got)
 	}
-	cfg.Listen["main"].TLS.Directory = "https://staging.example.com/dir"
+	cfg.Listen["main"].TLS.ACME.Server = "https://staging.example.com/dir"
 	if a = newACME(cfg, slog.New(slog.DiscardHandler), nil); len(a.managers) != 2 || a.listen["download"] == a.listen["main"] {
 		t.Fatalf("two directories, %d managers", len(a.managers))
 	}
@@ -119,24 +161,23 @@ listen:
   a-self:
     addr: 127.0.0.1:8443
     host: [self.vm]
-    tls: {mode: self, cert: tls/s.crt, key: tls/s.key, host: self.vm}
+    tls: {mode: self, cert: tls/s.crt, key: tls/s.key}
   b-acme:
     addr: 127.0.0.1:8443
     host: [drop.example.com, get.example.com]
-    tls: {mode: acme}
+    tls: {mode: acme, acme: {entrypoint: http, server: 'https://acme-v02.api.letsencrypt.org/directory'}}
   c-acme:
     addr: 127.0.0.1:9443
     host: [solo.example.com]
-    tls: {mode: acme}
+    tls: {mode: acme, acme: {entrypoint: http, server: 'https://acme-v02.api.letsencrypt.org/directory'}}
   http:
     addr: 127.0.0.1:8080
-    acme: true
 `, root))
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := cfg.Listen["a-self"].TLS
-	if _, err := tlsself.Generate(l.Cert, l.Key, l.Host, l.Algorithm); err != nil {
+	l := cfg.Listen["a-self"]
+	if _, err := tlsself.Generate(l.TLS.Cert, l.TLS.Key, l.CertNames(), l.TLS.Algorithm); err != nil {
 		t.Fatal(err)
 	}
 	fake := &fakeSource{cert: &tls.Certificate{}}
@@ -205,7 +246,7 @@ func TestACMECacheDir(t *testing.T) {
 }
 
 // TestReceiveACME runs the receive role against a local CA: the
-// certificates are obtained at start through the acme: true listener,
+// certificates are obtained at start through the entrypoint listener,
 // served by SNI and logged on SIGHUP.
 func TestReceiveACME(t *testing.T) {
 	ca := acmetest.New(t)

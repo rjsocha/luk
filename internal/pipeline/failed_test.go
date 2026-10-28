@@ -113,7 +113,7 @@ func TestPartialFailureRecord(t *testing.T) {
 		r.Pipelines[0].Pipeline != "cloud" || r.Pipelines[1].Pipeline != "fail" || r.Pipelines[2].Pipeline != "tee" {
 		t.Fatalf("record %+v", r)
 	}
-	if o := outcome(t, r, "cloud"); o.State != StateFailed || o.Step != 2 || !strings.Contains(o.Error, "not supported yet") ||
+	if o := outcome(t, r, "cloud"); o.State != StateFailed || o.Step != 2 || !strings.Contains(o.Error, "store broken") ||
 		strings.Join(o.Stored, ",") != "a:robert.socha/f.txt" {
 		t.Fatalf("cloud %+v", o)
 	}
@@ -156,7 +156,7 @@ func TestFailureRemovesWorkAndPayload(t *testing.T) {
 func TestSecretFailureKeepsNothing(t *testing.T) {
 	e := newEnv(t, 1)
 	d := e.dispatcher()
-	j := e.enqueueWith(t, "v1", "up", func(j *Job) { j.Secret = "s3" }, SecretPipeline)
+	j := e.enqueueWith(t, "v1", "up", func(j *Job) { j.Secret = "broken" }, SecretPipeline)
 	d.Submit(j)
 	d.Wait()
 	gone(t, j.Entry.Dir)
@@ -166,7 +166,7 @@ func TestSecretFailureKeepsNothing(t *testing.T) {
 		t.Fatalf("record %s %v", b, err)
 	}
 	r := loadRecord(t, e.recordPath("up", "v1"))
-	if o := outcome(t, r, SecretPipeline); r.Secret != "s3" || o.State != StateFailed || o.Step != 1 || len(o.Stored) != 0 {
+	if o := outcome(t, r, SecretPipeline); r.Secret != "broken" || o.State != StateFailed || o.Step != 1 || len(o.Stored) != 0 {
 		t.Fatalf("record %+v", r)
 	}
 }
@@ -246,7 +246,7 @@ func TestExpireFailed(t *testing.T) {
 	if !exists(e.recordPath("up", "x1")) {
 		t.Fatal("young record expired")
 	}
-	e.cfg.Limits.Failed.Age = nil
+	e.cfg.Failed.TTL = nil
 	d.Maintain(now.Add(4 * 24 * time.Hour))
 	d.Wait()
 	gone(t, e.recordPath("up", "x1"))

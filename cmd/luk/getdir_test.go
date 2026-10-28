@@ -51,24 +51,24 @@ func newVaultEnvStorage(t *testing.T, auth string, catalog bool) *vaultEnv {
 	e.other, otherPub = newKeyFile(t)
 	crt, key := filepath.Join(e.root, "data/tls/s.crt"), filepath.Join(e.root, "data/tls/s.key")
 	var err error
-	if e.pin, err = tlsself.Generate(crt, key, "luk.test", tlsself.ECDSAP256); err != nil {
+	if e.pin, err = tlsself.Generate(crt, key, []string{"luk.test"}, tlsself.ECDSAP256); err != nil {
 		t.Fatal(err)
 	}
 	text := fmt.Sprintf(`
 root: %s
 listen:
   main: {addr: "%s", public: "http://%s"}
-  secure: {addr: "%s", public: "https://%s", tls: {mode: self, cert: tls/s.crt, key: tls/s.key, host: luk.test}}
+  secure: {addr: "%s", public: "https://%s", tls: {mode: self, cert: tls/s.crt, key: tls/s.key}}
 auth:
-  keys: [{name: robert.socha, key: "%s"}, {name: other, key: "%s"}]
+  keys: {robert.socha: "%s", other: "%s"}
 endpoint:
-  drop: {listen: main, endpoint: /drop, path: q/drop, allow: [robert.socha], respond: url, storage: vault}
+  drop: {listen: main, endpoint: /drop, allow: [robert.socha], respond: url, storage: vault}
 pipeline:
   drop: {endpoint: [drop], steps: [{store: vault}]}
 storage:
-  vault: {type: local, base: s/vault, path: "{{ .File }}", expose: vault, catalog: %t}
+  vault: {directory: s/vault, path: "{{ .File }}", expose: vault}
 expose:
-  vault: {listen: secure, path: /v/, index: %t, auth: %s}
+  vault: {listen: secure, path: /v/, catalog: %t, index: %t, auth: %s}
 `, e.root, addr, addr, saddr, saddr, pub, otherPub, catalog, strings.Contains(auth, "basic"), auth)
 	startLukd(t, filepath.Join(t.TempDir(), "config.yaml"), text, saddr)
 	return &vaultEnv{privateEnv: e, st: store.Local{Base: filepath.Join(e.root, "data/s/vault"), Conflict: "replace", Catalog: catalog},

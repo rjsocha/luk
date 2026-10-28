@@ -43,8 +43,8 @@ type acmeHost struct {
 	m *acmecert.Manager
 }
 
-// newACME builds the managers of cfg; httpClient talks to the directories
-// (nil: the default client).
+// newACME builds the managers of cfg; httpClient talks to the ACME
+// servers (nil: the default client).
 func newACME(cfg *config.Config, log *slog.Logger, httpClient *http.Client) *acmeCerts {
 	a := &acmeCerts{hosts: map[string]*acmeHost{}, listen: map[string]certSource{}, log: log}
 	type dir struct {
@@ -59,11 +59,11 @@ func newACME(cfg *config.Config, log *slog.Logger, httpClient *http.Client) *acm
 		if l.TLS == nil || l.TLS.Mode != "acme" {
 			continue
 		}
-		t := l.TLS
-		d := byURL[t.Directory]
+		t := l.TLS.ACME
+		d := byURL[t.Server]
 		if d == nil {
 			d = &dir{o: acmecert.Options{
-				Directory: t.Directory, CacheDir: cfg.ACMECacheDir(t.Directory), Email: t.Email,
+				Directory: t.Server, CacheDir: cfg.ACMECacheDir(t.Server), Email: t.Email,
 				Log: log, HTTPClient: httpClient,
 			}}
 			if t.EAB.Set() {
@@ -71,7 +71,7 @@ func newACME(cfg *config.Config, log *slog.Logger, httpClient *http.Client) *acm
 				mac, _ := t.EAB.MAC()
 				d.o.EAB = &acme.ExternalAccountBinding{KID: t.EAB.KID, Key: mac}
 			}
-			byURL[t.Directory] = d
+			byURL[t.Server] = d
 			dirs = append(dirs, d)
 		}
 		d.ls = append(d.ls, l)
@@ -112,12 +112,15 @@ func (a *acmeCerts) getCertificate(l *config.Listen) func(*tls.ClientHelloInfo) 
 	}
 }
 
-// serveHTTP answers a plain acme: true listener: HTTP-01 challenges of the
-// acme names, a 308 to https for any other request to them, 421 for names
-// of no acme listener.
-func (a *acmeCerts) serveHTTP(w http.ResponseWriter, r *http.Request) {
+// serveHTTP answers the acme entrypoint listener entry: HTTP-01
+// challenges of the names of the acme listeners naming it, a 308 to https
+// for any other request to them, 421 for any other name.
+func (a *acmeCerts) serveHTTP(w http.ResponseWriter, r *http.Request, entry string) {
 	host := hostname(r.Host)
 	h, ok := a.hosts[host]
+	if ok && h.l.TLS.ACME.Entrypoint != entry {
+		ok = false
+	}
 	if !ok {
 		a.log.Debug("request for an unknown host", "remote", r.RemoteAddr, "host", r.Host, "acme", true)
 		w.Header().Set("Connection", "close")

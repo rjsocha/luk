@@ -64,7 +64,6 @@ func TestSendUsageErrors(t *testing.T) {
 	for _, args := range [][]string{
 		{"send"},
 		{"send", "--bogus"},
-		{"send", "--secret", "--portal", "--stdin"},
 		{"send", "--ask", "--stdin"},
 		{"send", "--password", "--stdin"},
 		{"send", "--stdin", "--bwlimit", "fast"},
@@ -906,7 +905,7 @@ func TestSendSecretType(t *testing.T) {
 	if code, _, errs := e.send(t, "--secret", "--type", "application/json"); code != 0 || e.meta.Type != "application/json" {
 		t.Fatalf("--type: exit %d: %s %+v", code, errs, e.meta)
 	}
-	if code, _, errs := e.send(t, "--portal", "--file", f); code != 0 || e.meta.Type != "" {
+	if code, _, errs := e.send(t, "--indirect", "--file", f); code != 0 || e.meta.Type != "" {
 		t.Fatalf("portal: exit %d: %s %+v", code, errs, e.meta)
 	}
 	askSecret = func(string) ([]byte, error) { return []byte{'a', 0xff}, nil }
@@ -917,10 +916,18 @@ func TestSendSecretType(t *testing.T) {
 	}
 }
 
+func TestSendSecretIndirect(t *testing.T) {
+	e := newSendEnv(t)
+	defer stdinFrom(t, "data")()
+	if code, _, errs := e.send(t, "--secret", "--indirect", "--stdin"); code != 0 || e.meta.Portal != wire.PortalReveal {
+		t.Fatalf("exit %d: %s %+v", code, errs, e.meta)
+	}
+}
+
 func TestSendPortal(t *testing.T) {
 	e := newSendEnv(t)
 	defer stdinFrom(t, "data")()
-	if code, _, errs := e.send(t, "--portal", "--stdin"); code != 0 {
+	if code, _, errs := e.send(t, "--indirect", "--stdin"); code != 0 {
 		t.Fatalf("exit %d: %s", code, errs)
 	}
 	if e.meta.Portal != wire.PortalDownload {
@@ -1038,14 +1045,14 @@ func TestSendNoCLIHint(t *testing.T) {
 func TestSendNoOwner(t *testing.T) {
 	e := newSendEnv(t)
 	defer stdinFrom(t, "x")()
-	if code, _, errs := e.send(t, "--stdin", "--portal"); code != 0 || e.meta.NoOwner || e.meta.Portal != wire.PortalDownload {
+	if code, _, errs := e.send(t, "--stdin", "--indirect"); code != 0 || e.meta.NoOwner || e.meta.Portal != wire.PortalDownload {
 		t.Fatalf("no_owner set without the flag: exit %d: %s %+v", code, errs, e.meta)
 	}
 	defer stdinFrom(t, "x")()
-	if code, _, errs := e.send(t, "--stdin", "--portal", "--no-owner"); code != 0 || !e.meta.NoOwner {
+	if code, _, errs := e.send(t, "--stdin", "--indirect", "--no-owner"); code != 0 || !e.meta.NoOwner {
 		t.Fatalf("exit %d: %s %+v", code, errs, e.meta)
 	}
-	code, _, errs := e.send(t, "--stdin", "--portal", "--no-owner", "--no-owner")
+	code, _, errs := e.send(t, "--stdin", "--indirect", "--no-owner", "--no-owner")
 	if code != 1 || !strings.Contains(errs, "--no-owner given more than once") {
 		t.Fatalf("repeated flag: exit %d: %s", code, errs)
 	}

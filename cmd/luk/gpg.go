@@ -11,6 +11,8 @@ import (
 
 	openpgp "github.com/ProtonMail/go-crypto/openpgp/v2"
 
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
+
 	"luk/internal/gpgkeys"
 	"luk/internal/gpgring"
 	"luk/internal/wire"
@@ -29,9 +31,12 @@ keyring of the user. Each must name exactly one key that gpg holds valid (validi
 full or ultimate: a key you signed, or your own), enabled and able to encrypt;
 else nothing is sent. The upload is named NAME.gpg and, without --type, is
 application/pgp-encrypted; a file is sent with the size and hash of the message,
-so --links works; a stream is encrypted as it goes. It takes no --secret.`
+so --links works; a stream is encrypted as it goes. With --secret the message is
+armored text named NAME.asc (secret.asc without a name), shown on the reveal page
+with a Download button: the recipient copies or saves it for gpg --decrypt, and
+lukd never holds the plain secret.`
 	gpgExample = `
-  luk send --file report.pdf --gpg anna@example.net --portal --once --links 2`
+  luk send --file report.pdf --gpg anna@example.net --indirect --once --links 2`
 )
 
 // gpgRecipients finds the keys of the --gpg recipients in the GnuPG
@@ -52,23 +57,54 @@ func gpgRecipients(ctx context.Context, to []string) ([]*openpgp.Entity, error) 
 	return ents, nil
 }
 
-// gpgSeal opens a binary OpenPGP message to the recipients.
-func gpgSeal(w io.Writer, to []*openpgp.Entity) (io.WriteCloser, error) {
-	return openpgp.EncryptWithParams(w, to, nil, &openpgp.EncryptParams{Config: gpgkeys.Config(time.Now())})
+// gpgSeal opens an OpenPGP message to the recipients, binary or armored.
+func gpgSeal(w io.Writer, to []*openpgp.Entity, armored bool) (io.WriteCloser, error) {
+	if !armored {
+		return openpgp.EncryptWithParams(w, to, nil, &openpgp.EncryptParams{Config: gpgkeys.Config(time.Now())})
+	}
+	a, err := armor.Encode(w, "PGP MESSAGE", nil)
+	if err != nil {
+		return nil, err
+	}
+	m, err := gpgSeal(a, to, false)
+	if err != nil {
+		return nil, err
+	}
+	return armoredWriter{m, a}, nil
+}
+
+// armoredWriter writes the message into its armor; Close ends the message,
+// then the armor.
+type armoredWriter struct {
+	io.WriteCloser
+	armor io.Closer
+}
+
+func (w armoredWriter) Close() error {
+	if err := w.WriteCloser.Close(); err != nil {
+		return err
+	}
+	return w.armor.Close()
 }
 
 // gpgInput turns the content c into its OpenPGP message to the recipients,
-// named <name>.gpg. A file is encrypted into an unlinked temporary file,
+// named <name>.gpg, or armored and named <name>.asc (secret.asc without a
+// name) for a secret, which the reveal page then offers for download. A file is encrypted into an unlinked temporary file,
 // which is sent with its signed size and hash like any file; a stream is
 // encrypted while it is sent.
-func gpgInput(c content, closer io.Closer, to []*openpgp.Entity, meta *wire.Meta) (content, io.Closer, error) {
-	if meta.File != "" {
+func gpgInput(c content, closer io.Closer, to []*openpgp.Entity, armored bool, meta *wire.Meta) (content, io.Closer, error) {
+	switch {
+	case armored && meta.File == "":
+		meta.File = "secret.asc"
+	case armored:
+		meta.File += ".asc"
+	case meta.File != "":
 		meta.File += ".gpg"
 	}
 	if c.source == nil {
 		pr, pw := io.Pipe()
 		go func() {
-			w, err := gpgSeal(pw, to)
+			w, err := gpgSeal(pw, to, armored)
 			if err == nil {
 				if _, err = io.Copy(w, c.body); err == nil {
 					err = w.Close()
@@ -84,7 +120,7 @@ func gpgInput(c content, closer io.Closer, to []*openpgp.Entity, meta *wire.Meta
 	}
 	both := closers{tmp, closer}
 	h := sha256.New()
-	w, err := gpgSeal(io.MultiWriter(tmp, h), to)
+	w, err := gpgSeal(io.MultiWriter(tmp, h), to, armored)
 	if err == nil {
 		if _, err = io.Copy(w, io.NewSectionReader(c.source, 0, c.size)); err == nil {
 			err = w.Close()

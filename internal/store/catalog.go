@@ -37,8 +37,8 @@ var hookAliasSidecar = func() {}
 
 // FromConfig is the Local of a local storage.
 func FromConfig(st *config.Storage) Local {
-	return Local{Base: st.Base, Conflict: st.Conflict, Catalog: st.Catalog, Shard: st.Shard, Dedup: st.Dedup == nil || *st.Dedup,
-		Hardlink: st.Hardlink == nil || *st.Hardlink, MaxLinks: st.MaxLinks(), Nested: st.Nested(), Permanent: st.Permanents()}
+	return Local{Base: st.Base, Conflict: st.Conflict.Mode, Catalog: st.Catalog, Shard: st.Shard, Dedup: st.Conflict.Identical != "store",
+		Hardlink: !st.Hardlink.Off, MaxLinks: st.MaxLinks(), Nested: st.Nested(), Permanent: st.Permanents()}
 }
 
 // Batch returns l with catalog rebuilds deferred: its changes only mark

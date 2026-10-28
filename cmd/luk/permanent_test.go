@@ -52,7 +52,7 @@ func TestSendPermanentUsage(t *testing.T) {
 	}{
 		{[]string{"--once"}, "--permanent takes no --once"},
 		{[]string{"--secret"}, "--permanent takes no --secret"},
-		{[]string{"--portal"}, "--permanent takes no --portal"},
+		{[]string{"--indirect"}, "--permanent takes no --indirect"},
 		{[]string{"--private"}, "--permanent takes no --private"},
 		{[]string{"--mutable"}, "--permanent takes no --mutable"},
 		{[]string{"--pretty-url"}, "--permanent takes no --pretty-url"},

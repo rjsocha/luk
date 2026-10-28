@@ -196,7 +196,7 @@ type uploadSlots struct {
 func (us *uploadSlots) acquire(owner string, lim config.UploadLimits) (func(), error) {
 	us.mu.Lock()
 	defer us.mu.Unlock()
-	if us.total >= lim.Total || us.by[owner] >= lim.Identity {
+	if us.total >= lim.Max || us.by[owner] >= lim.Owner.Max {
 		return nil, &httpError{code: http.StatusTooManyRequests, msg: "too many open uploads", retry: time.Second}
 	}
 	if us.by == nil {

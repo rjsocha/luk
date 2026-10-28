@@ -453,6 +453,30 @@ func TestPortalGetOnce(t *testing.T) {
 	}
 }
 
+// A luk client (luk get) sends its signature headers; on an expose without
+// auth.ssh nothing verifies them, they only tell a client from a link
+// preview, so the bare URL of a portal upload answers the content.
+func TestPortalLukClient(t *testing.T) {
+	luk := map[string]string{wire.HeaderSignature: "x"}
+	for _, portal := range []string{wire.PortalReveal, wire.PortalDownload} {
+		e := newEnv(t, nil)
+		e.put(t, "r", secret, store.Sidecar{Client: wire.Meta{Portal: portal, Once: true, File: "secret.asc"}})
+		if w := e.do(t, "GET", "/d/r", nil); w.Code != 200 || strings.Contains(w.Body.String(), secret) {
+			t.Fatalf("%s: browser GET: %d", portal, w.Code)
+		}
+		w := e.do(t, "HEAD", "/d/r", luk)
+		if w.Code != 200 || w.Header().Get("Content-Length") != strconv.Itoa(len(secret)) || !strings.Contains(w.Header().Get("Content-Disposition"), "secret.asc") {
+			t.Fatalf("%s: HEAD: %d %v", portal, w.Code, w.Header())
+		}
+		if w := e.do(t, "GET", "/d/r", luk); w.Code != 200 || w.Body.String() != secret {
+			t.Fatalf("%s: GET: %d %q", portal, w.Code, w.Body.String())
+		}
+		if w := e.do(t, "GET", "/d/r", luk); w.Code != 404 {
+			t.Errorf("%s: once upload served twice: %d", portal, w.Code)
+		}
+	}
+}
+
 func TestPortalGetLimits(t *testing.T) {
 	e := newEnv(t, nil)
 	e.put(t, "big", strings.Repeat("a", MaxReveal+1), store.Sidecar{Client: wire.Meta{Portal: wire.PortalReveal, Once: true}})
@@ -794,7 +818,10 @@ func TestPortalLandingBinaryScript(t *testing.T) {
 			t.Errorf("missing %q in %s", want, body)
 		}
 	}
-	if body := e.do(t, "GET", "/d/f", nil).Body.String(); !strings.Contains(body, `data-name="id &lt;rsa&gt;"`) {
+	if body := e.do(t, "GET", "/d/f", nil).Body.String(); !strings.Contains(body, `data-name="id &lt;rsa&gt;" data-named>Download</button>`) {
 		t.Errorf("save name of a named upload: %s", body)
+	}
+	if body := e.do(t, "GET", "/d/r", nil).Body.String(); !strings.Contains(body, `data-name="r.bin">Save binary</button>`) {
+		t.Errorf("unnamed upload offered for download: %s", body)
 	}
 }

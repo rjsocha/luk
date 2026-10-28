@@ -225,8 +225,8 @@ func acmeRows(cfg *config.Config, running bool, now time.Time) ([]acmeRow, error
 		if l.TLS == nil || l.TLS.Mode != "acme" {
 			continue
 		}
-		d := cfg.ACMECacheDir(l.TLS.Directory)
-		urls[d] = l.TLS.Directory
+		d := cfg.ACMECacheDir(l.TLS.ACME.Server)
+		urls[d] = l.TLS.ACME.Server
 		if users[d] == nil {
 			users[d] = map[string][]string{}
 		}
@@ -333,7 +333,7 @@ func renewACME(cfg *config.Config, host string, timeout time.Duration, w io.Writ
 	if !running {
 		return errors.New("lukd receive is not running")
 	}
-	dir := cfg.ACMECacheDir(l.TLS.Directory)
+	dir := cfg.ACMECacheDir(l.TLS.ACME.Server)
 	nonce, err := acmecert.WriteRequest(dir, host)
 	if err != nil {
 		return err
@@ -394,7 +394,7 @@ func revokeACME(cfg *config.Config, host string, reason acme.CRLReasonCode, yes 
 	if err != nil {
 		return err
 	}
-	dir := cfg.ACMECacheDir(l.TLS.Directory)
+	dir := cfg.ACMECacheDir(l.TLS.ACME.Server)
 	leaf, err := acmecert.LoadLeaf(dir, host)
 	if err != nil {
 		return err
@@ -404,7 +404,7 @@ func revokeACME(cfg *config.Config, host string, reason acme.CRLReasonCode, yes 
 			return errors.New("refusing to revoke without --yes: stdin is not a terminal")
 		}
 		fmt.Fprintf(errw, "Revoke the certificate of %s (serial %s, not after %s) at %s? [y/N] ",
-			host, acmecert.Serial(leaf), leaf.NotAfter.UTC().Format(time.RFC3339), l.TLS.Directory)
+			host, acmecert.Serial(leaf), leaf.NotAfter.UTC().Format(time.RFC3339), l.TLS.ACME.Server)
 		line, _ := bufio.NewReader(in).ReadString('\n')
 		if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
 			return errors.New("not revoked")
@@ -412,7 +412,7 @@ func revokeACME(cfg *config.Config, host string, reason acme.CRLReasonCode, yes 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if _, err := acmecert.Revoke(ctx, l.TLS.Directory, dir, host, reason, acmeClient); err != nil {
+	if _, err := acmecert.Revoke(ctx, l.TLS.ACME.Server, dir, host, reason, acmeClient); err != nil {
 		return fmt.Errorf("%s: revoke: %w", host, err)
 	}
 	fmt.Fprintf(w, "%s: revoked serial %s\n", host, acmecert.Serial(leaf))

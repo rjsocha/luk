@@ -49,9 +49,11 @@ type jobsFile struct {
 		TLS *struct {
 			Cert string `yaml:"cert"`
 			Key  string `yaml:"key"`
-			EAB  struct {
-				KeyFile string `yaml:"key_file"`
-			} `yaml:"eab"`
+			ACME struct {
+				EAB struct {
+					File string `yaml:"file"`
+				} `yaml:"eab"`
+			} `yaml:"acme"`
 		} `yaml:"tls"`
 	} `yaml:"listen"`
 	Auth struct {
@@ -61,33 +63,31 @@ type jobsFile struct {
 		Keys string `yaml:"keys"`
 	} `yaml:"gpg"`
 	Endpoint map[string]*struct {
-		Path   string `yaml:"path"`
 		Secret *struct {
 			Path string `yaml:"path"`
 		} `yaml:"secret"`
 	} `yaml:"endpoint"`
 	Storage map[string]*struct {
-		Base string `yaml:"base"`
+		Base string `yaml:"directory"`
 	} `yaml:"storage"`
 }
 
 // paths are the absolute paths of f that hold data or secrets of lukd
 // besides root: the TLS files and the EAB key file of the listeners,
-// auth.nonces, gpg.keys, the queues and secret queues of the endpoints
-// and the bases of the storages. A relative path lies under root (lukd
+// auth.nonces, gpg.keys, the secret queues of the endpoints and the bases
+// of the storages; the endpoint queues lie under root. A relative path lies under root (lukd
 // anchors it there).
 func (f *jobsFile) paths() []string {
 	ps := []string{f.Auth.Nonces, f.GPG.Keys}
 	for _, l := range f.Listen {
 		if l != nil && l.TLS != nil {
-			ps = append(ps, l.TLS.Cert, l.TLS.Key, l.TLS.EAB.KeyFile)
+			ps = append(ps, l.TLS.Cert, l.TLS.Key, l.TLS.ACME.EAB.File)
 		}
 	}
 	for _, e := range f.Endpoint {
 		if e == nil {
 			continue
 		}
-		ps = append(ps, e.Path)
 		if e.Secret != nil {
 			ps = append(ps, e.Secret.Path)
 		}

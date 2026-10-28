@@ -210,8 +210,8 @@ listen:
   l: {addr: "127.0.0.1:1", public: "http://l.vm"}
   m: {addr: "127.0.0.1:2", public: "http://m.vm"}
 storage:
-  outer: {type: local, base: ` + outer + `, path: x, expose: outer}
-  inner: {type: local, base: ` + inner + `, path: x, expose: inner}
+  outer: {directory: ` + outer + `, path: x, expose: outer}
+  inner: {directory: ` + inner + `, path: x, expose: inner}
 expose:
   outer: {listen: [l, m], path: /, index: true}
   inner: {listen: l, path: /v/, index: true}

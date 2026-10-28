@@ -27,8 +27,7 @@ func TestRelativePathsResolveInData(t *testing.T) {
 	src := strings.NewReplacer(
 		"cert: /tmp/c.crt", "cert: tls/c.crt",
 		"key: /tmp/c.key", "key: tls/c.key",
-		"path: /queue/backup", "path: queue/backup",
-		"base: /storage/archive", "base: storage/archive",
+		"directory: /storage/archive", "directory: storage/archive",
 	).Replace("root: /srv/luk\n" + good)
 	c, err := Parse([]byte(src))
 	if err != nil {
@@ -47,10 +46,8 @@ func TestRelativePathsResolveInData(t *testing.T) {
 
 func TestPathsOutsideData(t *testing.T) {
 	for repl, want := range map[string]string{
-		"path: /queue/backup|path: ../root/q":                `endpoint.backup.path: "../root/q" escapes /var/lib/luk/data`,
-		"path: /queue/backup|path: /var/lib/luk/root/q":      "endpoint.backup.path: /var/lib/luk/root/q lies in /var/lib/luk/root",
-		"base: /storage/archive|base: /var/lib/luk/root":     "storage.archive.base: /var/lib/luk/root lies in /var/lib/luk/root",
-		"cert: /tmp/c.crt|cert: /var/lib/luk/root/job/c.crt": "listen.main.tls.cert: /var/lib/luk/root/job/c.crt lies in /var/lib/luk/root",
+		"directory: /storage/archive|directory: /var/lib/luk/root": "storage.archive.directory: /var/lib/luk/root lies in /var/lib/luk/root",
+		"cert: /tmp/c.crt|cert: /var/lib/luk/root/job/c.crt":       "listen.main.tls.cert: /var/lib/luk/root/job/c.crt lies in /var/lib/luk/root",
 	} {
 		old, nw, _ := strings.Cut(repl, "|")
 		_, err := Parse([]byte(strings.Replace(good, old, nw, 1)))

@@ -150,7 +150,7 @@ func resolveLink(cfg *config.Config, raw string) (*linkTarget, error) {
 	for _, xn := range sortedKeys(cfg.Expose) {
 		x := cfg.Expose[xn]
 		name, st, ok := cfg.StorageServedBy(xn)
-		if !ok || st.Type != "local" || len(x.Path) <= bestLen || !strings.HasPrefix(u.Path, x.Path) {
+		if !ok || len(x.Path) <= bestLen || !strings.HasPrefix(u.Path, x.Path) {
 			continue
 		}
 		if !slices.ContainsFunc(x.Listen, func(ln string) bool { return linkHost(cfg.Listen[ln], host) }) {
@@ -331,7 +331,7 @@ func (s *Server) linkList(cfg *config.Config, ep *config.Endpoint, id *wire.Iden
 	var items []item
 	for _, sn := range storages {
 		st := cfg.Storage[sn]
-		if st == nil || st.Type != "local" || st.Expose == "" {
+		if st == nil || st.Expose == "" {
 			return 0, nil, fail(http.StatusUnprocessableEntity, "storage %s of endpoint %s is not an exposed local storage", sn, ep.Name)
 		}
 		l := store.FromConfig(st)

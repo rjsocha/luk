@@ -9,7 +9,7 @@ import (
 )
 
 func TestEncryptInsecure(t *testing.T) {
-	c, err := Parse([]byte(encryptConfig("", "      - encrypt:\n          wkd: [a@b.example]\n"+
+	c, err := Parse([]byte(encryptConfig("", "      - encrypt:\n          recipients: {wkd: [a@b.example]}\n"+
 		"          insecure:\n            symmetric: [client-a, other.b]\n"+
 		"            openssl:\n              key: client-a\n              files: ['*-latest.sql.zst', 'x?.tar']\n")))
 	if err != nil {
@@ -30,7 +30,7 @@ func TestEncryptInsecure(t *testing.T) {
 		t.Fatal("match")
 	}
 
-	c, err = Parse([]byte(encryptConfig("", "      - encrypt: {wkd: [a@b.example], insecure: {openssl: {key: x, files: [a]}}}\n")))
+	c, err = Parse([]byte(encryptConfig("", "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {openssl: {key: x, files: [a]}}}\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,19 +41,19 @@ func TestEncryptInsecure(t *testing.T) {
 
 func TestEncryptInsecureValidation(t *testing.T) {
 	cases := map[string]string{
-		"empty insecure":        "      - encrypt: {wkd: [a@b.example], insecure: {}}\n",
+		"empty insecure":        "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {}}\n",
 		"no recipient":          "      - encrypt: {insecure: {symmetric: [a]}}\n",
-		"bad symmetric name":    "      - encrypt: {wkd: [a@b.example], insecure: {symmetric: [../a]}}\n",
-		"upper symmetric name":  "      - encrypt: {wkd: [a@b.example], insecure: {symmetric: [A]}}\n",
-		"duplicate symmetric":   "      - encrypt: {wkd: [a@b.example], insecure: {symmetric: [a, a]}}\n",
-		"openssl without key":   "      - encrypt: {wkd: [a@b.example], insecure: {openssl: {files: [a]}}}\n",
-		"openssl bad key":       "      - encrypt: {wkd: [a@b.example], insecure: {openssl: {key: .a, files: [a]}}}\n",
-		"openssl without files": "      - encrypt: {wkd: [a@b.example], insecure: {openssl: {key: a}}}\n",
-		"openssl empty files":   "      - encrypt: {wkd: [a@b.example], insecure: {openssl: {key: a, files: []}}}\n",
-		"openssl bad glob":      "      - encrypt: {wkd: [a@b.example], insecure: {openssl: {key: a, files: ['[a']}}}\n",
-		"openssl empty glob":    "      - encrypt: {wkd: [a@b.example], insecure: {openssl: {key: a, files: ['']}}}\n",
-		"openssl unknown key":   "      - encrypt: {wkd: [a@b.example], insecure: {openssl: {key: a, files: [a], bogus: 1}}}\n",
-		"unknown insecure key":  "      - encrypt: {wkd: [a@b.example], insecure: {bogus: 1}}\n",
+		"bad symmetric name":    "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {symmetric: [../a]}}\n",
+		"upper symmetric name":  "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {symmetric: [A]}}\n",
+		"duplicate symmetric":   "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {symmetric: [a, a]}}\n",
+		"openssl without key":   "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {openssl: {files: [a]}}}\n",
+		"openssl bad key":       "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {openssl: {key: .a, files: [a]}}}\n",
+		"openssl without files": "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {openssl: {key: a}}}\n",
+		"openssl empty files":   "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {openssl: {key: a, files: []}}}\n",
+		"openssl bad glob":      "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {openssl: {key: a, files: ['[a']}}}\n",
+		"openssl empty glob":    "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {openssl: {key: a, files: ['']}}}\n",
+		"openssl unknown key":   "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {openssl: {key: a, files: [a], bogus: 1}}}\n",
+		"unknown insecure key":  "      - encrypt: {recipients: {wkd: [a@b.example]}, insecure: {bogus: 1}}\n",
 	}
 	for name, step := range cases {
 		if _, err := Parse([]byte(encryptConfig("", step))); err == nil {
