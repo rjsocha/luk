@@ -299,7 +299,8 @@ func TestAcceptKey(t *testing.T) {
 func TestAcceptHostCertificate(t *testing.T) {
 	f := newFixture(t)
 	host := newSigner(t)
-	c := &ssh.Certificate{Key: host.PublicKey(), CertType: ssh.HostCert, KeyId: "luk.vm", Serial: 9, ValidBefore: ssh.CertTimeInfinity}
+	c := &ssh.Certificate{Key: host.PublicKey(), CertType: ssh.HostCert, KeyId: "luk.vm", Serial: 9,
+		ValidPrincipals: []string{"luk.vm"}, ValidBefore: ssh.CertTimeInfinity}
 	if err := c.SignCert(rand.Reader, f.hostCA); err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +472,8 @@ func TestAuthBeforeSpace(t *testing.T) {
 func (f *fixture) hostCert(t *testing.T) ssh.Signer {
 	t.Helper()
 	host := newSigner(t)
-	c := &ssh.Certificate{Key: host.PublicKey(), CertType: ssh.HostCert, KeyId: "luk.vm", Serial: 9, ValidBefore: ssh.CertTimeInfinity}
+	c := &ssh.Certificate{Key: host.PublicKey(), CertType: ssh.HostCert, KeyId: "luk.vm", Serial: 9,
+		ValidPrincipals: []string{"luk.vm"}, ValidBefore: ssh.CertTimeInfinity}
 	if err := c.SignCert(rand.Reader, f.hostCA); err != nil {
 		t.Fatal(err)
 	}

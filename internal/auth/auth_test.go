@@ -32,9 +32,14 @@ func cert(t *testing.T, ca ssh.Signer, typ uint32, keyID string, serial uint64, 
 	return certOf(t, ca, signer(t).PublicKey(), typ, keyID, serial, principals, before)
 }
 
-// certOf is cert of the given certified key.
+// certOf is cert of the given certified key. Without principals it takes
+// the Key ID as the only one: a certificate has to carry at least one,
+// and the cases that pass nil do not look at them.
 func certOf(t *testing.T, ca ssh.Signer, key ssh.PublicKey, typ uint32, keyID string, serial uint64, principals []string, before uint64) *ssh.Certificate {
 	t.Helper()
+	if len(principals) == 0 {
+		principals = []string{keyID}
+	}
 	c := &ssh.Certificate{
 		Key: key, CertType: typ, KeyId: keyID, Serial: serial,
 		ValidPrincipals: principals, ValidBefore: before,
@@ -119,6 +124,18 @@ func TestResolveCert(t *testing.T) {
 	}
 	if id, err := a.Resolve(cert(t, userCA, ssh.UserCert, "robert", 2, []string{"robert"}, ssh.CertTimeInfinity), now); err != nil || id.Name != "people:robert" {
 		t.Fatalf("user cert: %v %+v", err, id)
+	}
+}
+
+// TestResolveCertNoPrincipals refuses a certificate bound to no host and
+// to no user. x/crypto no longer signs one, so the principals are dropped
+// after signing; luk's own check runs before CheckCert.
+func TestResolveCertNoPrincipals(t *testing.T) {
+	a, _, hostCA, _ := setup(t)
+	c := cert(t, hostCA, ssh.HostCert, "ping.example", 5, nil, ssh.CertTimeInfinity)
+	c.ValidPrincipals = nil
+	if _, err := a.Resolve(c, time.Now()); err == nil || !strings.Contains(err.Error(), `certificate "ping.example": no principals`) {
+		t.Fatalf("%v", err)
 	}
 }
 

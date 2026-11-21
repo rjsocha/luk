@@ -73,13 +73,15 @@ func (a *Authenticator) resolveCert(c *ssh.Certificate, now time.Time) (*wire.Id
 		if err := sshsig.CheckKey(c.Key); err != nil {
 			return nil, fmt.Errorf("certificate %q: %w", c.KeyId, err)
 		}
-		// CheckCert wants a principal; any listed one proves nothing extra,
-		// principals are matched later by the endpoint's allow.
-		principal := ""
-		if len(c.ValidPrincipals) > 0 {
-			principal = c.ValidPrincipals[0]
+		// A certificate without principals is bound to no host and to no
+		// user, so luk refuses it; x/crypto refuses it as well. CheckCert
+		// wants one of the listed principals, and any of them proves
+		// nothing extra: which one is matched is decided later by the
+		// endpoint's allow.
+		if len(c.ValidPrincipals) == 0 {
+			return nil, fmt.Errorf("certificate %q: no principals", c.KeyId)
 		}
-		if err := checker.CheckCert(principal, c); err != nil {
+		if err := checker.CheckCert(c.ValidPrincipals[0], c); err != nil {
 			return nil, fmt.Errorf("certificate %q: %w", c.KeyId, err)
 		}
 		return &wire.Identity{

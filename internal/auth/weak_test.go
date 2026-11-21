@@ -41,7 +41,8 @@ func TestResolveCertWeak(t *testing.T) {
 	ca := rsaKey(t, 2048)
 	a := New(config.Auth{CA: []config.CA{{Name: "people", Type: "user", Parsed: []ssh.PublicKey{ca.PublicKey()}}}})
 	mk := func(key ssh.PublicKey, s ssh.Signer) *ssh.Certificate {
-		c := &ssh.Certificate{Key: key, CertType: ssh.UserCert, KeyId: "u", ValidBefore: ssh.CertTimeInfinity}
+		c := &ssh.Certificate{Key: key, CertType: ssh.UserCert, KeyId: "u",
+			ValidPrincipals: []string{"u"}, ValidBefore: ssh.CertTimeInfinity}
 		if err := c.SignCert(rand.Reader, s); err != nil {
 			t.Fatal(err)
 		}

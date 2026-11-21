@@ -167,14 +167,14 @@ func TestBackupHostnameUpload(t *testing.T) {
 	f.drop(t, db1, backupMeta("db1.example.net"), "principal")
 	f.drop(t, db1, backupMeta("DB1.Example.NET"), "principal, case")
 	f.drop(t, f.other, wire.Meta{}, "plain key without --backup")
-	f.drop(t, f.hostCertWith(t, "web1"), wire.Meta{}, "certificate without --backup")
+	f.drop(t, f.hostCertWith(t, "web1", "web1.example.net"), wire.Meta{}, "certificate without --backup")
 	for name, c := range map[string]struct {
 		signer   ssh.Signer
 		hostname string
 	}{
-		"principal mismatch":     {db1, "web1.example.net"},
-		"plain key in principal": {f.other, "other"},
-		"no principals":          {f.hostCertWith(t, "web1"), "web1"},
+		"principal mismatch":       {db1, "web1.example.net"},
+		"plain key in principal":   {f.other, "other"},
+		"hostname is no principal": {f.hostCertWith(t, "web1", "web1.example.net"), "web1"},
 	} {
 		rec, _ := f.do(t, req{signer: c.signer, path: "/drop", meta: backupMeta(c.hostname)})
 		body := rec.Body.String()
@@ -204,7 +204,7 @@ func TestBackupHostnameBothLists(t *testing.T) {
 func TestBackupHostnameNoBlock(t *testing.T) {
 	f := newPrivateFixture(t, nil)
 	f.drop(t, f.other, backupMeta("db9.example.net"), "plain")
-	f.drop(t, f.hostCertWith(t, "web1"), backupMeta("db9.example.net"), "certificate")
+	f.drop(t, f.hostCertWith(t, "web1", "web1.example.net"), backupMeta("db9.example.net"), "certificate")
 	rec := f.list(t, listReq{signer: f.other})
 	if strings.Contains(rec.Body.String(), "backup_hostname") {
 		t.Fatalf("listing: %s", rec.Body)

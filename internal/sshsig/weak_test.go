@@ -1,7 +1,6 @@
 package sshsig
 
 import (
-	"crypto/dsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"strings"
@@ -9,6 +8,13 @@ import (
 
 	"golang.org/x/crypto/ssh"
 )
+
+// dssKey is a public key of the ssh-dss type. x/crypto no longer parses
+// or builds a DSA key, so no real one reaches CheckKey any more; the
+// refusal stays all the same and is reached here by the type alone.
+type dssKey struct{ ssh.PublicKey }
+
+func (dssKey) Type() string { return ssh.KeyAlgoDSA }
 
 func rsaSigner(t *testing.T, bits int) ssh.Signer {
 	t.Helper()
@@ -62,25 +68,15 @@ func TestVerifyRefusesWeakKeys(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "RSA key of 1024 bits, at least 2048 required") {
 		t.Fatalf("rsa 1024: %v", err)
 	}
-	var priv dsa.PrivateKey
-	if err := dsa.GenerateParameters(&priv.Parameters, rand.Reader, dsa.L1024N160); err != nil {
-		t.Fatal(err)
-	}
-	if err := dsa.GenerateKey(&priv, rand.Reader); err != nil {
-		t.Fatal(err)
-	}
-	ds, err := ssh.NewSignerFromKey(&priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckKey(ds.PublicKey()); err == nil || err.Error() != "ssh-dss keys are not accepted" {
+	if err := CheckKey(dssKey{}); err == nil || err.Error() != "ssh-dss keys are not accepted" {
 		t.Fatalf("dsa key: %v", err)
 	}
-	if err := signAs(t, ds, "", m).Verify("ns@v1", m); err == nil {
-		t.Fatal("dsa signature verified")
+	if err := CheckFormat(ssh.KeyAlgoDSA); err == nil || !strings.Contains(err.Error(), "signature format ssh-dss (SHA-1) is not accepted") {
+		t.Fatalf("dsa format: %v", err)
 	}
 	// A certificate is judged by its certified key.
-	c := &ssh.Certificate{Key: rsaSigner(t, 1024).PublicKey(), CertType: ssh.UserCert, KeyId: "weak", ValidBefore: ssh.CertTimeInfinity}
+	c := &ssh.Certificate{Key: rsaSigner(t, 1024).PublicKey(), CertType: ssh.UserCert, KeyId: "weak",
+		ValidPrincipals: []string{"weak"}, ValidBefore: ssh.CertTimeInfinity}
 	if err := c.SignCert(rand.Reader, ed25519Signer(t)); err != nil {
 		t.Fatal(err)
 	}

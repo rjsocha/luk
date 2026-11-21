@@ -143,6 +143,11 @@ const MinRSABits = 2048
 // CheckKey refuses keys too weak to be trusted: DSA (ssh-dss, 1024 bits
 // with SHA-1) and RSA below MinRSABits. For a certificate it checks the
 // certified key; its CA key is the caller's (a configured key).
+//
+// x/crypto dropped DSA in v0.59.0 and no longer parses an ssh-dss key, so
+// nothing luk reads can reach that branch any more. It stays as the
+// statement that luk does not accept such keys, and as a backstop for a
+// key that reaches CheckKey by any other route.
 func CheckKey(pub ssh.PublicKey) error {
 	if c, ok := pub.(*ssh.Certificate); ok {
 		pub = c.Key

@@ -13,3 +13,4 @@
 /.claude/
 /packaging/build/
 /contrib/demo/luk.cast
+__pycache__/

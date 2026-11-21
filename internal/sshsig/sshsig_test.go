@@ -80,10 +80,11 @@ func TestCertificateSigner(t *testing.T) {
 	ca := ed25519Signer(t)
 	host := ed25519Signer(t)
 	cert := &ssh.Certificate{
-		Key:         host.PublicKey(),
-		CertType:    ssh.HostCert,
-		KeyId:       "h1",
-		ValidBefore: ssh.CertTimeInfinity,
+		Key:             host.PublicKey(),
+		CertType:        ssh.HostCert,
+		KeyId:           "h1",
+		ValidPrincipals: []string{"h1"},
+		ValidBefore:     ssh.CertTimeInfinity,
 	}
 	if err := cert.SignCert(rand.Reader, ca); err != nil {
 		t.Fatal(err)

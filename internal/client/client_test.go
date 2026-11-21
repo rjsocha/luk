@@ -242,7 +242,8 @@ func TestLoadSignerFileWithCert(t *testing.T) {
 	}
 	ca := newSigner(t)
 	sshPub, _ := ssh.NewPublicKey(pub)
-	c := &ssh.Certificate{Key: sshPub, CertType: ssh.HostCert, KeyId: "luk.vm", ValidBefore: ssh.CertTimeInfinity}
+	c := &ssh.Certificate{Key: sshPub, CertType: ssh.HostCert, KeyId: "luk.vm",
+		ValidPrincipals: []string{"luk.vm"}, ValidBefore: ssh.CertTimeInfinity}
 	if err := c.SignCert(rand.Reader, ca); err != nil {
 		t.Fatal(err)
 	}

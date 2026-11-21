@@ -272,7 +272,8 @@ func TestReloadKeys(t *testing.T) {
 func TestReloadAddsCAFile(t *testing.T) {
 	e := newReloadEnv(t)
 	ca, host := newSigner(t), newSigner(t)
-	c := &ssh.Certificate{Key: host.PublicKey(), CertType: ssh.HostCert, KeyId: "luk.vm", ValidBefore: ssh.CertTimeInfinity}
+	c := &ssh.Certificate{Key: host.PublicKey(), CertType: ssh.HostCert, KeyId: "luk.vm",
+		ValidPrincipals: []string{"luk.vm"}, ValidBefore: ssh.CertTimeInfinity}
 	if err := c.SignCert(rand.Reader, ca); err != nil {
 		t.Fatal(err)
 	}

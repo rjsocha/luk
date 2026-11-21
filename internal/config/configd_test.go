@@ -295,7 +295,7 @@ func TestKeyDTwoKeysOneIdentity(t *testing.T) {
 func TestKeyDErrors(t *testing.T) {
 	_, k1 := pubLine(t, "")
 	ca, caLine := pubLine(t, "")
-	crt := &ssh.Certificate{Key: ca.PublicKey(), CertType: ssh.UserCert, KeyId: "x"}
+	crt := &ssh.Certificate{Key: ca.PublicKey(), CertType: ssh.UserCert, KeyId: "x", ValidPrincipals: []string{"x"}}
 	if err := crt.SignCert(rand.Reader, ca); err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestKeyDCA(t *testing.T) {
 func TestKeyDCAErrors(t *testing.T) {
 	ca, k1 := pubLine(t, "")
 	_, k2 := pubLine(t, "")
-	crt := &ssh.Certificate{Key: ca.PublicKey(), CertType: ssh.HostCert, KeyId: "x"}
+	crt := &ssh.Certificate{Key: ca.PublicKey(), CertType: ssh.HostCert, KeyId: "x", ValidPrincipals: []string{"x"}}
 	if err := crt.SignCert(rand.Reader, ca); err != nil {
 		t.Fatal(err)
 	}

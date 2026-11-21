@@ -562,7 +562,8 @@ func TestLinkOwnerKeyDir(t *testing.T) {
 func (f *fixture) certSigner(t *testing.T, keyID string) ssh.Signer {
 	t.Helper()
 	host := newSigner(t)
-	c := &ssh.Certificate{Key: host.PublicKey(), CertType: ssh.HostCert, KeyId: keyID, ValidBefore: ssh.CertTimeInfinity}
+	c := &ssh.Certificate{Key: host.PublicKey(), CertType: ssh.HostCert, KeyId: keyID,
+		ValidPrincipals: []string{keyID}, ValidBefore: ssh.CertTimeInfinity}
 	if err := c.SignCert(rand.Reader, f.hostCA); err != nil {
 		t.Fatal(err)
 	}
